@@ -2939,6 +2939,37 @@ mod devices {
         assert!(e.rpc(&mut con, "pair_begin", json!({"invite": {"guest": "g_nobody"}, "expiry": null}))["err"].is_string());
     }
 
+    /// A removed guest (every device revoked by the console's Remove) no
+    /// longer holds their name: an invite by it, in any case, RE-ADMITS that
+    /// same person, so a thread names their old posts and new ones as one
+    /// guest (v0.52.0 three-VM run: "A guest named Bret exists (0 devices)").
+    /// A guest with a device still enrolled keeps the name taken.
+    #[test]
+    fn an_invite_by_a_removed_guests_name_readmits_that_guest() {
+        let e = engine("readmit", vec![]);
+        e.bind_loopback();
+        let mut con = e.connect(Caller::console());
+        let r = e.rpc(&mut con, "pair_begin", json!({"invite": {"name": "Bret"}, "expiry": null}));
+        let uri = r["ok"]["uri"].as_str().unwrap_or_else(|| panic!("{r}")).to_string();
+        let mut p = e.attempt(&uri, &Attempt::desktop("Bret's MacBook")).unwrap();
+        assert_eq!(e.line(&mut p.tls, Duration::from_secs(5)), Some(json!({"pending": true})));
+        let bret = e.rpc(&mut con, "pair_decide", json!({"allow": true}))["ok"]["principal"].as_str().unwrap().to_string();
+        e.closed_as(&mut con);
+        assert!(e.rpc(&mut con, "pair_begin", json!({"invite": {"name": "bret"}, "expiry": null}))["err"].is_string(), "a live guest keeps the name");
+        assert!(e.rpc(&mut con, "guest_remove", json!({"principal": bret}))["ok"].is_object());
+        let r = e.rpc(&mut con, "pair_begin", json!({"invite": {"name": " bret "}, "expiry": null}));
+        let uri = r["ok"]["uri"].as_str().unwrap_or_else(|| panic!("the name is free again: {r}")).to_string();
+        let mut p = e.attempt(&uri, &Attempt::desktop("Bret's new MacBook")).unwrap();
+        assert_eq!(e.line(&mut p.tls, Duration::from_secs(5)), Some(json!({"pending": true})));
+        let st = e.status(&mut con);
+        assert_eq!(st["request"]["invite"], json!({"kind": "existing", "id": bret, "name": "Bret"}), "{st}");
+        assert_eq!(e.rpc(&mut con, "pair_decide", json!({"allow": true}))["ok"]["principal"], json!(bret));
+        e.closed_as(&mut con);
+        let guests = e.reg.guests().unwrap();
+        assert_eq!(guests.len(), 1, "one Bret, old devices and new");
+        assert_eq!(guests[0].devices.iter().filter(|d| d.revoked_at.is_none()).count(), 1);
+    }
+
     /// §2.2 step 5, §2.4: ANY failure closes the window, with no retry and
     /// nothing said — a proof keyed with another secret, bound to another
     /// session, or made for another key; a frame that is malformed, too long,

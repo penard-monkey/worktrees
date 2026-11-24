@@ -1,0 +1,2429 @@
+{
+ "run": "20261114-184255-v1-release-json-flag-plan",
+ "variant": "v1-release",
+ "task": "json-flag-plan",
+ "persons": 3,
+ "snapshot": null,
+ "started_at": 1794710575.770405,
+ "intents": [
+  {
+   "i": 0,
+   "who": "bret",
+   "on": "dana",
+   "act": "open_share",
+   "args": {},
+   "t_start": 1794710649.653169,
+   "t_end": 1794710651.165177,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 1,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "guest g_sb4je22qe362gkc4usyremylae is asked",
+   "shots": [
+    "i00-open_share-owner.jpg",
+    "i00-open_share-guest.jpg",
+    "i00-open_share-third.jpg"
+   ],
+   "pending": [
+    "dana:join:s_dpwtnfoay75urk32:g_sb4je22qe362gkc4usyremylae"
+   ],
+   "files": {
+    "docs/notes/group-chat-test.md": null
+   }
+  },
+  {
+   "i": 1,
+   "who": "dana",
+   "on": "dana",
+   "act": "allow",
+   "args": {
+    "guest": "bret"
+   },
+   "t_start": 1794710698.55542,
+   "t_end": 1794710699.6351318,
+   "inputs": {
+    "owner": {
+     "click": 1,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "allowed",
+   "guest": "g_sb4je22qe362gkc4usyremylae",
+   "shots": [
+    "i01-allow-owner.jpg",
+    "i01-allow-guest.jpg",
+    "i01-allow-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": null
+   }
+  },
+  {
+   "i": 2,
+   "who": "dana",
+   "on": "dana",
+   "act": "open_thread",
+   "args": {},
+   "t_start": 1794710705.745331,
+   "t_end": 1794710706.474431,
+   "inputs": {
+    "owner": {
+     "click": 1,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "n/a",
+   "proof": "UI only; proved by the next use_these",
+   "shots": [
+    "i02-open_thread-owner.jpg",
+    "i02-open_thread-guest.jpg",
+    "i02-open_thread-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": null
+   }
+  },
+  {
+   "i": 3,
+   "who": "cy",
+   "on": "dana",
+   "act": "open_share",
+   "args": {},
+   "t_start": 1794710711.446314,
+   "t_end": 1794710712.763438,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 1,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "guest g_2oiqglzwaaogzffvp5bijlb5y4 is allowed",
+   "shots": [
+    "i03-open_share-owner.jpg",
+    "i03-open_share-guest.jpg",
+    "i03-open_share-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": null
+   }
+  },
+  {
+   "i": 4,
+   "who": "dana",
+   "on": "dana",
+   "act": "send_task",
+   "args": {
+    "text": "Create docs/notes/group-chat-test.md with a five-line plan for adding a --json flag to the worktrees status command. Do not run git. Keep it short."
+   },
+   "t_start": 1794710794.4008331,
+   "t_end": 1794710796.594215,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "turns 1 -> 2",
+   "shots": [
+    "i04-send_task-owner.jpg",
+    "i04-send_task-guest.jpg",
+    "i04-send_task-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": null
+   }
+  },
+  {
+   "i": 5,
+   "who": "dana",
+   "on": "dana",
+   "act": "wait",
+   "args": {
+    "until": "agent_idle",
+    "max_s": 180
+   },
+   "t_start": 1794710801.176376,
+   "t_end": 1794710809.946638,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "agent idle after 9s",
+   "shots": [
+    "i05-wait-owner.jpg",
+    "i05-wait-guest.jpg",
+    "i05-wait-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "39ebba6be9f020b3"
+   }
+  },
+  {
+   "i": 6,
+   "who": "bret",
+   "on": "dana",
+   "act": "post",
+   "args": {
+    "text": {
+     "generate": "Ask, in one sentence, what exit code the plan gives when the place does not exist.",
+     "fallback": "The plan should say what the exit code is when the place does not exist."
+    }
+   },
+   "t_start": 1794710814.375206,
+   "t_end": 1794710823.939195,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 1,
+     "key": 1,
+     "type": 1
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "thread seq 3",
+   "seq": 3,
+   "at": 1794710823,
+   "text": "What exit code does the plan give for `status --json` when the worktree path doesn't exist, and does it still print a JSON error object to stdout or just write to stderr?",
+   "landed_text": "What exit code does the plan give for `status --json` when the worktree path doesn't exist, and does it still print a JSON error object to stdout or just write to stderr?",
+   "text_intact": true,
+   "dash_mangled": false,
+   "shots": [
+    "i06-post-owner.jpg",
+    "i06-post-guest.jpg",
+    "i06-post-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "39ebba6be9f020b3"
+   }
+  },
+  {
+   "i": 7,
+   "who": "bret",
+   "on": "dana",
+   "act": "post",
+   "args": {
+    "text": "Use --json and --no-color here"
+   },
+   "t_start": 1794710833.4465668,
+   "t_end": 1794710836.2368739,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 1,
+     "key": 1,
+     "type": 1
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "thread seq 4",
+   "seq": 4,
+   "at": 1794710835,
+   "text": "Use --json and --no-color here",
+   "landed_text": "Use --json and --no-color here",
+   "text_intact": true,
+   "dash_mangled": false,
+   "shots": [
+    "i07-post-owner.jpg",
+    "i07-post-guest.jpg",
+    "i07-post-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "39ebba6be9f020b3"
+   }
+  },
+  {
+   "i": 8,
+   "who": "cy",
+   "on": "dana",
+   "act": "post",
+   "args": {
+    "text": {
+     "generate": "As a second engineer who owns the code that prints status, say in one sentence which field you would want in the JSON.",
+     "fallback": "From the status side: please include the branch and the session state as fields."
+    }
+   },
+   "t_start": 1794710843.6786718,
+   "t_end": 1794710855.661899,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 1,
+     "key": 1,
+     "type": 1
+    }
+   },
+   "proved": "proved",
+   "proof": "thread seq 5",
+   "seq": 5,
+   "at": 1794710855,
+   "text": "I'd want each worktree entry to carry a stable `state` field (e.g. `clean`, `dirty`, `missing`) so the JSON doesn't depend on the colored text the status printer shows, and a missing path can be reported in the same object instead of only on stderr.",
+   "landed_text": "I'd want each worktree entry to carry a stable `state` field (e.g. `clean`, `dirty`, `missing`) so the JSON doesn't depend on the colored text the status printer shows, and a missing path can be reported in the same object instead of only on stderr.",
+   "text_intact": true,
+   "dash_mangled": false,
+   "shots": [
+    "i08-post-owner.jpg",
+    "i08-post-guest.jpg",
+    "i08-post-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "39ebba6be9f020b3"
+   }
+  },
+  {
+   "i": 9,
+   "who": "dana",
+   "on": "dana",
+   "act": "use_these",
+   "args": {
+    "note": ""
+   },
+   "t_start": 1794710863.071388,
+   "t_end": 1794710902.085462,
+   "inputs": {
+    "owner": {
+     "click": 3,
+     "key": 3,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "unproved",
+   "proof": "no shared_with_agent event",
+   "note": false,
+   "shots": [
+    "i09-use_these-owner.jpg",
+    "i09-use_these-guest.jpg",
+    "i09-use_these-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "39ebba6be9f020b3"
+   }
+  },
+  {
+   "i": 10,
+   "who": "dana",
+   "on": "dana",
+   "act": "wait",
+   "args": {
+    "until": "agent_idle",
+    "max_s": 180
+   },
+   "t_start": 1794710906.607158,
+   "t_end": 1794710915.307494,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "agent idle after 9s",
+   "shots": [
+    "i10-wait-owner.jpg",
+    "i10-wait-guest.jpg",
+    "i10-wait-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "39ebba6be9f020b3"
+   }
+  },
+  {
+   "i": 9,
+   "who": "dana",
+   "on": "dana",
+   "act": "use_these",
+   "args": {
+    "note": ""
+   },
+   "t_start": 1794710964.34093,
+   "t_end": 1794710975.19086,
+   "inputs": {
+    "owner": {
+     "click": 3,
+     "key": 3,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "shared posts 3..5 at seq 6; turns 2 -> 3",
+   "first": 3,
+   "last": 5,
+   "at": 1794710973,
+   "note": false,
+   "note_text": "",
+   "sent_to_unshared": false,
+   "shots": [
+    "i09-use_these-owner.jpg",
+    "i09-use_these-guest.jpg",
+    "i09-use_these-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "39ebba6be9f020b3"
+   }
+  },
+  {
+   "i": 10,
+   "who": "dana",
+   "on": "dana",
+   "act": "wait",
+   "args": {
+    "until": "agent_idle",
+    "max_s": 180
+   },
+   "t_start": 1794710979.687253,
+   "t_end": 1794710988.417425,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "agent idle after 9s",
+   "shots": [
+    "i10-wait-owner.jpg",
+    "i10-wait-guest.jpg",
+    "i10-wait-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "39ebba6be9f020b3"
+   }
+  },
+  {
+   "i": 11,
+   "who": "bret",
+   "on": "dana",
+   "act": "read_diff",
+   "args": {},
+   "t_start": 1794711031.523612,
+   "t_end": 1794711031.523773,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "unproved",
+   "proof": "blind spot",
+   "impossible": "V1 shows that a command ran, not the file it wrote (\u00a71)",
+   "shots": [
+    "i11-read_diff-owner.jpg",
+    "i11-read_diff-guest.jpg",
+    "i11-read_diff-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "39ebba6be9f020b3"
+   }
+  },
+  {
+   "i": 12,
+   "who": "bret",
+   "on": "dana",
+   "act": "post",
+   "args": {
+    "text": {
+     "generate": "Having read the latest turn, ask in one sentence for the plan to name one test to add.",
+     "fallback": "Nice. Could the plan name one test to add?"
+    }
+   },
+   "t_start": 1794711036.090621,
+   "t_end": 1794711045.3800619,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 1,
+     "key": 1,
+     "type": 1
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "thread seq 7",
+   "seq": 7,
+   "at": 1794711045,
+   "text": "Can the plan name one test to add, say `status --json` against a missing worktree path, and spell out the expected exit code, the stdout JSON with `state: missing`, and what goes to stderr?",
+   "landed_text": "Can the plan name one test to add, say `status --json` against a missing worktree path, and spell out the expected exit code, the stdout JSON with `state: missing`, and what goes to stderr?",
+   "text_intact": true,
+   "dash_mangled": false,
+   "shots": [
+    "i12-post-owner.jpg",
+    "i12-post-guest.jpg",
+    "i12-post-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "39ebba6be9f020b3"
+   }
+  },
+  {
+   "i": 13,
+   "who": "cy",
+   "on": "dana",
+   "act": "post",
+   "args": {
+    "text": {
+     "generate": "Agree in one sentence with the last comment and add one edge case the test should cover.",
+     "fallback": "Agreed, and the test should cover a place whose session is closed."
+    }
+   },
+   "t_start": 1794711052.980343,
+   "t_end": 1794711066.022897,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 1,
+     "key": 1,
+     "type": 1
+    }
+   },
+   "proved": "proved",
+   "proof": "thread seq 8",
+   "seq": 8,
+   "at": 1794711065,
+   "text": "+1, that's the right test, and it should also cover a mixed case where one worktree is missing and another is clean, checking that stdout is still one valid JSON document with no ANSI escapes, that the clean entry is reported normally next to the `state: missing` one, and that the exit code matches what the plan says for partial failure.",
+   "landed_text": "+1, that's the right test, and it should also cover a mixed case where one worktree is missing and another is clean, checking that stdout is still one valid JSON document with no ANSI escapes, that the clean entry is reported normally next to the `state: missing` one, and that the exit code matches what the plan says for partial failure.",
+   "text_intact": true,
+   "dash_mangled": false,
+   "shots": [
+    "i13-post-owner.jpg",
+    "i13-post-guest.jpg",
+    "i13-post-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "39ebba6be9f020b3"
+   }
+  },
+  {
+   "i": 14,
+   "who": "dana",
+   "on": "dana",
+   "act": "use_these",
+   "args": {
+    "note": "Fold these into the plan file, then show me the file."
+   },
+   "t_start": 1794711073.311221,
+   "t_end": 1794711108.7997608,
+   "inputs": {
+    "owner": {
+     "click": 1,
+     "key": 3,
+     "type": 1
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "unproved",
+   "proof": "no shared_with_agent event",
+   "note": true,
+   "shots": [
+    "i14-use_these-owner.jpg",
+    "i14-use_these-guest.jpg",
+    "i14-use_these-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "39ebba6be9f020b3"
+   },
+   "wrong_place": true
+  },
+  {
+   "i": 15,
+   "who": "dana",
+   "on": "dana",
+   "act": "wait",
+   "args": {
+    "until": "agent_idle",
+    "max_s": 180
+   },
+   "t_start": 1794711113.1107562,
+   "t_end": 1794711121.815959,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "agent idle after 9s",
+   "shots": [
+    "i15-wait-owner.jpg",
+    "i15-wait-guest.jpg",
+    "i15-wait-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "39ebba6be9f020b3"
+   }
+  },
+  {
+   "i": 14,
+   "who": "dana",
+   "on": "dana",
+   "act": "use_these",
+   "args": {
+    "note": "Fold these into the plan file, then show me the file."
+   },
+   "t_start": 1794711180.675072,
+   "t_end": 1794711187.788873,
+   "inputs": {
+    "owner": {
+     "click": 1,
+     "key": 3,
+     "type": 1
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "shared posts 7..8 at seq 9; turns 3 -> 4",
+   "first": 7,
+   "last": 8,
+   "at": 1794711186,
+   "note": true,
+   "note_text": "Fold these into the plan file, then show me the file.",
+   "sent_to_unshared": false,
+   "shots": [
+    "i14-use_these-owner.jpg",
+    "i14-use_these-guest.jpg",
+    "i14-use_these-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "39ebba6be9f020b3"
+   }
+  },
+  {
+   "i": 15,
+   "who": "dana",
+   "on": "dana",
+   "act": "wait",
+   "args": {
+    "until": "agent_idle",
+    "max_s": 180
+   },
+   "t_start": 1794711192.420474,
+   "t_end": 1794711201.1645482,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "agent idle after 9s",
+   "shots": [
+    "i15-wait-owner.jpg",
+    "i15-wait-guest.jpg",
+    "i15-wait-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 16,
+   "who": "dana",
+   "on": "cy",
+   "act": "open_share",
+   "args": {},
+   "t_start": 1794711272.014972,
+   "t_end": 1794711272.853554,
+   "inputs": {
+    "owner": {
+     "click": 1,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "guest g_s4qjejjkego5xlfy6ilrtsoxya is asked",
+   "shots": [
+    "i16-open_share-owner.jpg",
+    "i16-open_share-guest.jpg",
+    "i16-open_share-third.jpg"
+   ],
+   "pending": [
+    "cy:join:s_e6i5xqbnemv4h7ep:g_s4qjejjkego5xlfy6ilrtsoxya"
+   ],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 17,
+   "who": "cy",
+   "on": "cy",
+   "act": "open_lane",
+   "args": {},
+   "t_start": 1794711280.386805,
+   "t_end": 1794711283.047719,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 1,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "n/a",
+   "proof": "UI only",
+   "shots": [
+    "i17-open_lane-owner.jpg",
+    "i17-open_lane-guest.jpg",
+    "i17-open_lane-third.jpg"
+   ],
+   "pending": [
+    "cy:join:s_e6i5xqbnemv4h7ep:g_s4qjejjkego5xlfy6ilrtsoxya"
+   ],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 18,
+   "who": "cy",
+   "on": "cy",
+   "act": "allow",
+   "args": {
+    "guest": "dana"
+   },
+   "t_start": 1794711324.118672,
+   "t_end": 1794711325.4147232,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 1,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "allowed",
+   "guest": "g_s4qjejjkego5xlfy6ilrtsoxya",
+   "shots": [
+    "i18-allow-owner.jpg",
+    "i18-allow-guest.jpg",
+    "i18-allow-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 19,
+   "who": "cy",
+   "on": "cy",
+   "act": "open_thread",
+   "args": {},
+   "t_start": 1794711332.0235891,
+   "t_end": 1794711333.3945,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 1,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "n/a",
+   "proof": "UI only; proved by the next use_these",
+   "shots": [
+    "i19-open_thread-owner.jpg",
+    "i19-open_thread-guest.jpg",
+    "i19-open_thread-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 20,
+   "who": "cy",
+   "on": "cy",
+   "act": "send_task",
+   "args": {
+    "text": "In one short paragraph, say which function prints the status line in crates/worktrees-cli (name the file). Do not edit anything."
+   },
+   "t_start": 1794711338.87445,
+   "t_end": 1794711340.015743,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "turns 1 -> 2",
+   "shots": [
+    "i20-send_task-owner.jpg",
+    "i20-send_task-guest.jpg",
+    "i20-send_task-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 21,
+   "who": "cy",
+   "on": "cy",
+   "act": "wait",
+   "args": {
+    "until": "agent_idle",
+    "max_s": 180
+   },
+   "t_start": 1794711344.801028,
+   "t_end": 1794711356.2197309,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "agent idle after 11s",
+   "shots": [
+    "i21-wait-owner.jpg",
+    "i21-wait-guest.jpg",
+    "i21-wait-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 22,
+   "who": "dana",
+   "on": "cy",
+   "act": "post",
+   "args": {
+    "text": {
+     "generate": "As the owner of the --json plan, ask Cy's agent in one sentence whether that function already has a machine-readable mode.",
+     "fallback": "Does that function already have a machine-readable mode we could reuse for --json?"
+    }
+   },
+   "t_start": 1794711360.675906,
+   "t_end": 1794711390.84113,
+   "inputs": {
+    "owner": {
+     "click": 1,
+     "key": 1,
+     "type": 1
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "unproved",
+   "proof": "no post by this guest reached the thread",
+   "text": "Once you've found that function, does it already have a machine-readable or JSON output mode, or does it only print the human-readable status line?",
+   "shots": [
+    "i22-post-owner.jpg",
+    "i22-post-guest.jpg",
+    "i22-post-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   },
+   "wrong_place": true
+  },
+  {
+   "i": 23,
+   "who": "cy",
+   "on": "cy",
+   "act": "use_these",
+   "args": {
+    "note": "Answer Dana's question in two sentences."
+   },
+   "t_start": 1794711398.379052,
+   "t_end": 1794711433.253994,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 1,
+     "key": 3,
+     "type": 1
+    }
+   },
+   "proved": "unproved",
+   "proof": "no shared_with_agent event",
+   "note": true,
+   "shots": [
+    "i23-use_these-owner.jpg",
+    "i23-use_these-guest.jpg",
+    "i23-use_these-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 24,
+   "who": "cy",
+   "on": "cy",
+   "act": "wait",
+   "args": {
+    "until": "agent_idle",
+    "max_s": 180
+   },
+   "t_start": 1794711437.753603,
+   "t_end": 1794711446.094312,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "agent idle after 8s",
+   "shots": [
+    "i24-wait-owner.jpg",
+    "i24-wait-guest.jpg",
+    "i24-wait-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 16,
+   "who": "dana",
+   "on": "cy",
+   "act": "open_share",
+   "args": {},
+   "t_start": 1794711504.327511,
+   "t_end": 1794711504.837861,
+   "inputs": {
+    "owner": {
+     "click": 1,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "n/a",
+   "proof": "guest g_s4qjejjkego5xlfy6ilrtsoxya was allowed before the click: the host cannot prove the open",
+   "shots": [
+    "i16-open_share-owner.jpg",
+    "i16-open_share-guest.jpg",
+    "i16-open_share-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 22,
+   "who": "dana",
+   "on": "cy",
+   "act": "post",
+   "args": {
+    "text": {
+     "generate": "As the owner of the --json plan, ask Cy's agent in one sentence whether that function already has a machine-readable mode.",
+     "fallback": "Does that function already have a machine-readable mode we could reuse for --json?"
+    }
+   },
+   "t_start": 1794711535.8284009,
+   "t_end": 1794711544.126335,
+   "inputs": {
+    "owner": {
+     "click": 1,
+     "key": 1,
+     "type": 1
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "thread seq 2",
+   "seq": 2,
+   "at": 1794711543,
+   "text": "Once you've found the status line function, does it already have a machine-readable or JSON output mode, or does it only print human-readable text?",
+   "landed_text": "Once you've found the status line function, does it already have a machine-readable or JSON output mode, or does it only print human-readable text?",
+   "text_intact": true,
+   "dash_mangled": false,
+   "shots": [
+    "i22-post-owner.jpg",
+    "i22-post-guest.jpg",
+    "i22-post-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 23,
+   "who": "cy",
+   "on": "cy",
+   "act": "use_these",
+   "args": {
+    "note": "Answer Dana's question in two sentences."
+   },
+   "t_start": 1794711551.638561,
+   "t_end": 1794711557.6975539,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 1,
+     "key": 3,
+     "type": 1
+    }
+   },
+   "proved": "proved",
+   "proof": "shared posts 2..2 at seq 3; turns 2 -> 3",
+   "first": 2,
+   "last": 2,
+   "at": 1794711556,
+   "note": true,
+   "note_text": "Answer Dana's question in two sentences.",
+   "sent_to_unshared": false,
+   "shots": [
+    "i23-use_these-owner.jpg",
+    "i23-use_these-guest.jpg",
+    "i23-use_these-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 24,
+   "who": "cy",
+   "on": "cy",
+   "act": "wait",
+   "args": {
+    "until": "agent_idle",
+    "max_s": 180
+   },
+   "t_start": 1794711562.445268,
+   "t_end": 1794711573.8205462,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "agent idle after 11s",
+   "shots": [
+    "i24-wait-owner.jpg",
+    "i24-wait-guest.jpg",
+    "i24-wait-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 25,
+   "who": "dana",
+   "on": "dana",
+   "act": "open_lane",
+   "args": {},
+   "t_start": 1794711623.362407,
+   "t_end": 1794711625.222782,
+   "inputs": {
+    "owner": {
+     "click": 1,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "n/a",
+   "proof": "UI only",
+   "shots": [
+    "i25-open_lane-owner.jpg",
+    "i25-open_lane-guest.jpg",
+    "i25-open_lane-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 26,
+   "who": "bret",
+   "on": "dana",
+   "act": "ask_share",
+   "args": {
+    "slug": "(main)",
+    "note": "Can I see main too, to compare the status command there?"
+   },
+   "t_start": 1794711630.848244,
+   "t_end": 1794711636.041829,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 4,
+     "key": 0,
+     "type": 1
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "share_requests_list: 1 new",
+   "requests": [
+    {
+     "id": "r_j4cs5rbofcdi6f2q",
+     "principal": "g_sb4je22qe362gkc4usyremylae",
+     "name": "Bret",
+     "project": "/Users/test-parallels/workspace/worktrees",
+     "slug": "(main)",
+     "note": "Can I see main too, to compare the status command there?",
+     "at": 1794711635
+    }
+   ],
+   "shots": [
+    "i26-ask_share-owner.jpg",
+    "i26-ask_share-guest.jpg",
+    "i26-ask_share-third.jpg"
+   ],
+   "pending": [
+    "dana:request:r_j4cs5rbofcdi6f2q"
+   ],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 27,
+   "who": "dana",
+   "on": "dana",
+   "act": "wait",
+   "args": {
+    "s": 20
+   },
+   "t_start": 1794711643.523412,
+   "t_end": 1794711663.5334258,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "n/a",
+   "proof": "waited 20s",
+   "shots": [
+    "i27-wait-owner.jpg",
+    "i27-wait-guest.jpg",
+    "i27-wait-third.jpg"
+   ],
+   "pending": [
+    "dana:request:r_j4cs5rbofcdi6f2q"
+   ],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 28,
+   "who": "dana",
+   "on": "dana",
+   "act": "answer_request",
+   "args": {},
+   "t_start": 1794711668.103891,
+   "t_end": 1794711669.110674,
+   "inputs": {
+    "owner": {
+     "click": 1,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "request dismissed",
+   "request": "r_j4cs5rbofcdi6f2q",
+   "shots": [
+    "i28-answer_request-owner.jpg",
+    "i28-answer_request-guest.jpg",
+    "i28-answer_request-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 29,
+   "who": "dana",
+   "on": "dana",
+   "act": "end_session",
+   "args": {},
+   "t_start": 1794711675.615828,
+   "t_end": 1794711706.030414,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "binding ended",
+   "shots": [
+    "i29-end_session-owner.jpg",
+    "i29-end_session-guest.jpg",
+    "i29-end_session-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 30,
+   "who": "dana",
+   "on": "dana",
+   "act": "share_again",
+   "args": {},
+   "t_start": 1794711747.067963,
+   "t_end": 1794711750.0160608,
+   "inputs": {
+    "owner": {
+     "click": 2,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "binding active again; previous one kept as ended",
+   "shots": [
+    "i30-share_again-owner.jpg",
+    "i30-share_again-guest.jpg",
+    "i30-share_again-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 31,
+   "who": "dana",
+   "on": "dana",
+   "act": "reboot_owner",
+   "args": {},
+   "t_start": 1794711789.076213,
+   "t_end": 1794711854.976842,
+   "inputs": {
+    "owner": {
+     "click": 2,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "owner serve back in 29.3s, share kept True, guests {'bret': 60.9, 'cy': 61.1}",
+   "recovery": {
+    "ssh_s": 20.8,
+    "owner_serve_s": 29.3,
+    "share_kept": true,
+    "binding_after": "active",
+    "guests_back_s": {
+     "bret": 60.9,
+     "cy": 61.1
+    },
+    "binding_after_agent": "active",
+    "total_s": 64.6
+   },
+   "shots": [
+    "i31-reboot_owner-owner.jpg",
+    "i31-reboot_owner-guest.jpg",
+    "i31-reboot_owner-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 32,
+   "who": "bret",
+   "on": "dana",
+   "act": "post",
+   "args": {
+    "text": {
+     "generate": "The host just came back from a restart. Ask in one sentence whether the plan file survived and is complete.",
+     "fallback": "Back after the restart: is the plan file still complete?"
+    }
+   },
+   "t_start": 1794711903.500743,
+   "t_end": 1794711913.4663308,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 1,
+     "key": 1,
+     "type": 1
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "thread seq 13",
+   "seq": 13,
+   "at": 1794711913,
+   "text": "Now that the host has restarted, did the plan file survive intact, with the `status --json` missing-worktree exit code, stdout/stderr behaviour, `state` field, and the missing-plus-clean test all still in it?",
+   "landed_text": "Now that the host has restarted, did the plan file survive intact, with the `status --json` missing-worktree exit code, stdout/stderr behaviour, `state` field, and the missing-plus-clean test all still in it?",
+   "text_intact": true,
+   "dash_mangled": false,
+   "shots": [
+    "i32-post-owner.jpg",
+    "i32-post-guest.jpg",
+    "i32-post-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 33,
+   "who": "cy",
+   "on": "dana",
+   "act": "open_share",
+   "args": {},
+   "t_start": 1794711922.042038,
+   "t_end": 1794711923.556894,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 1,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "n/a",
+   "proof": "guest g_2oiqglzwaaogzffvp5bijlb5y4 was allowed before the click: the host cannot prove the open",
+   "shots": [
+    "i33-open_share-owner.jpg",
+    "i33-open_share-guest.jpg",
+    "i33-open_share-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 34,
+   "who": "cy",
+   "on": "dana",
+   "act": "post",
+   "args": {
+    "text": "Same question from me: did the JSON fields survive the restart?"
+   },
+   "t_start": 1794711931.038218,
+   "t_end": 1794711934.4740312,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 1,
+     "key": 1,
+     "type": 1
+    }
+   },
+   "proved": "proved",
+   "proof": "thread seq 14",
+   "seq": 14,
+   "at": 1794711933,
+   "text": "Same question from me: did the JSON fields survive the restart?",
+   "landed_text": "Same question from me: did the JSON fields survive the restart?",
+   "text_intact": true,
+   "dash_mangled": false,
+   "shots": [
+    "i34-post-owner.jpg",
+    "i34-post-guest.jpg",
+    "i34-post-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 35,
+   "who": "dana",
+   "on": "dana",
+   "act": "use_these",
+   "args": {
+    "note": "Check the plan file is complete and tell me."
+   },
+   "t_start": 1794711943.3298318,
+   "t_end": 1794711979.6498718,
+   "inputs": {
+    "owner": {
+     "click": 1,
+     "key": 3,
+     "type": 1
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "unproved",
+   "proof": "no shared_with_agent event",
+   "note": true,
+   "shots": [
+    "i35-use_these-owner.jpg",
+    "i35-use_these-guest.jpg",
+    "i35-use_these-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 36,
+   "who": "dana",
+   "on": "dana",
+   "act": "wait",
+   "args": {
+    "until": "agent_idle",
+    "max_s": 120
+   },
+   "t_start": 1794711984.822094,
+   "t_end": 1794711993.5523689,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "agent idle after 9s",
+   "shots": [
+    "i36-wait-owner.jpg",
+    "i36-wait-guest.jpg",
+    "i36-wait-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 35,
+   "who": "dana",
+   "on": "dana",
+   "act": "send_task",
+   "args": {
+    "text": "Reply with one line: BACK."
+   },
+   "t_start": 1794712053.437629,
+   "t_end": 1794712117.097924,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "unproved",
+   "proof": "turns 1 -> None",
+   "shots": [
+    "i35-send_task-owner.jpg",
+    "i35-send_task-guest.jpg",
+    "i35-send_task-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   },
+   "sent_to_unshared": true
+  },
+  {
+   "i": 36,
+   "who": "dana",
+   "on": "dana",
+   "act": "use_these",
+   "args": {
+    "note": "Check the plan file is complete and tell me."
+   },
+   "t_start": 1794712122.4223108,
+   "t_end": 1794712157.576968,
+   "inputs": {
+    "owner": {
+     "click": 1,
+     "key": 3,
+     "type": 1
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "unproved",
+   "proof": "no shared_with_agent event",
+   "note": true,
+   "shots": [
+    "i36-use_these-owner.jpg",
+    "i36-use_these-guest.jpg",
+    "i36-use_these-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 37,
+   "who": "dana",
+   "on": "dana",
+   "act": "wait",
+   "args": {
+    "until": "agent_idle",
+    "max_s": 120
+   },
+   "t_start": 1794712162.8463008,
+   "t_end": 1794712171.574234,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "agent idle after 9s",
+   "shots": [
+    "i37-wait-owner.jpg",
+    "i37-wait-guest.jpg",
+    "i37-wait-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 36,
+   "who": "dana",
+   "on": "dana",
+   "act": "share_again",
+   "args": {},
+   "t_start": 1794712227.8820539,
+   "t_end": 1794712230.8256571,
+   "inputs": {
+    "owner": {
+     "click": 2,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "binding active again; previous one kept as ended",
+   "shots": [
+    "i36-share_again-owner.jpg",
+    "i36-share_again-guest.jpg",
+    "i36-share_again-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 37,
+   "who": "dana",
+   "on": "dana",
+   "act": "use_these",
+   "args": {
+    "note": "Check the plan file is complete and tell me."
+   },
+   "t_start": 1794712239.581598,
+   "t_end": 1794712274.5941188,
+   "inputs": {
+    "owner": {
+     "click": 1,
+     "key": 3,
+     "type": 1
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "unproved",
+   "proof": "no shared_with_agent event",
+   "note": true,
+   "shots": [
+    "i37-use_these-owner.jpg",
+    "i37-use_these-guest.jpg",
+    "i37-use_these-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 38,
+   "who": "dana",
+   "on": "dana",
+   "act": "wait",
+   "args": {
+    "until": "agent_idle",
+    "max_s": 120
+   },
+   "t_start": 1794712280.043831,
+   "t_end": 1794712288.7681952,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "agent idle after 9s",
+   "shots": [
+    "i38-wait-owner.jpg",
+    "i38-wait-guest.jpg",
+    "i38-wait-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 37,
+   "who": "dana",
+   "on": "dana",
+   "act": "use_these",
+   "args": {
+    "note": "Check the plan file is complete and tell me."
+   },
+   "t_start": 1794712343.0180612,
+   "t_end": 1794712363.018062,
+   "manual": true,
+   "inputs": {
+    "owner": {
+     "click": 1,
+     "key": 1,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "by hand (Return in the open preview): shared posts 10..14 at seq 17; turns 1 -> 2",
+   "first": 10,
+   "last": 14,
+   "note": true,
+   "note_text": "Check the plan file is complete and tell me.",
+   "shots": [],
+   "pending": [],
+   "files": {}
+  },
+  {
+   "i": 39,
+   "who": "dana",
+   "on": "dana",
+   "act": "stop_sharing",
+   "args": {},
+   "t_start": 1794712456.790881,
+   "t_end": 1794712464.183601,
+   "inputs": {
+    "owner": {
+     "click": 3,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "share gone from shares_all",
+   "shots": [
+    "i39-stop_sharing-owner.jpg",
+    "i39-stop_sharing-guest.jpg",
+    "i39-stop_sharing-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  },
+  {
+   "i": 40,
+   "who": "cy",
+   "on": "cy",
+   "act": "stop_sharing",
+   "args": {},
+   "t_start": 1794712473.7903712,
+   "t_end": 1794712482.158272,
+   "inputs": {
+    "owner": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "guest": {
+     "click": 0,
+     "key": 0,
+     "type": 0
+    },
+    "third": {
+     "click": 3,
+     "key": 0,
+     "type": 0
+    }
+   },
+   "proved": "proved",
+   "proof": "share gone from shares_all",
+   "shots": [
+    "i40-stop_sharing-owner.jpg",
+    "i40-stop_sharing-guest.jpg",
+    "i40-stop_sharing-third.jpg"
+   ],
+   "pending": [],
+   "files": {
+    "docs/notes/group-chat-test.md": "2104d09f0489d89a"
+   }
+  }
+ ],
+ "setup": {
+  "beta": {
+   "owner": {
+    "beta_group_chat": true
+   },
+   "guest": {
+    "beta_group_chat": true
+   },
+   "third": {
+    "beta_group_chat": true
+   }
+  },
+  "from_ui": true,
+  "shares": {
+   "dana": "s_dpwtnfoay75urk32",
+   "cy": "s_e6i5xqbnemv4h7ep"
+  },
+  "pairing": {
+   "dana:bret": {
+    "principal": "g_sb4je22qe362gkc4usyremylae",
+    "host": "h_jxtzumttru3r3e5iqfqrevxflm",
+    "stale_records_same_pin": 1
+   },
+   "dana:cy": {
+    "principal": "g_2oiqglzwaaogzffvp5bijlb5y4",
+    "host": "h_7fjp4iulnyuwejondid33ve5ky",
+    "stale_records_same_pin": 0
+   },
+   "cy:dana": {
+    "principal": "g_s4qjejjkego5xlfy6ilrtsoxya",
+    "host": "h_aepi742dvxh3gdyd2alejgrili",
+    "stale_records_same_pin": 0
+   }
+  }
+ },
+ "errors": [],
+ "first_run": {
+  "_comment": "Acts counted by hand on the VMs (a click, a field filled, a paste, a key), 2026-11-14, release v0.52.0.",
+  "dana_shares_with_bret": {
+   "owner_acts": 7,
+   "guest_acts": 6,
+   "steps": [
+    "lane: Share with\u2026",
+    "Someone new: type Bret",
+    "Invite them",
+    "B1 detour: 'A guest named Bret exists' -> Pair another device for Bret",
+    "Copy (the link sent out of band)",
+    "Allow (codes equal)",
+    "Share with Bret",
+    "guest: Home",
+    "Join with a link\u2026",
+    "paste",
+    "device name",
+    "Join",
+    "read the code to Dana"
+   ]
+  },
+  "dana_adds_cy": {
+   "owner_acts": 6,
+   "guest_acts": 6,
+   "ui_path": false,
+   "steps": [
+    "Settings -> Guests -> Invite a guest (B4: Sharing\u2026 cannot add anyone)",
+    "type Cy",
+    "Show the pairing code",
+    "Copy",
+    "Allow",
+    "Cy: Join with a link\u2026, paste, device name, Join",
+    "Cy: Ask on gc-lane -> toast 'Sharing\u2026 on its lane adds a guest' with only Dismiss (B4)",
+    "stand-in: share_allow from the CLI"
+   ]
+  },
+  "cy_shares_with_dana": {
+   "owner_acts": 6,
+   "guest_acts": 6,
+   "steps": [
+    "Cy's lane: Share with\u2026",
+    "Someone new: type Dana",
+    "Invite them",
+    "Turn on and show the link (remote access inline)",
+    "Copy",
+    "Allow (codes equal)",
+    "Share with Dana",
+    "Dana: Home, Join with a link\u2026, paste, device name, Join"
+   ]
+  }
+ },
+ "share": "s_dpwtnfoay75urk32",
+ "inputs_total": {
+  "owner": {
+   "click": 3,
+   "key": 0,
+   "type": 0
+  },
+  "guest": {
+   "click": 0,
+   "key": 0,
+   "type": 0
+  },
+  "third": {
+   "click": 3,
+   "key": 0,
+   "type": 0
+  }
+ },
+ "ended_at": 1794712491.586006,
+ "segments": [
+  {
+   "intents": "1:4",
+   "at": 1794710673.6391182
+  },
+  {
+   "intents": "4:11",
+   "at": 1794710770.191494
+  },
+  {
+   "intents": "9:11",
+   "at": 1794710940.040291
+  },
+  {
+   "intents": "11:16",
+   "at": 1794711007.301877
+  },
+  {
+   "intents": "14:16",
+   "at": 1794711156.45759
+  },
+  {
+   "intents": "16:18",
+   "at": 1794711247.8112462
+  },
+  {
+   "intents": "18:25",
+   "at": 1794711299.874796
+  },
+  {
+   "intents": "16:17",
+   "at": 1794711482.5618298
+  },
+  {
+   "intents": "22:25",
+   "at": 1794711514.206743
+  },
+  {
+   "intents": "25:30",
+   "at": 1794711601.4125261
+  },
+  {
+   "intents": "30:31",
+   "at": 1794711725.2812538
+  },
+  {
+   "intents": "31:32",
+   "at": 1794711767.26679
+  },
+  {
+   "intents": "32:37",
+   "at": 1794711881.024671
+  },
+  {
+   "intents": "35:38",
+   "at": 1794712031.7805178
+  },
+  {
+   "intents": "36:39",
+   "at": 1794712206.083487
+  },
+  {
+   "intents": "39:41",
+   "at": 1794712435.152456
+  }
+ ],
+ "notes": [
+  {
+   "i": 3,
+   "note": "Proved on host state only because Cy was already 'allowed' (B4 stand-in). Cy's screen still showed Home in i03-open_share-third.jpg: the Debian display was in power-save (Mutter PowerSaveMode 3), so prlctl capture returned a stale frame; after waking the display Cy's app showed gc-lane. The driver now wakes the display before every Linux capture/click, and open_share reports n/a for a guest let in before the click."
+  },
+  {
+   "i": 9,
+   "note": "Driver defect, not the app's: the segment started a fresh Acts (thread_open False), so use_these clicked Thread and CLOSED the panel intent 2 had opened; Use these\u2026 was then not on screen (i09-use_these-owner.jpg). Fixed (ui_state carried in the record); intent 9-10 replayed as the next entries."
+  },
+  {
+   "i": 14,
+   "note": "WRONG PLACE (product): the click on 'Use these\u2026' (1238,643) landed on the 'Review' button of a SECOND stacked corner toast 'Bret's macos-guest tried to connect and was refused: it is revoked.', which opened Settings \u2192 Remote (i14-use_these-owner.jpg). Bret's dead pairing (B3) redials and the host raises that alert again on every refusal episode; the stacked toasts cover the thread's Use these\u2026. The note keys then went to Settings. Replayed after closing Settings and the toasts."
+  },
+  {
+   "i": 22,
+   "note": "WRONG PLACE (driver): each segment's setup clicked Dana's open_lane, which took Dana off Cy's share back to gc-lane, so her post for Cy's thread landed in her OWN gc-lane thread (seq 10, 'David #10', i22-post-owner.jpg). Fixed (only the first segment navigates). Intent 23 failed as a consequence (nothing new in Cy's thread). Replayed 16, 22-24."
+  },
+  {
+   "i": 35,
+   "note": "Not a defect: #670's guard. After the reboot the resumed Codex had not named its session, so Use these refused in words: \"the lane's agent has not named its session yet: send it something first. Nothing was sent\u2026\" (i35-use_these-owner.jpg). The persona now has Dana send one line first; replayed as send_task + use_these. Cost: one extra act per host reboot, and the guests' posts wait."
+  },
+  {
+   "i": 35,
+   "note": "FINDING (wording, no fix PR): after the reboot `worktrees open` started a NEW Codex session (rollout 01a1dd29\u2026, 19:03:51) rather than the bound 01a1dd26. Use these refused with 'send it something first' (#670); doing exactly that sent 'Reply with one line: BACK.' to the unshared session and ENDED the binding (share_check: 'has no live session bound: Share again first'). The guard's advice leads the owner into the session end; it could say that a new session ends the share and Share again binds it. Replayed with share_again before use_these."
+  },
+  {
+   "i": 37,
+   "note": "Driver: the replayed use_these clicked into the preview that the refused try had left OPEN (Esc does not close the inline Use these preview), so its Return never reached the note field; the app's last share_check was the refused one (audit 03:05:48). Completed by hand: focus the note, Return; proved by host state (seq 17 shared_with_agent 10..14, turn 2)."
+  }
+ ],
+ "ui_state": {
+  "dana": {
+   "thread_open": true,
+   "sent_once": false
+  },
+  "cy": {
+   "thread_open": true,
+   "sent_once": true
+  }
+ }
+}

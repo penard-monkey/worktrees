@@ -40,11 +40,22 @@ class Run:
         self.args = a
         self.cfg = tomllib.loads(Path(a.config).read_text())
         self.ui = tomllib.loads((HERE / "ui" / f"{a.variant}.toml").read_text())
+        # A UI file written before three persons names its sections by role
+        # ([owner], [guest]); the acts look them up per person and share.
+        for role, key in (("owner", f"{self.cfg['owner']['person']}_host"), ("guest", f"{self.cfg['guest']['person']}_guest")):
+            if role in self.ui and key not in self.ui:
+                self.ui[key] = self.ui[role]
         self.persona = json.loads((HERE / "personas" / f"{a.variant}.yaml").read_text())
         if self.persona.get("task") != a.task:
             raise SystemExit(f"personas/{a.variant}.yaml is task {self.persona.get('task')!r}, not {a.task!r}")
-        self.run_id = time.strftime("%Y%m%d-%H%M%S") + f"-{a.variant}-{a.task}"
-        self.dir = expand(self.cfg["runs"]) / self.run_id
+        if a.continue_run:
+            # Another segment of a run (`--intents a:b`): same directory, same
+            # record, the intents appended.
+            self.dir = expand(a.continue_run)
+            self.run_id = self.dir.name
+        else:
+            self.run_id = time.strftime("%Y%m%d-%H%M%S") + f"-{a.variant}-{a.task}"
+            self.dir = expand(self.cfg["runs"]) / self.run_id
         (self.dir / "shots").mkdir(parents=True, exist_ok=True)
         (self.dir / "host").mkdir(exist_ok=True)
         self._logf = open(self.dir / "driver.log", "a", buffering=1)
@@ -55,6 +66,9 @@ class Run:
         self.record = {"run": self.run_id, "variant": a.variant, "task": a.task, "persons": a.persons,
                        "snapshot": a.snapshot if a.revert else None, "started_at": time.time(),
                        "intents": [], "setup": {}, "errors": []}
+        if a.continue_run:
+            self.record = json.loads((self.dir / "record.json").read_text())
+            self.record.setdefault("segments", []).append({"intents": a.intents, "at": time.time()})
 
     # ── log ─────────────────────────────────────────────────────────────
     def log(self, msg):
@@ -65,23 +79,43 @@ class Run:
     # ── VMs and people ──────────────────────────────────────────────────
     def build(self):
         c = self.cfg
-        own = VM("owner", c["owner"]["vm"], c["owner"]["ssh"], c["owner"]["ip"], self.log)
-        gst = VM("guest", c["guest"]["vm"], c["guest"]["ssh"], c["guest"]["ip"], self.log)
+        mk = lambda role, k: VM(role, c[k]["vm"], c[k]["ssh"], c[k]["ip"], self.log, os=c[k].get("os", "macos"))
+        own, gst = mk("owner", "owner"), mk("guest", "guest")
         self.vms = {"owner": own, "guest": gst}
-        self.people = {
-            c["owner"]["person"]: {"role": "owner", "vm": own, "drive": "ui", "active": True, "name": c["owner"]["name"]},
-            c["guest"]["person"]: {"role": "guest", "vm": gst, "drive": "ui", "active": True,
-                                   "name": c["guest"]["name"], "device": c["guest"]["device"], "config_dir": None},
+        o, g = c["owner"], c["guest"]
+        # Every guest as seen from Dana's host. `ui` names the guest's section
+        # in ui/<variant>.toml; `host` and `principal` are filled at setup.
+        dana_guests = {
+            g["person"]: {"vm": gst, "drive": "ui", "active": True, "name": g["name"], "device": g["device"],
+                          "config_dir": None, "ui": f"{g['person']}_guest"},
         }
+        self.ctx = {"dana": {"key": "dana", "owner": own, "oui": f"{o['person']}_host", "lane": o, "share": None,
+                             "people": dana_guests, "host_name": o["name"], "host_person": o["person"]}}
         if self.args.persons >= 3:
             t = c["third"]
-            # Cy rides the guest VM's ssh with a config dir of his own: no screen.
-            self.people[t["person"]] = {"role": "guest", "vm": gst, "drive": "cli", "active": True,
-                                        "name": t["name"], "device": t["device"], "config_dir": t["config_dir"]}
+            thr = mk("third", "third")
+            self.vms["third"] = thr
+            drive = t.get("drive", "ui")
+            dana_guests[t["person"]] = {"vm": thr if drive == "ui" else gst, "drive": drive, "active": True,
+                                        "name": t["name"], "device": t["device"],
+                                        "config_dir": t.get("config_dir"), "ui": f"{t['person']}_guest"}
+            if "host" in t:
+                # Cy hosts too (§12.2): his lane, Dana his guest.
+                self.ctx[t["person"]] = {
+                    "key": t["person"], "owner": thr, "oui": f"{t['person']}_host", "lane": t["host"], "share": None,
+                    "host_name": t["name"], "host_person": t["person"],
+                    "people": {o["person"]: {"vm": own, "drive": "ui", "active": True, "name": t["host"]["guest_name"],
+                                             "device": t["host"]["guest_device"], "config_dir": None,
+                                             "ui": f"{o['person']}_guest"}}}
+        # The flat view wording() and the record use: person -> their vm.
+        self.people = {o["person"]: {"role": "owner", "vm": own, "name": o["name"]}}
+        for k, p in dana_guests.items():
+            p["role"] = "guest"
+            self.people[k] = p  # the same dict: pairing fills it for both views
 
     # ── setup ───────────────────────────────────────────────────────────
     def setup(self):
-        s = self.record["setup"]
+        s = self.record["setup"] if not self.args.continue_run else {}
         if self.args.revert:
             self.vms["owner"].revert(self.args.snapshot)
             gsnap = self.cfg["guest"].get("snapshot")
@@ -93,30 +127,137 @@ class Run:
                 self.log(f"{vm.role}: {vm.status()}; starting")
                 vm.prl("start", vm.name)
             vm.wait_ssh()
-        if not self.args.skip_install:
+        for vm in self.vms.values():
+            if vm.os == "linux":
+                self.linux_session(vm)
+        if self.args.continue_run:
+            pass  # a later segment: the apps keep the state the last one left
+        elif self.args.release:
+            s["install"] = self.install_release(self.args.release)
+        elif not self.args.skip_install:
             s["install"] = self.install()
         else:
             # The thread panel's open state lives in the app's memory, per
             # place: only a fresh app is known to have it closed.
             for vm in self.vms.values():
-                vm.sh('osascript -e \'tell application "worktrees" to quit\'; sleep 5; '
-                      'open -a /Applications/worktrees.app; sleep 10', timeout=60)
+                self.restart_app(vm)
         for vm in self.vms.values():
             self.normalize_window(vm, dismiss=True)
             self.dismiss_banners(vm)
+        s["beta"] = {vm.role: self.beta_state(vm) for vm in self.vms.values()}
+        if self.args.from_ui:
+            s.update(self.adopt_ui_state())
+            if not self.args.continue_run:
+                # A later segment leaves every screen where the last one did.
+                self.click_ui(self.ctx["dana"]["oui"], "open_lane")
+                time.sleep(2)
+            return
         s["remote"] = self.remote_on()
         self.vms["owner"].serve_call("owner_set_name", {"name": self.cfg["owner"]["name"]})
         s["pairing"] = {n: self.pair(n, p) for n, p in self.people.items() if p["role"] == "guest"}
         s["lane"] = self.lane()
         self.share_id = self.share_create()
+        self.ctx["dana"]["share"] = self.share_id
         s["share"] = self.share_id
         self.record["share"] = self.share_id
         self.click_ui("owner", "open_lane")
         time.sleep(2)
 
-    def click_ui(self, role, name):
-        x, y = self.ui[role][name]
-        self.vms[role].click(x, y, why=name)
+    def click_ui(self, section, name):
+        x, y = self.ui[section][name]
+        vm = next(c["owner"] for c in self.ctx.values() if c["oui"] == section)
+        vm.click(x, y, why=name)
+
+    def install_release(self, tag):
+        """The published release, the way a user installs it: quit the app,
+        `curl …/<tag>/install.sh | WORKTREES_INSTALL_APP=1 bash`, start it."""
+        out = {}
+        script = (HERE / "vm-install-release.sh").read_text()
+        for vm in self.vms.values():
+            rc, o = vm.sh(f"bash -s -- {shlex.quote(tag)}", stdin=script, timeout=600)
+            last = (o.strip().splitlines() or ["{}"])[-1]
+            out[vm.role] = json.loads(last) if last.startswith("{") else {"error": o[-300:]}
+            self.log(f"{vm.role}: installed {out[vm.role]}")
+        return out
+
+    def restart_app(self, vm):
+        if vm.os == "linux":
+            vm.sh("pkill -x worktrees-app; sleep 5; ~/launch-app.sh >/dev/null; sleep 12", timeout=60)
+        else:
+            vm.sh('osascript -e \'tell application "worktrees" to quit\'; sleep 5; '
+                  'open -a /Applications/worktrees.app; sleep 10', timeout=60)
+
+    def linux_session(self, vm):
+        """The Linux VM's GNOME session: the helper that runs a command in it
+        (~/sess.sh), the display awake (a blanked display makes `prlctl
+        capture` return its LAST frame, a frozen clock), no lock, no idle."""
+        vm.sh("cat > ~/sess.sh && chmod +x ~/sess.sh", stdin=(HERE / "lin-session.sh").read_text(), timeout=20)
+        vm.sh("cat > ~/launch-app.sh && chmod +x ~/launch-app.sh", stdin=(HERE / "lin-launch-app.sh").read_text(),
+              timeout=20)
+        vm.sh("~/sess.sh gsettings set org.gnome.desktop.session idle-delay 0; "
+              "~/sess.sh gsettings set org.gnome.desktop.screensaver lock-enabled false; "
+              "~/sess.sh gsettings set org.gnome.settings-daemon.plugins.power idle-dim false; "
+              "~/sess.sh gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver "
+              "--method org.gnome.ScreenSaver.SetActive false; "
+              "~/sess.sh gdbus call --session --dest org.gnome.Mutter.DisplayConfig --object-path "
+              "/org/gnome/Mutter/DisplayConfig --method org.freedesktop.DBus.Properties.Set "
+              "org.gnome.Mutter.DisplayConfig PowerSaveMode \"<0>\"", timeout=30)
+
+    def beta_state(self, vm):
+        """Each beta key the config names, as the app's ui-state.json holds it."""
+        keys = self.cfg.get("beta", [])
+        rc, out = vm.sh(f"cat \"{vm.app_dir}/ui-state.json\"", timeout=20, quiet=True)
+        try:
+            st = json.loads(out)
+        except ValueError:
+            return {k: None for k in keys}
+        return {k: st.get(k) for k in keys}
+
+    def adopt_ui_state(self):
+        """`--from-ui`: the pairings and shares were made in the apps (the
+        first run is what the release test measures, and it is driven by
+        hand, see the record's `first_run`). Read them back: each share by
+        its lane, each guest's principal by name on that host, and the host
+        id each guest's app keeps for it (same pin, a live device)."""
+        out = {"from_ui": True, "shares": {}, "pairing": {}}
+        self.record["first_run"] = self.persona.get("first_run")
+        for key, c in self.ctx.items():
+            host = c["owner"]
+            shares = (host.serve_call("shares_all") or {}).get("shares", [])
+            mine = [x for x in shares if x["slug"] == c["lane"]["lane"]]
+            if not mine:
+                raise VMError(f"{key}: no share on {c['lane']['lane']}: share it in the app first")
+            c["share"] = mine[0]["id"]
+            out["shares"][key] = c["share"]
+            pin = (host.serve_call("remote_status") or {}).get("pin")
+            guests = host.serve_call("guests_list") or []
+            for who, p in c["people"].items():
+                g = next((x for x in guests if x["name"].lower() == p["name"].lower()
+                          and any(not d.get("revoked_at") and not d.get("disabled") for d in x["devices"])), None)
+                if not g:
+                    raise VMError(f"{key}: {p['name']} is not a live guest there")
+                live = {d["id"] for d in g["devices"] if not d.get("revoked_at") and not d.get("disabled")}
+                cdir = shlex.quote(p["config_dir"]) if p["config_dir"] else f'"{p["vm"].app_dir}"'
+                rc, js = p["vm"].sh(f"worktrees remote hosts --json --config-dir {cdir}", timeout=30)
+                hosts = (json.loads(js) if rc == 0 and js.strip().startswith("{") else {}).get("hosts", [])
+                h = next((x for x in hosts if x.get("pin") == pin and x.get("device_id") in live), None)
+                if not h:
+                    raise VMError(f"{key}: {who}'s app keeps no live pairing with this host")
+                p.update(principal=g["id"], host=h["id"])
+                out["pairing"][f"{key}:{who}"] = {"principal": g["id"], "host": h["id"],
+                                                   "stale_records_same_pin": sum(1 for x in hosts if x.get("pin") == pin) - 1}
+            self.log(f"{key}: share {c['share']} with {sorted(c['people'])}")
+        self.share_id = self.ctx["dana"]["share"]
+        self.record["share"] = self.share_id
+        if self.args.continue_run:
+            return out
+        # Only the watched files go: the lane keeps its session, or the
+        # binding the people made would end before the run starts.
+        o = self.cfg["owner"]
+        tree = f"{o['repo']}/.worktrees/{o['lane']}"
+        for f in self.persona.get("watch_files", []):
+            self.vms["owner"].sh(f"rm -f {shlex.quote(tree + '/' + f)}", timeout=20)
+        return out
 
     def install(self):
         bundle = expand(self.cfg["bundle"])
@@ -144,6 +285,11 @@ class Run:
         """Bring the app forward and pin its window to config's frame, so the
         coordinates hold. `dismiss`: Esc a What's new sheet, close the
         Updates card."""
+        if vm.os == "linux":
+            # The AppImage's window is maximized on the VM's one screen; the
+            # Linux coordinates are measured for that.
+            vm.sh("~/sess.sh xdotool search --class worktrees-app windowactivate 2>/dev/null", timeout=20, quiet=True)
+            return
         x, y, w, h = self.cfg["window"]
         proc = '(first process whose bundle identifier is "net.casadelvalle.worktrees")'
         lines = ['tell application "worktrees" to activate', "delay 1"]
@@ -153,9 +299,9 @@ class Run:
                   f'tell application "System Events" to tell {proc} to set size of window 1 to {{{w}, {h}}}']
         vm.sh("osascript " + " ".join(f"-e {shlex.quote(ln)}" for ln in lines), timeout=30)
         if dismiss:
-            role = "owner" if vm.role == "owner" else "guest"
-            if "updates_close" in self.ui[role]:
-                ux, uy = self.ui[role]["updates_close"]
+            sec = self.ui.get(f"{self.cfg[vm.role]['person']}_{'host' if vm.role == 'owner' else 'guest'}", {})
+            if "updates_close" in sec:
+                ux, uy = sec["updates_close"]
                 vm.sh(f"/opt/homebrew/bin/cliclick c:{ux},{uy}", timeout=20)
 
     def dismiss_banners(self, vm):
@@ -163,6 +309,8 @@ class Run:
         shows its close button at its top-left corner only under the pointer:
         hover, click, repeat. `killall NotificationCenter` does not do it, they
         come back."""
+        if vm.os == "linux":
+            return
         b = self.ui.get("macos", {})
         hx, hy = b.get("banner_hover", [1180, 90])
         cx, cy = b.get("banner_close", [1010, 50])
@@ -314,16 +462,17 @@ class Run:
         return j["id"]
 
     # ── wording ─────────────────────────────────────────────────────────
-    def wording(self, who, spec):
+    def wording(self, who, spec, ctx=None):
         """A post's words: literal, or one sentence from Claude written from
         what THIS guest can read (shared_turns and the thread, through their
         own guest rows), so the scripted person never sees more."""
         if isinstance(spec, str):
             return spec
-        p = self.people[who]
-        turns = p["vm"].remote_call(p["host"], "shared_turns", {"share": self.share_id, "limit": 6},
+        ctx = ctx or self.ctx["dana"]
+        p = ctx["people"][who]
+        turns = p["vm"].remote_call(p["host"], "shared_turns", {"share": ctx["share"], "limit": 6},
                                     config_dir=p["config_dir"]) or {}
-        thread = p["vm"].remote_call(p["host"], "thread_read", {"share": self.share_id, "after": 0},
+        thread = p["vm"].remote_call(p["host"], "thread_read", {"share": ctx["share"], "after": 0},
                                      config_dir=p["config_dir"]) or {}
         seen = []
         for t in reversed(turns.get("turns", [])):
@@ -372,27 +521,31 @@ class Run:
 
     # ── host state ──────────────────────────────────────────────────────
     def snapshot_host(self, why):
-        """The thread and the shared turns while the share exists (a stop
-        deletes the thread), and the watched files' hashes."""
-        if not self.share_id:
-            return
-        a = Acts(self)
-        th = a.thread()
-        if th is not None:
-            self.host_snap["thread"] = th
-        s = a.owner_share()
-        if s:
-            self.host_snap["share"] = s
-            turns = {}
-            for key, b in [("current", None)] + [(f"ended{i}", i) for i in range(len(s.get("ended", [])))]:
-                args = {"share": self.share_id, "limit": 50}
-                if b is not None:
-                    args["binding"] = b
-                j = self.vms["owner"].serve_call("shared_turns", args)
-                if j:
-                    turns[key] = j
-            if turns:
-                self.host_snap["turns"] = turns
+        """Each share's thread and shared turns while it exists (a stop
+        deletes the thread), and the watched files' hashes. Dana's share is
+        kept at the top level (host/thread.json), any other host's under its
+        key (host/thread-<key>.json)."""
+        for key, c in self.ctx.items():
+            if not c.get("share"):
+                continue
+            snap = self.host_snap if key == "dana" else self.host_snap.setdefault(key, {})
+            a = Acts(self, c)
+            th = a.thread()
+            if th is not None:
+                snap["thread"] = th
+            s = a.owner_share()
+            if s:
+                snap["share"] = s
+                turns = {}
+                for k, b in [("current", None)] + [(f"ended{i}", i) for i in range(len(s.get("ended", [])))]:
+                    args = {"share": c["share"], "limit": 50}
+                    if b is not None:
+                        args["binding"] = b
+                    j = c["owner"].serve_call("shared_turns", args)
+                    if j:
+                        turns[k] = j
+                if turns:
+                    snap["turns"] = turns
         self.host_snap["why"] = why
 
     def files_state(self):
@@ -408,25 +561,42 @@ class Run:
     def pending(self):
         """What the owner's UI should be surfacing now: guests waiting to be
         let in, and requests for another place. score.py's lost attention."""
-        o = self.vms["owner"]
         items = []
-        for s in (o.serve_call("shares_all") or {}).get("shares", []):
-            for g in s.get("guests", []):
-                if g["state"] == "asked":
-                    items.append(f"join:{s['id']}:{g['principal']}")
-        for r in (o.serve_call("share_requests_list") or []):
-            items.append(f"request:{r['id']}")
+        for key, c in self.ctx.items():
+            o = c["owner"]
+            for s in (o.serve_call("shares_all") or {}).get("shares", []):
+                for g in s.get("guests", []):
+                    if g["state"] == "asked":
+                        items.append(f"{key}:join:{s['id']}:{g['principal']}")
+            for r in (o.serve_call("share_requests_list") or []):
+                items.append(f"{key}:request:{r['id']}")
         return items
 
     # ── the script ──────────────────────────────────────────────────────
     def play(self):
-        acts = Acts(self)
+        # One Acts per share: each keeps its own UI state (thread open, sent once).
+        by_ctx = {k: Acts(self, c) for k, c in self.ctx.items()}
+        # What the apps show is carried from segment to segment (a panel left
+        # open by the last one must not be toggled shut by this one).
+        for k, st in self.record.get("ui_state", {}).items():
+            if k in by_ctx:
+                by_ctx[k].thread_open, by_ctx[k].sent_once = st.get("thread_open", False), st.get("sent_once", False)
+        lo, _, hi = (self.args.intents or ":").partition(":")
+        lo, hi = int(lo or 0), int(hi) if hi else len(self.persona["intents"])
         for i, it in enumerate(self.persona["intents"]):
-            who = it["who"]
-            people_needed = [who] + ([it["args"]["guest"]] if it.get("args", {}).get("guest") else [])
-            if any(w not in self.people for w in people_needed):
+            if not lo <= i < hi:
                 continue
-            rec = {"i": i, "who": who, "act": it["act"], "args": it.get("args", {}), "t_start": time.time()}
+            who = it["who"]
+            on = it.get("on", "dana")
+            if on not in by_ctx:
+                continue
+            acts = by_ctx[on]
+            ctx = self.ctx[on]
+            people_needed = [who] + ([it["args"]["guest"]] if it.get("args", {}).get("guest") else [])
+            known = set(ctx["people"]) | {ctx["host_person"]}
+            if any(w not in known for w in people_needed):
+                continue
+            rec = {"i": i, "who": who, "on": on, "act": it["act"], "args": it.get("args", {}), "t_start": time.time()}
             before = {r: vm.snapshot_counts() for r, vm in self.vms.items()}
             self.log(f"intent {i}: {who} {it['act']}")
             if it.get("impossible"):
@@ -452,6 +622,7 @@ class Run:
             self.snapshot_host(f"intent {i}")
             self.log(f"intent {i}: {rec['proved']} — {out['proof']}")
             self.record["intents"].append(rec)
+            self.record["ui_state"] = {k: {"thread_open": a.thread_open, "sent_once": a.sent_once} for k, a in by_ctx.items()}
             self.save()
             time.sleep(it.get("wait_s", 0))
 
@@ -465,12 +636,19 @@ class Run:
             _, log = vm.sh(f"awk -v s={shlex.quote(since)} 'substr($0,1,19) >= s' ~/.cache/worktrees/serve.log",
                            timeout=120)
             (self.dir / "host" / f"{vm.role}-serve.log").write_text(log)
-            _, audit = vm.sh(f"python3 -c {shlex.quote(AUDIT_TAIL)} {shlex.quote(since_iso)} \"{APP_DIR}/audit.jsonl\"",
+            _, audit = vm.sh(f"python3 -c {shlex.quote(AUDIT_TAIL)} {shlex.quote(since_iso)} \"{vm.app_dir}/audit.jsonl\"",
                              timeout=120)
             (self.dir / "host" / f"{vm.role}-audit.jsonl").write_text(audit)
-        (self.dir / "host" / "thread.json").write_text(json.dumps(self.host_snap.get("thread", []), indent=1))
-        (self.dir / "host" / "turns.json").write_text(json.dumps(self.host_snap.get("turns", {}), indent=1))
-        (self.dir / "host" / "share.json").write_text(json.dumps(self.host_snap.get("share", {}), indent=1))
+        # A segment that saw no share (it was stopped earlier) leaves the
+        # last segment's snapshot as it was.
+        for part in ("thread", "turns", "share"):
+            if part in self.host_snap:
+                (self.dir / "host" / f"{part}.json").write_text(json.dumps(self.host_snap[part], indent=1))
+        for key in self.ctx:
+            if key != "dana" and key in self.host_snap:
+                for part in ("thread", "turns", "share"):
+                    if part in self.host_snap[key]:
+                        (self.dir / "host" / f"{part}-{key}.json").write_text(json.dumps(self.host_snap[key][part], indent=1))
 
     def save(self):
         self.record["inputs_total"] = {r: vm.snapshot_counts() for r, vm in self.vms.items()}
@@ -524,6 +702,13 @@ def main():
                     help="revert the owner VM to --snapshot first (needs the owner's word)")
     ap.add_argument("--skip-install", action="store_true", help="keep the bundle the VMs already run")
     ap.add_argument("--config", default=str(HERE / "config.toml"))
+    ap.add_argument("--release", metavar="TAG",
+                    help="install this published release in every VM the way a user does (install.sh)")
+    ap.add_argument("--intents", metavar="A:B", help="play only intents A..B-1 (a segment)")
+    ap.add_argument("--continue", dest="continue_run", metavar="RUN_DIR",
+                    help="append this segment to an earlier run's record (implies no install)")
+    ap.add_argument("--from-ui", action="store_true",
+                    help="start from the pairings and shares people made in the apps, not the CLI pairing")
     a = ap.parse_args()
     if a.snapshot != "off-ready" and not a.revert:
         ap.error("--snapshot names what --revert reverts to; without --revert nothing is reverted")
