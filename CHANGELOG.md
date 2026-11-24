@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.53.0] - 2026-11-23
+
 ### Added
 
 - **Keep awake: a cup in the left rail that keeps the computer from sleeping.** Click it and the computer running the agents
