@@ -58,6 +58,8 @@ export type GuestSource = {
   /** The hosts this machine is paired with (the shim's `remote_hosts`). */
   hosts(): Promise<HostSummary[]>;
   dial(host: HostSummary): GuestDial;
+  /** Forget a paired host (the shim's `remote_forget`): its key goes too. */
+  forget(hostId: string): Promise<void>;
   env: GuestEnv;
   /** A per-viewer key-value store (localStorage), or null. */
   storage: { get(k: string): string | null; set(k: string, v: string): void } | null;
@@ -197,6 +199,22 @@ export function startGuests(src: GuestSource): void {
   if (source) return;
   source = src;
   void refreshGuestHosts();
+}
+
+/** A person pressed Retry: dial now, a removed host's link included (a
+ *  disabled device can be turned back on). */
+export function retryGuestHost(id: string): void {
+  links.get(id)?.retry(true);
+}
+
+/** *Forget this host*: the pairing and its key go (Settings → Hosts' Forget),
+ *  and with it the host's group, its link and any open view of it. */
+export async function forgetGuestHost(id: string): Promise<void> {
+  const src = source;
+  if (!src) return;
+  await src.forget(id);
+  if (source === src) drop(id);
+  await refreshGuestHosts();
 }
 
 /** The window came back into view: a link waiting on a hidden window tries. */

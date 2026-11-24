@@ -37,11 +37,18 @@ def _until(pred, timeout_s, every_s=1.0):
 class Acts:
     """The acts, bound to one run's VMs, coordinates and share."""
 
-    def __init__(self, run):
+    def __init__(self, run, ctx=None):
+        """`ctx` is one share's context (run.ctx[...]): its host's VM and UI
+        section, its lane, its share id, and every guest as seen from that
+        host (principal, host id, UI section). Dana's share by default; Cy's
+        share (§12.2, a guest who hosts too) is the same acts on another ctx."""
         self.run = run
         self.cfg = run.cfg
         self.ui = run.ui
-        self.owner = run.vms["owner"]
+        self.ctx = ctx or run.ctx["dana"]
+        self.owner = self.ctx["owner"]
+        self.oui = self.ctx["oui"]
+        self.lane_cfg = self.ctx["lane"]
         self.log = run.log
         self.thread_open = False
         # After the first send in an app session a "Sent to the agent." line
@@ -50,7 +57,7 @@ class Acts:
 
     # ── helpers ─────────────────────────────────────────────────────────
     def person(self, who):
-        return self.run.people[who]
+        return self.ctx["people"][who]
 
     def at(self, role, name):
         x, y = self.ui[role][name]
@@ -61,7 +68,7 @@ class Acts:
         return vm.click(x, y, why=name)
 
     def share(self):
-        return self.run.share_id
+        return self.ctx["share"]
 
     def owner_share(self):
         j = self.owner.serve_call("shares_all")
@@ -87,8 +94,10 @@ class Acts:
         return t[-1]["seq"] if t else 0
 
     def lane_session(self):
-        o = self.cfg["owner"]
-        return f"worktrees-{o['lane']}~agent~{o['harness']}"
+        o = self.lane_cfg
+        # A Claude lane's agent is pane 0 of the place's own session; Codex
+        # runs in its `~agent~codex` sidecar.
+        return o.get("session") or f"worktrees-{o['lane']}~agent~{o['harness']}"
 
     def pane(self):
         rc, out = self.owner.sh(f"tmux capture-pane -p -t {json.dumps(self.lane_session())}", timeout=20)
@@ -100,7 +109,7 @@ class Acts:
         return "esc to interrupt" in p
 
     def agent_send(self, text):
-        o = self.cfg["owner"]
+        o = self.lane_cfg
         return self.owner.serve_call("agent_send", {"repo": o["repo"], "slug": o["lane"],
                                                      "session": self.lane_session(), "text": text})
 
@@ -108,12 +117,17 @@ class Acts:
     def open_share(self, who, args):
         """A guest opens the shared lane: in V1 that is the join ask."""
         p = self.person(who)
+        was = self.guest_state(p["principal"])
         if p["drive"] == "cli":
             j = p["vm"].remote_call(p["host"], "share_join", {"share": self.share()}, config_dir=p["config_dir"])
             if j is None:
                 return Outcome(False, "share_join refused or failed")
         else:
-            self.click(p["vm"], "guest", "open_share")
+            self.click(p["vm"], p["ui"], "open_share")
+        if was == "allowed":
+            # Let in before this click (Cy, by share_allow: B4), so the host
+            # cannot show that the click opened anything. No OCR: say so.
+            return Outcome(None, f"guest {p['principal']} was allowed before the click: the host cannot prove the open")
         st = _until(lambda: self.guest_state(p["principal"]) in ("asked", "allowed")
                     and self.guest_state(p["principal"]), 15)
         return Outcome(bool(st), f"guest {p['principal']} is {st or self.guest_state(p['principal'])}")
@@ -128,17 +142,25 @@ class Acts:
     def allow(self, who, args):
         """The owner lets a guest in, from the share strip."""
         g = self.person(args["guest"])
-        self.click(self.owner, "owner", "allow")
+        self.click(self.owner, self.oui, "allow")
         st = _until(lambda: self.guest_state(g["principal"]) == "allowed", 15)
         if not st:
             return Outcome(False, f"guest {g['principal']} is {self.guest_state(g['principal'])}")
         return Outcome(True, "allowed", guest=g["principal"])
 
+    def open_lane(self, who, args):
+        """The host goes back to the shared lane (after reading someone
+        else's share, the app shows that one). UI only."""
+        self.click(self.owner, self.oui, "open_lane")
+        time.sleep(1.5)
+        self.thread_open = False
+        return Outcome(None, "UI only")
+
     def open_thread(self, who, args):
         """The owner opens the thread panel. Nothing on the host changes, so
         this is a UI step with no proof of its own: the next use_these is."""
         key = "thread" if (self.owner_share() or {}).get("binding", {}).get("state") == "active" else "thread_ended"
-        self.click(self.owner, "owner", key)
+        self.click(self.owner, self.oui, key)
         self.thread_open = True
         return Outcome(None, "UI only; proved by the next use_these")
 
@@ -174,7 +196,7 @@ class Acts:
         """A guest writes in the thread: the composer and Post, or the CLI for
         a person with no screen."""
         p = self.person(who)
-        text = self.run.wording(who, args["text"])
+        text = self.run.wording(who, args["text"], self.ctx)
         before = self.last_seq()
         if p["drive"] == "cli":
             pid = f"vmlab-{self.run.run_id}-{int(time.time() * 1000)}"
@@ -184,7 +206,7 @@ class Acts:
                 return Outcome(False, "thread_post failed", text=text)
         else:
             vm = p["vm"]
-            self.click(vm, "guest", "composer")
+            self.click(vm, p["ui"], "composer")
             vm.type(text, why="post")
             time.sleep(0.5)
             # Return posts (Shift+Return is a new line). The Post button sits
@@ -213,7 +235,7 @@ class Acts:
             self.open_thread(who, {})
             time.sleep(1.5)
         before_seq, before_turns = self.last_seq(), self.turn_count()
-        self.click(self.owner, "owner", "use_these_after" if self.sent_once else "use_these")
+        self.click(self.owner, self.oui, "use_these_after" if self.sent_once else "use_these")
         time.sleep(1.5)
         note = args.get("note") or ""
         # The preview opens with its note field focused, and its layout moves
@@ -229,7 +251,7 @@ class Acts:
         self.owner.key(36, why="send")
         if not note:
             time.sleep(1.5)
-            self.click(self.owner, "owner", "use_no_note")
+            self.click(self.owner, self.oui, "use_no_note")
 
         def shared():
             for e in (self.thread(before_seq) or []):
@@ -263,19 +285,19 @@ class Acts:
         before = {r.get("id") for r in self.requests()}
         if p["drive"] == "cli":
             p["vm"].remote_call(p["host"], "share_request",
-                                {"project": self.cfg["owner"]["repo"], "slug": args["slug"], "note": args.get("note")},
+                                {"project": self.lane_cfg["repo"], "slug": args["slug"], "note": args.get("note")},
                                 config_dir=p["config_dir"])
         else:
             vm = p["vm"]
             # A click while the thread's composer has focus only blurs it.
-            self.click(vm, "guest", "blur")
+            self.click(vm, p["ui"], "blur")
             time.sleep(0.5)
-            self.click(vm, "guest", "ask_main")
+            self.click(vm, p["ui"], "ask_main")
             time.sleep(1.5)
             if args.get("note"):
-                self.click(vm, "guest", "ask_note")
+                self.click(vm, p["ui"], "ask_note")
                 vm.type(args["note"], why="ask note")
-            self.click(vm, "guest", "ask_send")
+            self.click(vm, p["ui"], "ask_send")
 
         def landed():
             return [r for r in self.requests() if r.get("id") not in before]
@@ -288,7 +310,7 @@ class Acts:
         before = self.requests()
         if not before:
             return Outcome(False, "no open request to answer")
-        self.click(self.owner, "owner", "request_dismiss")
+        self.click(self.owner, self.oui, "request_dismiss")
         gone = _until(lambda: not self.requests(), 15)
         return Outcome(bool(gone), "request dismissed" if gone else "request still open",
                        request=before[0].get("id"))
@@ -302,7 +324,7 @@ class Acts:
     def end_session(self, who, args):
         """The lane's session ends: closed and reopened, then a first turn,
         which is when the share sees another session (the rehearsal's way)."""
-        o = self.cfg["owner"]
+        o = self.lane_cfg
         self.owner.sh(f"cd {json.dumps(o['repo'])} && worktrees close {o['lane']} >/dev/null 2>&1; sleep 2; "
                       f"worktrees open {o['lane']} --ai {o['harness']} --no-attach >/dev/null 2>&1", timeout=90)
         time.sleep(20)
@@ -313,9 +335,9 @@ class Acts:
 
     def share_again(self, who, args):
         before = len((self.owner_share() or {}).get("ended", []))
-        self.click(self.owner, "owner", "share_again")
+        self.click(self.owner, self.oui, "share_again")
         time.sleep(1.5)
-        self.click(self.owner, "owner", "share_again_confirm")
+        self.click(self.owner, self.oui, "share_again_confirm")
 
         def again():
             s = self.owner_share() or {}
@@ -327,13 +349,13 @@ class Acts:
         s = self.owner_share() or {}
         key = "sharing" if s.get("binding", {}).get("state") == "active" else "sharing_ended"
         self.run.snapshot_host("before-stop")
-        self.click(self.owner, "owner", key)
+        self.click(self.owner, self.oui, key)
         time.sleep(1.5)
         # The dialog says "N earlier sessions stay readable too" once a Share
         # again has kept one: a line more, and its buttons move down.
-        dy = self.ui["owner"].get("stop_earlier_dy", 0) if s.get("ended") else 0
+        dy = self.ui[self.oui].get("stop_earlier_dy", 0) if s.get("ended") else 0
         for name in ("stop", "stop_confirm"):
-            x, y = self.at("owner", name)
+            x, y = self.at(self.oui, name)
             self.owner.click(x, y + dy, why=name)
             time.sleep(1.0)
         gone = _until(lambda: self.owner_share() is None, 20)
@@ -362,21 +384,21 @@ class Acts:
         self.run.normalize_window(self.owner)
         self.run.dismiss_banners(self.owner)
         # Dana starts her agent again: the lane has no session after a boot.
-        o = self.cfg["owner"]
+        o = self.lane_cfg
         self.owner.sh(f"cd {json.dumps(o['repo'])} && worktrees open {o['lane']} --ai {o['harness']} --no-attach "
                       ">/dev/null 2>&1", timeout=90)
         time.sleep(20)
         self.run.dismiss_harness_modal()
         guests = {}
-        for name, p in self.run.people.items():
-            if p["role"] != "guest" or not p.get("active"):
+        for name, p in self.ctx["people"].items():
+            if not p.get("active", True):
                 continue
             ok = _until(lambda p=p: p["vm"].remote_call(p["host"], "thread_read", {"share": self.share(), "after": 0},
                                                          config_dir=p["config_dir"], timeout=30), 180, 5)
             guests[name] = round(time.time() - t0, 1) if ok else None
         r["guests_back_s"] = guests
         # The owner's view comes back on the lane and its thread.
-        self.click(self.owner, "owner", "open_lane")
+        self.click(self.owner, self.oui, "open_lane")
         time.sleep(2)
         self.thread_open = False
         self.sent_once = False

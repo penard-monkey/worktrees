@@ -99,6 +99,12 @@ pub struct Other {
     /// Open when the app last ran (see the module doc for when it turns false).
     #[serde(default)]
     pub open: bool,
+    /// The page zoom the person gave THIS window; absent until they do, so it
+    /// goes on inheriting the app's (`app_zoom`). `main`'s is `app_zoom` itself
+    /// and is never here. It comes back whatever Restore window says: it is a
+    /// size, not a place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zoom: Option<f64>,
 }
 
 /// `window-state.json`: `main` at the top level, as it always was, and every
@@ -115,7 +121,7 @@ impl StateFile {
     /// The slot for `label`, as this file has it.
     pub fn slot(&self, label: &str) -> Other {
         if label == MAIN {
-            Other { state: self.main, open: true }
+            Other { state: self.main, open: true, zoom: None }
         } else {
             self.windows.get(label).copied().unwrap_or_default()
         }
@@ -306,9 +312,31 @@ fn mark_open<R: Runtime>(app: &AppHandle<R>, label: &str, open: bool) {
     }
 }
 
+/// The zoom the person gave `label`, if they gave it one.
+pub fn zoom<R: Runtime>(app: &AppHandle<R>, label: &str) -> Option<f64> {
+    let tracker = app.state::<Tracker>();
+    let live = tracker.slots.lock().unwrap().get(label).map(|s| s.state);
+    live.or_else(|| tracker.seed.get().map(|f| f.slot(label))).and_then(|o| o.zoom)
+}
+
+/// Keep the zoom the person gave `label`. Not `main`'s: that is a setting.
+pub fn keep_zoom<R: Runtime>(app: &AppHandle<R>, label: &str, factor: f64) {
+    let tracker = app.state::<Tracker>();
+    if tracker.stopped.load(Ordering::SeqCst) || label == MAIN {
+        return;
+    }
+    let mut slots = tracker.slots.lock().unwrap();
+    let slot = slots.entry(label.to_string()).or_default();
+    if slot.state.zoom != Some(factor) {
+        slot.state.zoom = Some(factor);
+        drop(slots);
+        tracker.touch();
+    }
+}
+
 fn write(dir: &Path, f: &StateFile) {
     let empty = |s: &WinState| s.frame.is_none() && !s.fullscreen && !s.maximized;
-    if empty(&f.main) && f.windows.values().all(|o| empty(&o.state) && !o.open) {
+    if empty(&f.main) && f.windows.values().all(|o| empty(&o.state) && !o.open && o.zoom.is_none()) {
         return; // nothing observed — leave whatever is on disk alone
     }
     // The dir first: on a fresh install it is serve that makes it, and the
@@ -412,7 +440,7 @@ pub fn attach<R: Runtime>(w: &WebviewWindow<R>, dir: &Path, restore: bool, min: 
         // Not restoring (or nothing saved): the window is its plain default
         // frame, so that is what a quit right now should record. The `open`
         // flag is the file's until `mark_open` says otherwise.
-        tracker.slots.lock().unwrap().insert(label.clone(), Slot { state: Other { state: WinState::default(), open: saved.open }, pending_fullscreen: false });
+        tracker.slots.lock().unwrap().insert(label.clone(), Slot { state: Other { state: WinState::default(), open: saved.open, zoom: saved.zoom }, pending_fullscreen: false });
         sample(w);
     }
     mark_open(w.app_handle(), &label, true);
@@ -587,7 +615,7 @@ mod tests {
 
     fn both() -> StateFile {
         let mut windows = BTreeMap::new();
-        windows.insert("companion".to_string(), Other { state: WinState { frame: Some(C), maximized: false, fullscreen: true }, open: true });
+        windows.insert("companion".to_string(), Other { state: WinState { frame: Some(C), maximized: false, fullscreen: true }, open: true, zoom: None });
         StateFile { main: WinState { frame: Some(F), maximized: true, fullscreen: false }, windows }
     }
 
@@ -629,7 +657,7 @@ mod tests {
     fn a_main_save_keeps_a_companion_that_was_not_opened() {
         let t = Tracker::default();
         let _ = t.seed.set(both());
-        t.slots.lock().unwrap().insert(MAIN.into(), Slot { state: Other { state: WinState { frame: Some(SCREEN), maximized: false, fullscreen: false }, open: true }, pending_fullscreen: false });
+        t.slots.lock().unwrap().insert(MAIN.into(), Slot { state: Other { state: WinState { frame: Some(SCREEN), maximized: false, fullscreen: false }, open: true, zoom: None }, pending_fullscreen: false });
         let snap = t.snapshot();
         assert_eq!(snap.main.frame, Some(SCREEN));
         assert_eq!(snap.windows.get("companion"), both().windows.get("companion"));
@@ -643,11 +671,11 @@ mod tests {
     fn a_reopen_in_the_same_session_restores_the_frame_it_was_closed_at() {
         let seed = both();
         let moved = Frame { x: 40.0, y: 60.0, width: 700.0, height: 500.0 };
-        let left = Other { state: WinState { frame: Some(moved), maximized: false, fullscreen: false }, open: false };
+        let left = Other { state: WinState { frame: Some(moved), maximized: false, fullscreen: false }, open: false, zoom: None };
         assert_eq!(restore_from(Some(left), &seed, "companion"), left, "the live slot, not the launch-time file");
-        let fs = Other { state: WinState { frame: Some(moved), maximized: false, fullscreen: true }, open: false };
+        let fs = Other { state: WinState { frame: Some(moved), maximized: false, fullscreen: true }, open: false, zoom: None };
         assert_eq!(restore_from(Some(fs), &seed, "companion"), fs, "closed fullscreen: fullscreen again, over its normal frame");
-        let max = Other { state: WinState { frame: Some(moved), maximized: true, fullscreen: false }, open: false };
+        let max = Other { state: WinState { frame: Some(moved), maximized: true, fullscreen: false }, open: false, zoom: None };
         assert_eq!(restore_from(Some(max), &seed, "companion"), max, "closed maximised: maximised again");
         // A first run: nothing in the file, but the window was opened and moved.
         assert_eq!(restore_from(Some(left), &StateFile::default(), "companion"), left);
@@ -665,5 +693,21 @@ mod tests {
         f.set("companion", c);
         assert!(!f.was_open("companion"));
         assert_eq!(f.slot("companion").state.frame, Some(C));
+    }
+
+    /// A window's own zoom is additive: absent reads as none and writes
+    /// nothing, so a file from before it round-trips unchanged; kept, it
+    /// survives beside the frame, and main never has one here.
+    #[test]
+    fn a_windows_own_zoom_is_kept_and_absent_until_it_is_set() {
+        let old = r#"{"frame":null,"maximized":false,"fullscreen":false,"windows":{"companion":{"frame":null,"maximized":false,"fullscreen":false,"open":true}}}"#;
+        let mut f: StateFile = serde_json::from_str(old).unwrap();
+        assert_eq!(f.slot("companion").zoom, None);
+        assert!(!serde_json::to_string(&f).unwrap().contains("zoom"), "no zoom of its own is no key");
+        f.set("companion", Other { zoom: Some(1.25), ..f.slot("companion") });
+        let back: StateFile = serde_json::from_str(&serde_json::to_string(&f).unwrap()).unwrap();
+        assert_eq!(back.slot("companion").zoom, Some(1.25));
+        assert!(back.slot("companion").open, "the zoom did not cost the rest of the slot");
+        assert_eq!(back.slot(MAIN).zoom, None);
     }
 }

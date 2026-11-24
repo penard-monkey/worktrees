@@ -1981,6 +1981,66 @@ ${body}
   check(heard.at(-1) === "connected", "…and the lists are read again");
   link.close();
   check(socks[1].closed, "closing the link closes its socket");
+
+  // Removed, not offline (found in the v0.52.0 three-VM run): the host's
+  // close reason or a TLS refusal of this device's key is a state of its own,
+  // with no timer, a manual retry, and the plain offline path for the rest.
+  const pipeRs = read(SRC.pipe);
+  const refusedWords = /PipeError::Tls\(format!\("(the host refused this device's key) \(/.exec(pipeRs)?.[1];
+  check(refusedWords === G.KEY_REFUSED, `guestdoor's KEY_REFUSED is pipe.rs's words for a refused key (${refusedWords})`);
+  const hostClosed = /pub const HOST_CLOSED: &str = "([^"]*)";/.exec(pipeRs)?.[1];
+  check(hostClosed === G.HOST_CLOSED_BY, `guestdoor's HOST_CLOSED_BY is pipe.rs's HOST_CLOSED (${JSON.stringify(hostClosed)})`);
+  const hearWhy = /let why = match e \{([\s\S]*?)\};/.exec(read(SRC.conn))?.[1] ?? "";
+  const connWhy = [...hearWhy.matchAll(/DeviceEvent::\w+ \{ \.\. \} => "(\w+)",|_ => "(\w+)",/g)].map((m) => m[1] ?? m[2]);
+  check(same([...connWhy].sort(), ["disabled", "removed", "revoked"]), `conn.rs ends a device with revoked, removed or disabled (${connWhy.join(", ")})`);
+  const cls = (why) => G.removedBy(why);
+  const expect = (what, got, want) => check(same(got, want), `${what}${same(got, want) ? "" : `: want ${JSON.stringify(want)}, got ${JSON.stringify(got)}`}`);
+  expect("a close with `revoked` is removed", cls("the connection to worktrees serve closed. x (the host closed the connection: revoked)"), "revoked");
+  expect("a close with `removed` is removed", cls("the host closed the connection: removed"), "removed");
+  expect("a close with `disabled` is removed", cls("the host closed the connection: disabled"), "disabled");
+  expect("a refused key at TLS is removed", cls("macos.shared (10.211.55.15:49350): the secure connection failed: the host refused this device's key (AccessDenied): it was revoked, disabled or expired there, or never enrolled"), "refused");
+  expect("a host going away is offline", cls("the connection to worktrees serve closed (the host closed the connection: going away)"), null);
+  expect("an unreadable device file on the host is offline, not removed", cls("the host closed the connection: unreadable"), null);
+  expect("no route is offline", cls("David's Mac (100.64.0.2:7461): could not connect: No route to host"), null);
+  expect("a word that only begins like a reason is not one", cls("the host closed the connection: revokedness"), null);
+
+  timers.length = 0;
+  const socks2 = [];
+  let closedWhy = null;
+  let throwWith = null;
+  const dial2 = async (onLost) => {
+    if (throwWith) throw throwWith;
+    const s = { closed: false, onLost, declared: [] };
+    s.door = { ready: Promise.resolve(), invoke: async (cmd) => ({ cmd }), listen: async () => () => {}, channel: () => ({}), openChannels: () => 0, declare: (n) => s.declared.push(n) };
+    socks2.push(s);
+    return { sock: s.door, closedWhy: () => closedWhy, close: () => { s.closed = true; } };
+  };
+  const l2 = G.guestLink(host, dial2, env);
+  await ticks();
+  check(l2.state().kind === "up", "a second link connects");
+  closedWhy = "the host closed the connection: revoked";
+  throwWith = "David's Mac (100.64.0.2:7461): the secure connection failed: the host refused this device's key (AccessDenied): it was revoked, disabled or expired there, or never enrolled";
+  socks2[0].onLost("the connection to worktrees serve closed. David's Mac may be asleep or its app closed; this window tries again on its own.");
+  await ticks();
+  check(l2.state().kind === "removed" && l2.state().by === "revoked", `the host closing with revoked is removed, not offline (${JSON.stringify(l2.state())})`);
+  check(timers.length === 0, `a removed link schedules no redial (${timers.length} timer(s))`);
+  await advance(120_000);
+  check(socks2.length === 1 && l2.state().kind === "removed", "…and none happens, however long it waits");
+  let why2 = null;
+  await l2.call("shares_list").catch((e) => { why2 = String(e); });
+  check(/revoked/.test(why2 ?? ""), `a call while removed is refused with why (${why2})`);
+  l2.retry();
+  await ticks();
+  check(socks2.length === 1 && l2.state().by === "revoked", "the window coming back into view does not redial a removed link");
+  l2.retry(true);
+  await ticks();
+  check(l2.state().kind === "removed" && l2.state().by === "refused" && timers.length === 0, `a manual Retry dials once; a refused key stays removed, still with no timer (${JSON.stringify(l2.state())})`);
+  throwWith = null;
+  closedWhy = null;
+  l2.retry(true);
+  await ticks();
+  check(l2.state().kind === "up" && socks2.length === 2, "re-enabled on the host: a manual Retry connects");
+  l2.close();
 }
 
 // The build: when one exists, the socket client IS in it — the shipped app is

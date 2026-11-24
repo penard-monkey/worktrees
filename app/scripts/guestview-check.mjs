@@ -145,6 +145,11 @@ const seqs = (ts) => ts.map((t) => `${t.seq}:${t.user}`);
   check(/Ended/.test(R.standing(share("allowed", ended), ended, up, "David").words), "an ended binding says Ended");
   expect("an asked share waits for the owner", R.standing(share("asked", active), active, up, "David").words, "Waiting for David to let you in");
   expect("offline says the owner's host is offline, before anything else", R.standing(share("asked", active), active, { kind: "offline", why: "x", retryAt: null }, "David"), { live: false, words: "David's host is offline" });
+  // A removed guest is told so, not "offline" (the v0.52.0 three-VM run: Bret's app said offline forever).
+  expect("a guest the owner removed is told so", R.standing(share("allowed", active), active, { kind: "removed", why: "x", by: "revoked" }, "David"), { live: false, words: "David removed this device" });
+  expect("a forgotten device reads the same", R.standing(share("allowed", active), active, { kind: "removed", why: "x", by: "removed" }, "David").words, "David removed this device");
+  expect("a disabled device is told it was turned off", R.standing(share("allowed", active), active, { kind: "removed", why: "x", by: "disabled" }, "David").words, "David's host turned this device off");
+  expect("a refused key says the host no longer accepts it", R.standing(share("allowed", active), active, { kind: "removed", why: "x", by: "refused" }, "David").words, "David's host no longer accepts this device");
 }
 {
   const s = (id, state, bound = 1, slug = id) => ({ id, project: "worktrees", project_id: "x", slug, title: null, state, binding: { harness: "claude", state: "active", bound_at: bound, ended_at: null }, ended: [], created_at: 1 });

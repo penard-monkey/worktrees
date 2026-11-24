@@ -6,7 +6,8 @@
 //     General draws FROM the table. The Settings map owns exactly the table's
 //     keys. Nothing but the helper reads a key.
 //  2. Ideas (#632) is the one beta today: with its flag OFF the main window
-//     shows no lightbulb in the rail and takes no ⌘⇧I, turning it off closes
+//     shows no lightbulb in the rail, takes no ⌘⇧I and offers no workspace
+//     overview (a workspace's name folds its card), turning it off closes
 //     the Ideas window, and the shim's launch rule reads the same key.
 //  3. Named workspaces LEFT the beta on 2026-11-14: no workspace surface sits
 //     behind a beta helper any more (the switch, the menus, the list's fetch,
@@ -130,7 +131,16 @@ ok(gated('data-testid="ideas-rail"'), "the rail's lightbulb renders only with Id
 const chord = code.match(/if \([^\n]*e\.code === "KeyI"\)\) \{/)?.[0] ?? "";
 ok(/^if \(keyRef\.current\.ideasOn && /.test(chord), "⌘⇧I is taken only with Ideas on");
 ok(/keyRef\.current = \{[\s\S]*?\bideasOn\b[\s\S]*?\};/.test(code), "…and keyRef carries ideasOn");
-ok((code.match(/openIdeas\(\)|onClick=\{openIdeas\}/g) ?? []).length === 2, "openIdeas has exactly its two callers, the chord and the rail");
+ok((code.match(/openIdeas\(\)|onClick=\{openIdeas\}/g) ?? []).length === 3, "openIdeas has exactly its three callers, the chord, the rail and openIdeaDoc");
+// The third (phase 4): a workspace overview's plan ▸ / idea ▸ opens the
+// document in the Ideas window, and returns first with Ideas off.
+ok(/const openIdeaDoc = \(id: string\) => \{\s*if \(!ideasOn\) return;/.test(code), "…and openIdeaDoc opens nothing with Ideas off");
+// Phase 4's overview is Ideas', on a nav that is nobody's beta (#662).
+ok(gated('data-testid="ws-overview-open"'), "a workspace menu's Overview renders only with Ideas on");
+ok(/const openWsOverview = \(id: string\) => \{\s*if \(!ideasOn \|\| id === EVERYTHING_ELSE_ID\) return;/.test(code), "openWsOverview opens nothing with Ideas off, nor for Everything Else");
+ok(/onOpen=\{ideasOn \? \(\) => openWsOverview\(w\.id\) : undefined\}/.test(code) && /onClick=\{onOpen \?\? onToggle\}/.test(code), "with Ideas off a workspace's name folds its card, as before phase 4");
+ok(/\) : ideasOn && wsOpen && wsById\(wsOpen\) \? \(\s*<WorkspaceOverview/.test(code), "the overview is drawn only with Ideas on");
+ok((code.match(/<WorkspaceOverview\b/g) ?? []).length === 1, "…and in one place");
 ok(/if \(was === true && !ideasOn\) \{\s*invoke\("close_companion"\)/.test(code), "turning Ideas off closes the Ideas window (close_companion)");
 // Workspaces: out of the beta (2026-11-14).
 ok(ungated("<NavViewSwitch"), "the Workspaces | All projects switch is behind no beta");
@@ -139,7 +149,11 @@ ok(/const navView: NavView = wsList && settings\.nav_view === "workspaces"/.test
 ok(/navView === "workspaces" \? workspacesNav\(\)/.test(code), "the Workspaces view is drawn through navView");
 const eff = code.match(/useEffect\(\(\) => \{\s*let alive = true;\s*invoke<WsList>\("workspaces_list"\)[\s\S]*?\}, \[wsRegKey\]\);/)?.[0] ?? "";
 ok(eff.length > 0, "workspaces_list is fetched with no beta in its way (its effect keys on the registry alone)");
-ok(!/ideasOn[^\n;]*\bwsList\b|\bwsList\b[^\n;]*ideasOn/.test(code), "no line ties the workspace list to ideasOn");
+// The overview's own read (Ideas) keys on the list, so a changed plan is read
+// again; it never writes it. That one effect apart, no line ties the two.
+const ovEff = code.match(/useEffect\(\(\) => \{\s*if \(!ideasOn \|\| !wsOpen\) \{ setWsOv\(null\); return; \}[\s\S]*?\}, \[ideasOn, wsOpen, wsList, ideasTick\]\);/)?.[0] ?? "";
+ok(/"workspace_overview"/.test(ovEff) && !/setWsList|workspaces_list/.test(ovEff), "the overview's effect reads workspace_overview and leaves the workspace list alone");
+ok(!/ideasOn[^\n;]*\bwsList\b|\bwsList\b[^\n;]*ideasOn/.test(code.replace(ovEff, "")), "no line ties the workspace list to ideasOn");
 // The words from before "All projects" existed are gone.
 ok(/: "Remove from All projects"\}/.test(code) && !/ideasOn \? "Remove from All projects"/.test(code), "the project menu always says Remove from All projects");
 ok(/"click again to remove from All projects" : "remove project"/.test(code) && !/"click again to remove from workspace"/.test(code), "the ✕'s armed tooltip always says remove from All projects");
