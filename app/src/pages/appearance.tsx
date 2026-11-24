@@ -20,7 +20,7 @@ export function AppearancePage() {
           value={Math.max(0, ZOOM_STEPS.indexOf(clampZoom(settings.app_zoom) as (typeof ZOOM_STEPS)[number]))}
           onChange={(e) => onChange({ app_zoom: ZOOM_STEPS[+e.currentTarget.value] })}
         />
-        <div className="hint">⌘+ / ⌘− / ⌘0 anywhere in the app. Scales the whole window — chrome, icons, files and the terminal, which re-fits its tmux pane to the new size. (⌘⌥+ / ⌘⌥− is the markdown reader's own size.)</div>
+        <div className="hint">⌘+ / ⌘− / ⌘0 in this window, or the View menu on a Mac. Scales the whole window — chrome, icons, files and the terminal, which re-fits its tmux pane to the new size. (⌘⌥+ / ⌘⌥− is the markdown reader's own size.)</div>
       </section>
     </Sec>
 

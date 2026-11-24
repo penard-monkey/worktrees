@@ -700,12 +700,14 @@ export function stepZoom(v: number, dir: 1 | -1): number {
  *  only when the factor actually CHANGES. Failure is logged, never thrown —
  *  a webview that refuses to zoom must not take the app down with it, and in
  *  the browser harness there is no webview at all. */
+/** `keep` is the companion's: the person chose this factor for that window, so
+ *  the shim keeps it as the window's own (main's is the `app_zoom` setting). */
 let zoomApplied: number | null = null;
-export function applyZoom(v: number): void {
+export function applyZoom(v: number, keep = false): void {
   const factor = clampZoom(v);
-  if (zoomApplied === factor) return;
+  if (zoomApplied === factor && !keep) return;
   zoomApplied = factor;
-  invoke("set_zoom", { factor }).catch(() => {
+  invoke("set_zoom", keep ? { factor, keep } : { factor }).catch(() => {
     /* harness / older backend — the page simply stays at 1 */
   });
 }

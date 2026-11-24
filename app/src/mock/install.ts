@@ -3194,6 +3194,10 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     // not on an engine (main.tsx) — and says so if something ever calls it.
     case "raise_window":
       return null;
+    // A browser tab has no menu bar, and no zoom of its own the shim kept.
+    case "menu_ideas":
+    case "window_zoom":
+      return null;
     // The Ideas companion: a second Tauri window in the app; in the harness, a
     // second tab on the same dev server, carrying this page's query.
     case "open_companion":

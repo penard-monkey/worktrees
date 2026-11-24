@@ -192,7 +192,7 @@ async fn install_app_version(app: AppHandle, tag: String) -> Result<String, Stri
     Ok(up.version)
 }
 
-/// App-wide zoom — WKWebView's `setPageZoom`, driven by ⌘+ / ⌘− / ⌘0.
+/// The CALLING window's zoom — WKWebView's `setPageZoom`, driven by ⌘+ / ⌘− / ⌘0.
 ///
 /// This is deliberately NOT tauri's `zoomHotkeysEnabled`. That option injects a
 /// script (`tauri/src/webview/scripts/zoom-hotkey.js`) whose `window` keydown
@@ -207,7 +207,7 @@ async fn install_app_version(app: AppHandle, tag: String) -> Result<String, Stri
 /// to the new cols/rows. `--ui-rem` alone can never do that (tokens.css keeps
 /// `--term-size` independent on purpose).
 #[tauri::command]
-async fn set_zoom(window: tauri::WebviewWindow, factor: f64) -> Result<(), String> {
+async fn set_zoom(window: tauri::WebviewWindow, factor: f64, keep: Option<bool>) -> Result<(), String> {
     // A NaN or a wild factor here is a blank window the user cannot zoom back
     // out of — the clamp is the frontend's, repeated because this is an IPC
     // boundary and the frontend is not the only possible caller.
@@ -215,10 +215,18 @@ async fn set_zoom(window: tauri::WebviewWindow, factor: f64) -> Result<(), Strin
         return Err("zoom factor is not a finite number".into());
     }
     let factor = factor.clamp(0.5, 3.0);
+    let label = window.label();
     window.set_zoom(factor).map_err(|e| {
-        applog("error", &format!("set_zoom({factor}): {e}"));
+        applog("error", &format!("set_zoom({factor}) on {label}: {e}"));
         e.to_string()
-    })
+    })?;
+    applog("info", &format!("zoom: {label} {factor}"));
+    // A person's own act on a window other than main (winstate.rs `Other`);
+    // main's factor is a setting, and the seed a window starts from is neither.
+    if keep == Some(true) {
+        winstate::keep_zoom(window.app_handle(), label, factor);
+    }
+    Ok(())
 }
 
 // ── the shim's own commands ──────────────────────────────────────────────────
@@ -283,6 +291,19 @@ async fn open_companion(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn close_companion(app: AppHandle) -> Result<(), String> {
     companion::close(&app)
+}
+
+/// The zoom the person gave the calling window, or null while it has none of
+/// its own (the companion then takes the app's).
+#[tauri::command]
+async fn window_zoom(window: tauri::WebviewWindow) -> Result<Option<f64>, String> {
+    Ok(winstate::zoom(window.app_handle(), window.label()))
+}
+
+/// Put the Ideas beta's items in the menu bar, or take them out (winmenu.rs).
+#[tauri::command]
+async fn menu_ideas(app: AppHandle, on: bool) -> Result<(), String> {
+    winmenu::ideas(&app, on).inspect_err(|e| applog("warn", &format!("menu: the Ideas items: {e}")))
 }
 
 // ── the remote door (remote.rs) ─────────────────────────────────────────────
@@ -581,6 +602,8 @@ pub fn run() {
             raise_window,
             open_companion,
             close_companion,
+            window_zoom,
+            menu_ideas,
             remote_hosts,
             remote_choose,
             remote_forget,
@@ -597,6 +620,9 @@ pub fn run() {
         .on_window_event(|window, event| {
             if window.label() == winstate::MAIN && matches!(event, tauri::WindowEvent::Destroyed) {
                 companion::main_closed(window.app_handle());
+            }
+            if matches!(event, tauri::WindowEvent::Focused(true)) {
+                winmenu::focused(window.app_handle(), window.label());
             }
         })
         .build(tauri::generate_context!())
