@@ -46,6 +46,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 - **Pairing with a host you were already paired with replaces the old pairing (group chat, beta).** A guest who was removed and invited back, or anyone who pairs the same host again, used to keep both records: the sidebar showed a second, offline group for the same host, and the dead pairing kept dialling, so the host raised "… tried to connect and was refused: it is revoked" again and again. The device's host store now keeps one record per host: a new pairing to the same host takes the old one's place (and its choice as the window's engine, unless the new pairing is a guest's) and deletes the old device key. A store that already holds two is cleaned at the next pairing. For an app that holds its own keys (`HostStore::add_record`), the replaced records are returned so it deletes their keys.
 
+- **Claude's usage meter works on Linux.** The bottom bar said "Claude · unavailable" on every Linux host, because the usage reader only asked the macOS keychain for Claude Code's login. Off macOS it now reads Claude Code's own credentials file (`~/.claude/.credentials.json`, or under `CLAUDE_CONFIG_DIR`), and refuses one that is a symlink or that anyone but you can read.
+
 ## [0.52.0] - 2026-11-14
 
 ### Added
