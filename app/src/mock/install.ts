@@ -91,14 +91,28 @@ type MockHostPolicy = {
   fetch_interval_min: number;
   term_persist_scrollback: boolean;
   term_per_tab_history: boolean;
+  keep_awake: boolean;
 };
 const mockHostPolicy: MockHostPolicy = (() => {
   const d: MockHostPolicy = {
     codex_permissions: "auto-review", pi_project_trust: "never",
-    fetch_interval_min: 0, term_persist_scrollback: true, term_per_tab_history: true,
+    fetch_interval_min: 0, term_persist_scrollback: true, term_per_tab_history: true, keep_awake: false,
   };
   try { return { ...d, ...JSON.parse(sessionStorage.getItem(MOCK_HOST_POLICY_KEY) ?? "{}") }; } catch { return d; }
 })();
+// `?keepawake=none`: a host with no way to hold sleep off (no button);
+// `?keepawake=lost`: on, and the hold is not in effect.
+const keepAwakeParam = new URLSearchParams(location.search).get("keepawake");
+let mockKeepAwakeLost = keepAwakeParam === "lost";
+/** `keepawake::State`. */
+function mockKeepAwake() {
+  const supported = keepAwakeParam !== "none";
+  const on = supported && (mockHostPolicy.keep_awake || mockKeepAwakeLost);
+  return {
+    supported, on, held: on && !mockKeepAwakeLost, mechanism: supported ? "iokit" : null, os: supported ? "macos" : "linux",
+    error: mockKeepAwakeLost ? "the hold ended on its own; it is tried again within a minute" : null,
+  };
+}
 const mockHostPolicySets: { cmd: string; mode: string }[] = [];
 // `?env=codex,pi,guidance`: the engine was started with WORKTREES_CODEX_
 // PERMISSIONS=full / WORKTREES_PI_PROJECT_TRUST=ask / WORKTREES_AGENT_GUIDANCE
@@ -3122,6 +3136,16 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     }
     case "get_fetch_interval":
       return mockHostPolicy.fetch_interval_min;
+    case "get_keep_awake":
+      return mockKeepAwake();
+    case "set_keep_awake": {
+      if (typeof args.on !== "boolean") throw "invalid args `on`: invalid type: expected a boolean";
+      if (!mockKeepAwake().supported) throw "this computer has nothing Worktrees can hold sleep off with (Linux needs systemd and systemd-inhibit)";
+      setHostPolicy("set_keep_awake", { keep_awake: args.on });
+      mockKeepAwakeLost = false;
+      emitEvent("keep_awake:changed", mockKeepAwake());
+      return mockKeepAwake();
+    }
     case "detect_editors": {
       // `?editors=none|one|many` (default many) — the picker's three shapes:
       // no list at all (free text only), a single app, and apps + CLIs.

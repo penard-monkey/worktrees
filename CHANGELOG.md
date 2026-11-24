@@ -7,6 +7,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ### Added
 
+- **Keep awake: a cup in the left rail that keeps the computer from sleeping.** Click it and the computer running the agents
+  does not idle-sleep until you click again or Worktrees quits; it is lit while that holds, and a restart holds it again. The
+  same switch is in Settings → General → Keep awake. It is the host's: a window driving a paired host turns that host's on
+  and off (a device needs admin). The screen may still turn off, and closing the lid still sleeps. macOS uses a power
+  assertion named for Worktrees (`pmset -g assertions` lists it; nothing to install), Linux `systemd-inhibit`, and the button
+  is not shown where there is neither. Not a beta: it is small, self-contained and off until you turn it on.
+
 - **A macOS menu bar that lists what the app can do.** Settings, New Worktree, New Terminal, Add Project, Find, the zoom items, the quick switcher, Back and Forward, the sidebars, Reading Mode, Release Notes and the rest are menu items now, with the shortcuts they always had; items of the main window are greyed while the Ideas window is in front. An item replays its shortcut into the window that owns it, so it does exactly what the key does. The Ideas items are there only while that beta is on. Linux has no bar, as before.
 - **Workspaces view: an "Everything Else" group for projects in no workspace.** Every registered project that belongs to no named workspace now shows in a built-in card at the bottom of the Workspaces view, with its places under it as in All projects. It is worked out from the list each time and never saved, so adding a project to a workspace takes it out and removing it from its last workspace brings it back, with nothing to migrate. It has no menu, cannot be renamed, recoloured, reordered or deleted, and is not a drop target; drag a project out of it onto a workspace to add it there, and its project menu is All projects' own (no "Remove from workspace"). It folds like any card, remembered under its own reserved id, so a workspace of yours named "Everything Else" is a different card. With no workspaces yet, the "No workspaces yet" hint stays and Everything Else holds every project; with no members it is hidden.
 

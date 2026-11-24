@@ -10,6 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType }
 import { useEscape } from "./useEscape";
 import * as Icons from "./icons";
 import { invoke, notGranted, remoteHost, windowOnHost } from "./ipc";
+import { useKeepAwake } from "./KeepAwake";
 import { dismissCat, useRemote } from "./remoteStore";
 import { DEFAULTS } from "./settings";
 import { groupChatBeta } from "./beta";
@@ -149,6 +150,7 @@ export function SettingsSheet(props: SheetProps) {
   }, [update?.harnesses]);
 
   const snap = useHostSnap(open, cat, installed);
+  const keepAwake = useKeepAwake().state;
   const remote = useRemote();
 
   // Problems a page has told the sheet about (rule 3), beside the ones it
@@ -180,6 +182,7 @@ export function SettingsSheet(props: SheetProps) {
   const host = useMemo(() => {
     const h: Partial<Record<HostKey, boolean>> = {};
     if (snap.codexPermissions) h.codex_access = snap.codexPermissions !== "auto-review";
+    if (keepAwake) h.keep_awake = keepAwake.on;
     if (snap.fetchInterval !== undefined) h.fetch_interval = snap.fetchInterval !== 0;
     if (snap.termHistory) h.term_history = !snap.termHistory.persist_scrollback || !snap.termHistory.per_tab_history;
     if (snap.quota) { h.quota_gate = !snap.quota.gate; h.quota_pct = snap.quota.weekly_warn_pct !== null; }
@@ -205,7 +208,7 @@ export function SettingsSheet(props: SheetProps) {
     if (remote.status) h.remote_access = remote.status.state !== "off";
     if (remote.devices) h.devices = remote.devices.some((d) => d.revoked_at == null);
     return h;
-  }, [snap, guidance, crossProject, planning, remote.status, remote.devices]);
+  }, [snap, keepAwake, guidance, crossProject, planning, remote.status, remote.devices]);
 
   // Sections drawn in this visit (§4.3's deep-link reveal, and so a value set
   // back to its default does not make its section vanish under the pointer).

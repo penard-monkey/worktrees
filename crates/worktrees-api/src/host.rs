@@ -102,7 +102,7 @@ pub struct Hooks {
 /// Does, in order: the viewer sweep (COPIES of the user's documents that a
 /// crash left on disk — see `viewer::cleanup`), the one-way merge of the app's
 /// pre-registry project list, and then the poll thread, which begins with the
-/// cold-start pass (`backfill_worked`, `forget_vanished_places`,
+/// sleep hold (`keepawake`) and the cold-start pass (`backfill_worked`, `forget_vanished_places`,
 /// `sweep_term_history`) and loops every 3 s for the life of the process.
 ///
 /// The thread holds its own CLONE of `ctx`. That is why `Ctx::clone` must
@@ -188,6 +188,8 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
     // times a minute.
     let watch = pollctx.watch.clone();
     let watch = watch.as_ref();
+    // The host's sleep hold, if it was left on.
+    crate::keepawake::start(&pollctx);
     // Cold start: what happened while the engine was down. Runs before the
     // first sleep so the nav's afterglow is right on frame one.
     backfill_worked(&pollctx);
@@ -261,6 +263,7 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
             }
         }
         crate::ideas::tick(&pollctx, &mut ideas_watch);
+        crate::keepawake::tick(&pollctx);
         attach_ticks += 1;
         if attach_ticks >= 1200 {
             attach_ticks = 0;
@@ -431,7 +434,8 @@ const CLONE_CANCEL_GRACE: Duration = Duration::from_secs(3);
 
 /// The exit sequence, in the order the app's `RunEvent::Exit` arm ran it.
 ///
-/// Where each dock tab ended up, recorded BEFORE the sweep (a killed shell has
+/// The sleep hold first: nothing below needs the computer awake. Then where
+/// each dock tab ended up, recorded BEFORE the sweep (a killed shell has
 /// no cwd left to read); what each tab was SHOWING, likewise before (a killed
 /// shell still has its ring, but not for long); then the shells themselves,
 /// which have no tmux server holding them up and would otherwise outlive the
@@ -443,6 +447,7 @@ const CLONE_CANCEL_GRACE: Duration = Duration::from_secs(3);
 /// trees, which are copies of documents and belong on disk only while
 /// something is serving them.
 pub fn stop(ctx: &Ctx) {
+    ctx.keep_awake.release();
     term::save_shell_cwds(ctx, &ctx.shells);
     term::save_shell_scrollback(ctx, &ctx.shells);
     let keys: Vec<term::ShellKey> = ctx.shells.0.lock().unwrap().keys().cloned().collect();

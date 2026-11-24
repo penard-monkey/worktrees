@@ -205,6 +205,9 @@ pub const EVENTS: &[(&str, Event)] = &[
     // `{live, busy, waiting}`: the idea conversations' tmux sessions, by name
     // (phase S, `worktrees_api::watch::IdeaSessions`). Desktop only.
     ("ideas:sessions", Event::Console),
+    // `keepawake::State`: the host's sleep hold, which `get_keep_awake`
+    // answers for any device (`read`, host-wide, no project in it).
+    ("keep_awake:changed", Event::Everyone),
     // `{what, share?, seq?}` (group chat §6, `sharethread::changed`): a share,
     // its guests or its thread changed. The console, and the sockets of the
     // principals its `to` names — a guest hears about its own shares and
