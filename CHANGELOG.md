@@ -15,6 +15,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ### Fixed
 
+- **Markdown: more character references, and one id per heading.** The document view, the chat and the Ideas window now draw `&copy;`, `&hellip;`, `&mdash;` and a dozen more named references, and any numeric one (`&#169;`, `&#xA9;`); a reference inside `` `code` `` stays as it was written. A heading repeated in one document gets `-1`, `-2` on its id, as on GitHub, so `[x](#setup-1)` goes to the second *Setup*. (After #300 by t957095.)
+
 - **A Read of an image under `.worktrees/` in a project's `(main)` shows the picture again.** The chat printed `preview not shown — outside this place` for every such thumbnail: the host refuses another place's tree in `(main)`, but the client did not know that part of the rule, so it never fell back to the picture Claude was shown. The client now knows the `(main)` rule (case-insensitively), and a Read thumbnail the host refuses as `outside this place` falls back to that picture too, whatever the reason (a link out, a case variant). A paired device still gets the same note as for any Read outside the place.
 
 - Group chat (beta): a guest the owner removed is told so. Its sidebar said

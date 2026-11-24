@@ -60,14 +60,32 @@ export type MarkdownProps = {
 
 /** The renderer's own state: `found` collects every path candidate it drew,
  *  which IS the extraction — see mdpaths.ts on why there is no second walk. */
-type Ctx = MarkdownProps & { found?: Set<string> };
+type Ctx = MarkdownProps & {
+  found?: Set<string>;
+  /** Heading text → id, for THIS render of the document (`createSlugger`). */
+  slug: (text: string) => string;
+};
 
-// marked's lexer leaves the five XML entities encoded in `text` tokens (it
-// escapes at render time, which we skip). Decode them so prose reads right.
+// marked's lexer leaves character references encoded in `text` tokens (it
+// escapes at render time, which we skip). Decode them so prose reads right: the
+// named ones documents use, and any numeric one. An unknown name is left alone.
 const ENT: Record<string, string> = {
   "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'", "&apos;": "'", "&nbsp;": " ",
+  "&copy;": "©", "&hellip;": "…", "&mdash;": "—", "&ndash;": "–", "&reg;": "®", "&trade;": "™",
+  "&laquo;": "«", "&raquo;": "»", "&middot;": "·", "&deg;": "°", "&plusmn;": "±", "&times;": "×",
 };
-const decode = (s: string) => s.replace(/&(?:amp|lt|gt|quot|#39|apos|nbsp);/g, (m) => ENT[m] ?? m);
+const decode = (s: string) =>
+  s.replace(/&(?:#(\d{1,7})|#[xX]([0-9a-fA-F]{1,6})|[a-z]+);/g, (m, dec?: string, hex?: string) => {
+    if (dec) return codePoint(Number(dec));
+    if (hex) return codePoint(parseInt(hex, 16));
+    return ENT[m] ?? m;
+  });
+
+/** A numeric reference's character. One that names none (NUL, a surrogate,
+ *  past U+10FFFF) is U+FFFD, as CommonMark has it: `fromCodePoint` THROWS on
+ *  the last, and a throw here takes the pane with it. */
+const codePoint = (n: number) =>
+  n === 0 || n > 0x10ffff || (n >= 0xd800 && n <= 0xdfff) ? "\ufffd" : String.fromCodePoint(n);
 
 /**
  * What may appear in a rendered `href`. The click handler alone is NOT a
@@ -93,6 +111,25 @@ function slugify(text: string): string {
     .replace(/[^\w\s-]/g, "")
     .replace(/\s+/g, "-")
     .replace(/-+/g, "-");
+}
+
+/**
+ * Slugify with GitHub-style de-duplication: the second "Overview" heading in
+ * one document gets `overview-1`, the third `overview-2`, and never an id a
+ * heading already took ("Overview 1"). The counter belongs to one RENDER of one
+ * document: kept any longer, a re-render would number the same headings on.
+ */
+function createSlugger(): (text: string) => string {
+  const seen = new Map<string, number>();
+  return (text: string) => {
+    const base = slugify(text);
+    let n = seen.get(base) ?? 0;
+    let id = base;
+    while (seen.has(id)) id = `${base}-${++n}`;
+    seen.set(base, n);
+    seen.set(id, seen.get(id) ?? 0);
+    return id;
+  };
 }
 
 // Recursion guard. `**`×4000 in an 8 KB file lexes fine and then blows the
@@ -121,7 +158,9 @@ function inline(tokens: Token[] | undefined, ctx: Ctx, keyBase = "i", depth = 0)
       case "del":
         return <del key={k}>{inline((t as Tokens.Del).tokens, ctx, k, depth + 1)}</del>;
       case "codespan": {
-        const text = decode((t as Tokens.Codespan).text);
+        // Verbatim: marked 18 does not escape a code span, and a reference in
+        // one is the text someone wrote to show a reference.
+        const text = (t as Tokens.Codespan).text;
         const code = <code key={k} className="md-code-inline">{text}</code>;
         const h = ctx.pathLinks ? codeSpanHit(text) : null;
         if (!h) return code;
@@ -244,7 +283,7 @@ function block(tokens: Token[], ctx: Ctx, keyBase = "b", depth = 0): ReactNode[]
         const d = Math.min(6, Math.max(1, ht.depth));
         const H = (["h1", "h2", "h3", "h4", "h5", "h6"] as const)[d - 1];
         // id + scroll target so in-document links ([x](#heading)) work
-        out.push(<H key={k} id={slugify(ht.text)} className={`md-h md-h${d}`}>{inline(ht.tokens, ctx, k)}</H>);
+        out.push(<H key={k} id={ctx.slug(ht.text)} className={`md-h md-h${d}`}>{inline(ht.tokens, ctx, k)}</H>);
         break;
       }
       case "paragraph":
@@ -404,7 +443,7 @@ export const Markdown = memo(function Markdown(props: MarkdownProps) {
   const rendered = useMemo(() => {
     if (parsed.failed) return null;
     const found = new Set<string>();
-    return { nodes: block(parsed.tokens, { ...props, found }), found: [...found] };
+    return { nodes: block(parsed.tokens, { ...props, found, slug: createSlugger() }), found: [...found] };
   }, [parsed, props]);
   // After the render that drew them, so the host asks about exactly what is
   // on screen. Re-runs when the answers re-render the body; the host skips
