@@ -1,0 +1,25 @@
+/* A plan's work item: the review before Start, and Link a place (both windows). */
+.sw-scrim { position: fixed; inset: 0; z-index: 60; background: rgb(0 0 0 / 0.35); display: flex; align-items: flex-start; justify-content: center; padding: 8vh 16px 16px; }
+.sw-dialog { width: min(640px, 100%); max-height: 84vh; overflow-y: auto; display: flex; flex-direction: column; gap: var(--s2); padding: var(--s4); background: var(--bg-panel); border: 1px solid var(--line-strong); border-radius: 10px; box-shadow: 0 10px 30px rgb(0 0 0 / 0.3); color: var(--txt); font-size: var(--fs-body); }
+.sw-head { margin: 0; color: var(--txt-hi); font-weight: var(--fw-bold); overflow-wrap: anywhere; }
+.sw-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px var(--s3); margin: 0; font-size: var(--fs-meta); }
+.sw-facts dt { color: var(--txt); }
+.sw-facts dd { margin: 0; color: var(--txt-hi); overflow-wrap: anywhere; }
+.sw-quiet { color: var(--txt); font-size: var(--fs-meta); }
+.sw-label { font-size: var(--fs-meta); color: var(--txt); }
+.sw-brief { width: 100%; box-sizing: border-box; resize: vertical; min-height: 8em; padding: var(--s2); font: inherit; font-family: var(--term-font, monospace); font-size: var(--fs-meta); line-height: 1.45; color: var(--txt-hi); background: var(--bg-abyss); border: 1px solid var(--line-strong); border-radius: 6px; }
+.sw-brief:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.sw-note { margin: 0; font-size: var(--fs-meta); color: var(--txt-hi); border-left: 3px solid var(--ok); padding-left: var(--s2); white-space: pre-wrap; overflow-wrap: anywhere; }
+.sw-note.sw-bad { border-left-color: var(--warn); }
+.sw-foot { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; justify-content: flex-end; }
+.sw-gap { flex: 1 1 auto; }
+.sw-btn { font: inherit; font-size: var(--fs-meta); color: var(--txt-hi); background: var(--bg-elev); border: 1px solid var(--line-strong); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+.sw-btn:disabled { opacity: 0.55; cursor: default; }
+.sw-go { border-color: var(--accent); }
+.sw-btn:not(:disabled):hover { border-color: var(--accent); }
+/* Docked to the corner, no scrim: a row is dragged from here onto an item. */
+.sw-pick { position: fixed; right: 16px; bottom: 16px; z-index: 55; width: min(320px, calc(100vw - 32px)); max-height: 46vh; display: flex; flex-direction: column; gap: var(--s2); padding: var(--s3); background: var(--bg-panel); border: 1px solid var(--line-strong); border-radius: 10px; box-shadow: 0 10px 30px rgb(0 0 0 / 0.3); color: var(--txt); font-size: var(--fs-body); }
+.sw-filter { font: inherit; font-size: var(--fs-meta); color: var(--txt-hi); background: var(--bg-abyss); border: 1px solid var(--line-strong); border-radius: 6px; padding: 4px 8px; }
+.sw-pick-rows { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
+.sw-pick-row { flex: none; text-align: left; font: inherit; font-size: var(--fs-meta); color: var(--txt-hi); background: transparent; border: 0; border-radius: 4px; padding: 4px 6px; cursor: grab; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sw-pick-row:hover, .sw-pick-row:focus-visible { background: var(--bg-elev); outline: none; }

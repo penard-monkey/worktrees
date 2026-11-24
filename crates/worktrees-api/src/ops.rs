@@ -772,6 +772,26 @@ pub fn new_place(
     model: Option<String>,
     force: Option<bool>,
 ) -> Result<CmdResult, String> {
+    new_place_with(ctx, repo, branch, base, name, provider, model, force, None)
+}
+
+/// [`new_place`], with a brief: `new --brief`'s own path in core, so the text
+/// is written to `ops::BRIEF_PATH` and the agent opens on it. The text is the
+/// glued value of `--brief=`, which core's parser consumes whole, never as a
+/// flag. Not on `new_place`'s row, which a device holds: a plan's Start
+/// (`plans::plan_start`, console) is the one caller.
+#[allow(clippy::too_many_arguments)]
+pub fn new_place_with(
+    ctx: &Ctx,
+    repo: String,
+    branch: String,
+    base: Option<String>,
+    name: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    force: Option<bool>,
+    brief: Option<&str>,
+) -> Result<CmdResult, String> {
     // R3's second layer, before anything else runs (`argv`).
     let checked = (|| -> Result<_, String> {
         let branch = argv::branch_arg(&branch)?;
@@ -807,6 +827,7 @@ pub fn new_place(
         .value("--ai", &provider)
         .value_opt("--model", model.as_deref())
         .flag_if(force.unwrap_or(false), "--force")
+        .value_opt("--brief", brief)
         .flag("--no-attach")
         .flag("--no-spare")
         .pos(branch)

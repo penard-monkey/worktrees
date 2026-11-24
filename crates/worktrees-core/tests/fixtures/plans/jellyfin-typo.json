@@ -25,7 +25,14 @@
       "project": null,
       "branch": "jellyfin-role",
       "brief": "Goal, deliverable, rules, when to stop.",
-      "started": "homelab-ansible · jellyfin-role · 2026-11-12"
+      "ai": null,
+      "model": null,
+      "started": "homelab-ansible · jellyfin-role · 2026-11-12",
+      "place": {
+        "project": "homelab-ansible",
+        "slug": "jellyfin-role",
+        "at": "2026-11-12"
+      }
     },
     {
       "line": 30,
@@ -33,7 +40,10 @@
       "project": "jellyfin-config",
       "branch": "main-config",
       "brief": "one line",
-      "started": null
+      "ai": null,
+      "model": null,
+      "started": null,
+      "place": null
     }
   ],
   "problems": [
@@ -47,7 +57,7 @@
       "line": 24,
       "section": "work",
       "text": "projet: homelab-ansible",
-      "words": "unknown key `projet:`: expected `project:`, `branch:`, `brief:` or `started:`"
+      "words": "unknown key `projet:`: expected `project:`, `branch:`, `brief:`, `ai:`, `model:` or `started:`"
     }
   ]
 }

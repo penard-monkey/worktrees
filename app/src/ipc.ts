@@ -536,6 +536,8 @@ export const CONSOLE_ROWS: readonly string[] = [
   "share_check",
   // plans and their workspaces (idea board phase 4): desktop only
   "plan_make", "plan_read", "plan_add_ideas", "plan_remove_idea", "plan_add_project",
+  // and what a plan does (phase 5)
+  "plan_set_project", "plan_start", "plan_link_place",
   "workspace_from_plan", "workspace_set_plan", "workspace_link_idea", "workspace_unlink_idea", "workspace_overview",
 ];
 

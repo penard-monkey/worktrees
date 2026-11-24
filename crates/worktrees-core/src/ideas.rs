@@ -1743,6 +1743,48 @@ pub fn plan_add_project_at(root: &Path, plan: &str, name: &str, expected_mtime: 
     read_at(root, plan)
 }
 
+/// Record the place a work item started, or was linked to: its `started:`
+/// line ([`crate::plans::with_started`]). The plan goes to history first. An
+/// item whose line already names a place keeps it unless `replace`, which the
+/// caller grants only when that place is gone.
+pub fn plan_started_at(
+    root: &Path,
+    plan: &str,
+    line: usize,
+    title: &str,
+    started: &crate::plans::Started,
+    replace: bool,
+    expected_mtime: Option<u64>,
+) -> Result<Doc, String> {
+    refuse_real(root)?;
+    let idx = list_at(root)?;
+    let p = plan_doc(&idx, plan)?.clone();
+    let (text, md) = load(root, &p)?;
+    check_mtime(&md, expected_mtime)?;
+    let read = crate::plans::read(&text);
+    if let Some(had) = crate::plans::find_item(&read, line, title)?.place.as_ref().filter(|_| !replace) {
+        return Err(format!("“{title}” was started already, in {} of {}", had.slug, had.project));
+    }
+    let new_text = crate::plans::with_started(&text, line, title, started)?;
+    rewrite_plan(root, &p, &text, &md, &new_text)?;
+    read_at(root, plan)
+}
+
+/// The plan's project `name` (a `clone:` or `new:` line, say) is registered
+/// now, as `to`: its line becomes `- <to> (registered)`, and its work items
+/// follow a changed name ([`crate::plans::with_registered`]). The plan goes
+/// to history first, which keeps the URL or path the line had.
+pub fn plan_set_project_at(root: &Path, plan: &str, name: &str, to: &str, expected_mtime: Option<u64>) -> Result<Doc, String> {
+    refuse_real(root)?;
+    let idx = list_at(root)?;
+    let p = plan_doc(&idx, plan)?.clone();
+    let (text, md) = load(root, &p)?;
+    check_mtime(&md, expected_mtime)?;
+    let new_text = crate::plans::with_registered(&text, name, to)?;
+    rewrite_plan(root, &p, &text, &md, &new_text)?;
+    read_at(root, plan)
+}
+
 /// One idea a plan names, as the plan strip shows it.
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct PlanIdea {
@@ -2561,6 +2603,35 @@ mod tests {
         plan_add_project_at(&root, &pi, "homelab", None).unwrap();
         assert_eq!(copies(&root, &pi).len(), 5);
         assert_eq!(crate::plans::read(&p5.content).problems, vec![]);
+    }
+
+    /// Phase 5's two plan edits: history first, `expected_mtime` checked, a
+    /// place an item already has kept unless the caller may replace it.
+    #[test]
+    fn a_started_line_and_a_registered_project_are_plan_edits() {
+        let t = Tmp::new("plan-started");
+        let root = t.root();
+        let a = id(&made(&root, "Jellyfin", "a\n"));
+        let body = "# Plan: J\n\n## Projects\n- conf (new: ~/w/conf)\n\n## Work\n### Role\nproject: conf\nbranch: role\nbrief: |\n  Do it.\n";
+        let p0 = make_plan_at(&root, &[a], None, Some(body)).unwrap();
+        let pi = id(&p0);
+        let line = p0.content.lines().position(|l| l == "### Role").unwrap() + 1;
+        let s = crate::plans::Started { project: "/w/conf".into(), slug: "role".into(), at: "2026-11-23 10:00".into() };
+        assert!(plan_started_at(&root, &pi, line, "Role", &s, false, Some(1)).unwrap_err().contains("changed on disk"));
+        assert!(copies(&root, &pi).is_empty(), "a refusal writes nothing");
+        let p1 = plan_started_at(&root, &pi, line, "Role", &s, false, Some(p0.idea.mtime_ms)).unwrap();
+        assert_eq!(p1.content, format!("{}started: /w/conf · role · 2026-11-23 10:00\n", p0.content));
+        assert_eq!(copies(&root, &pi), vec![p0.content.clone()], "the plan as it was, first");
+        let s2 = crate::plans::Started { slug: "other".into(), ..s.clone() };
+        assert!(plan_started_at(&root, &pi, line, "Role", &s2, false, None).unwrap_err().contains("started already, in role"));
+        let p2 = plan_started_at(&root, &pi, line, "Role", &s2, true, None).unwrap();
+        assert!(p2.content.ends_with("started: /w/conf · other · 2026-11-23 10:00\n"));
+        assert_eq!(p2.content.matches("started:").count(), 1);
+        let p3 = plan_set_project_at(&root, &pi, "conf", "conf", Some(p2.idea.mtime_ms)).unwrap();
+        assert!(p3.content.contains("- conf (registered)\n"), "{}", p3.content);
+        assert_eq!(copies(&root, &pi).len(), 3, "the line's path is in history");
+        plan_set_project_at(&root, &pi, "conf", "conf", None).unwrap();
+        assert_eq!(copies(&root, &pi).len(), 3, "already so: nothing written");
     }
 
     #[test]

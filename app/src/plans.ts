@@ -16,9 +16,18 @@ export type ProjectState = {
   state: "registered" | "not-registered" | "to-clone" | "to-create";
   root?: string; url?: string; path?: string;
 };
+/** Core's `Started`: a work item's `started:` line, read (phase 5). */
+export type Started = { project: string; slug: string; at: string };
 export type WorkItem = {
-  line: number; title: string; project: string | null; branch: string | null; brief: string | null; started: string | null;
+  line: number; title: string; project: string | null; branch: string | null; brief: string | null;
+  /** The agent the item names, when it names one. */
+  ai: string | null; model: string | null;
+  /** The `started:` line as written, and as read (null when it is neither). */
+  started: string | null; place: Started | null;
 };
+/** A work item judged against the registry (core's answer, one per item):
+ *  where its place would go, and the root of the place it has. */
+export type WorkState = { line: number; project_state: ProjectState["state"] | null; root?: string; place_root?: string };
 export type PlanProblem = { line: number; section: "projects" | "work"; text: string; words: string };
 export type PlanIdea = { id: string; live: string | null; title: string | null; merged: boolean };
 /** `plan_read`'s answer. `projects`/`work` are null when the plan has no such
@@ -30,16 +39,18 @@ export type PlanView = {
   work: WorkItem[] | null;
   problems: PlanProblem[];
   project_states: ProjectState[];
+  work_states: WorkState[];
   workspace: { id: string; name: string } | null;
 };
 export type OvProject = ProjectState & { in_workspace: boolean };
-/** `workspace_overview`'s answer (§9.2), read-only. */
+/** `workspace_overview`'s answer (§9.2). */
 export type Overview = {
   id: string; name: string;
-  plan: { id: string; live: string | null; title: string | null; file: string | null; error?: string } | null;
+  plan: { id: string; live: string | null; title: string | null; file: string | null; mtime_ms: number | null; error?: string } | null;
   ideas: PlanIdea[];
   projects: OvProject[] | null;
   work: WorkItem[] | null;
+  work_states: WorkState[];
   problems: PlanProblem[];
 };
 
@@ -76,6 +87,135 @@ export const fromPlanCall = (plan: string): Call => ({ cmd: "workspace_from_plan
 export const setPlanCall = (ws: string, plan: string | null): Call => ({ cmd: "workspace_set_plan", args: { id: ws, plan } });
 export const linkIdeaCall = (ws: string, idea: string): Call => ({ cmd: "workspace_link_idea", args: { id: ws, idea } });
 export const unlinkIdeaCall = (ws: string, idea: string): Call => ({ cmd: "workspace_unlink_idea", args: { id: ws, idea } });
+
+// Phase 5. A work item is named by its line AND title, and every act carries
+// the plan's mtime, so an act on a plan that has moved is refused.
+export type ItemRef = { line: number; title: string };
+/** A cloned or created project: its line becomes `(registered)`, and the
+ *  plan's workspace references it. */
+export function setProjectCall(plan: string, name: string, root: string, mtime?: number | null): Call {
+  const args: Record<string, unknown> = { id: plan, name, root };
+  if (mtime != null) args.expectedMtime = mtime;
+  return { cmd: "plan_set_project", args };
+}
+/** Record an existing place as the item's: the drop and "Link a place…". */
+export function linkPlaceCall(plan: string, item: ItemRef, root: string, slug: string, mtime?: number | null): Call {
+  const args: Record<string, unknown> = { id: plan, line: item.line, title: item.title, repo: root, slug };
+  if (mtime != null) args.expectedMtime = mtime;
+  return { cmd: "plan_link_place", args };
+}
+/** Start ONE item, with the brief the person reviewed (§7.1: `start(item,
+ *  brief)`, the same call an agent's proposal would fill). */
+export function startCall(
+  plan: string, item: ItemRef & { branch: string | null }, root: string, brief: string, agent: { provider: string; model: string }, mtime?: number | null,
+): Call {
+  const args: Record<string, unknown> = { id: plan, line: item.line, title: item.title, repo: root, branch: item.branch, brief, provider: agent.provider, model: agent.model || null };
+  if (mtime != null) args.expectedMtime = mtime;
+  return { cmd: "plan_start", args };
+}
+/** The agent of a place that was made and not launched: `open_place`, which
+ *  sends the opener on a harness's first launch in a place with a brief. */
+export const launchCall = (root: string, slug: string, agent: { provider: string; model: string }): Call =>
+  ({ cmd: "open_place", args: { repo: root, slug, provider: agent.provider, model: agent.model || null, force: true } });
+
+/** `plan_start`'s answer. */
+export type StartDone = {
+  result: { ok: boolean; code: number; output: string; slug?: string; warnings?: string[] };
+  started: Started | null;
+  doc: { id: string; mtime_ms: number } | null;
+  plan_error?: string;
+};
+/** `plan_set_project`'s answer, beside the plan's document. */
+export type ProjectSet = { workspace: { id: string; name: string } | null; workspace_error?: string };
+/** `diag::EXIT_LAUNCH_REFUSED`: the place is ready, its agent was not started. */
+export const LAUNCH_REFUSED = 5;
+
+// ── a work item's place, from the snapshot (phase 5) ────────────────────────
+// Never stored: `started:` says WHICH place, the snapshot the nav already has
+// says what it is doing now.
+
+export type SnapPlace = { slug: string; path: string; branch: string | null; is_main: boolean; tmux_session: { up: boolean }; declared?: { title?: string | null } | null };
+export type SnapProject = { root: string; name?: string | null; ok: boolean; snapshot?: { places: SnapPlace[] } | null };
+export type Snap = { projects: SnapProject[] } | null;
+/** Places (by path) whose agent works, or waits on the person. */
+export type Activity = { busy: ReadonlySet<string>; waiting: ReadonlySet<string> };
+
+export type ItemPlace = { kind: "none" | "unreadable" | "unknown" | "unregistered" | "gone" | "there" | "busy" | "waiting"; place?: SnapPlace; root?: string };
+
+/** One item's place, as `started:` names it: what a snapshot is asked about. */
+export const placeKey = (root: string, p: Started): string => `${root}|${p.slug}|${p.at}`;
+/** The places these items name that `snap` does not have, in a project it
+ *  could read. Missing is not gone: the plan's `started:` line is read in a
+ *  moment and the list of places is a git fan-out, so right after a Start the
+ *  list is older than the line (found in the real app; the mock answers at
+ *  once). The window asks for the list again, and only that settles it. */
+export function missingPlaces(work: readonly WorkItem[] | null, states: readonly WorkState[], snap: Snap): string[] {
+  return (work ?? []).flatMap((w, n) => {
+    const root = states[n]?.place_root;
+    const p = root && snap?.projects.find((x) => x.root === root);
+    return w.place && root && p && p.ok && p.snapshot && !p.snapshot.places.some((x) => x.slug === w.place!.slug) ? [placeKey(root, w.place)] : [];
+  });
+}
+
+/** Where an item stands. `unknown` is a snapshot that has not come, a project
+ *  it could not read, or a place missing from a list that may be older than
+ *  the item's line (`gone`: the keys a later list settled). Never called gone. */
+export function itemPlace(item: WorkItem, state: WorkState | undefined, snap: Snap, act: Activity, gone: ReadonlySet<string>): ItemPlace {
+  if (!item.place) return { kind: item.started ? "unreadable" : "none" };
+  const root = state?.place_root;
+  if (!root) return { kind: "unregistered" };
+  const p = snap?.projects.find((x) => x.root === root);
+  if (!p?.ok || !p.snapshot) return { kind: "unknown", root };
+  const place = p.snapshot.places.find((x) => x.slug === item.place!.slug);
+  if (!place) return { kind: gone.has(placeKey(root, item.place)) ? "gone" : "unknown", root };
+  return { kind: act.waiting.has(place.path) ? "waiting" : act.busy.has(place.path) ? "busy" : "there", place, root };
+}
+/** An item a Start or a link may take: it has no place, or the one it names
+ *  is gone (its line is kept until then). Core holds the same rule. */
+export const itemFree = (p: ItemPlace): boolean => p.kind === "none" || p.kind === "gone" || p.kind === "unregistered";
+
+/** A place dropped on a work item, or picked for it: the item when it can
+ *  take it, else null (no highlight, nothing happens). */
+export function placeOntoItem(root: string, slug: string, item: WorkItem | null, at: ItemPlace | null, snap: Snap): ItemRef | null {
+  if (!item || !item.title || !at || !itemFree(at) || !slug) return null;
+  if (!snap?.projects.some((p) => p.root === root && p.snapshot?.places.some((x) => x.slug === slug))) return null;
+  return { line: item.line, title: item.title };
+}
+
+/** A place's folder for a branch (`cmd_new`'s slug: `origin/` off, `/` → `-`). */
+export const slugOf = (branch: string): string => branch.replace(/^origin\//, "").replace(/\//g, "-");
+
+/** Why this item cannot be started, in words; null when it can. The host
+ *  checks all of it again; this is what the review shows before it is asked. */
+export function startProblem(item: WorkItem, state: WorkState | undefined, at: ItemPlace, snap: Snap): string | null {
+  if (!itemFree(at)) return at.kind === "unreadable" ? "Its `started:` line cannot be read: fix or remove it in the plan." : "It has a place already.";
+  if (!item.project) return "It names no project: add a `project:` line.";
+  if (state?.project_state === "to-clone") return `“${item.project}” is not cloned yet: clone it from the plan's Projects.`;
+  if (state?.project_state === "to-create") return `“${item.project}” is not created yet: create it from the plan's Projects.`;
+  if (!state?.root) return `“${item.project}” is not a registered project.`;
+  if (!item.branch) return "It names no branch: add a `branch:` line.";
+  const places = snap?.projects.find((p) => p.root === state.root)?.snapshot?.places ?? [];
+  const branch = item.branch.replace(/^origin\//, "");
+  const holder = places.find((p) => p.branch === branch);
+  if (holder) return holder.is_main ? `The branch ${branch} is checked out in the main checkout: give the item its own branch.` : `The branch ${branch} is already in the place ${holder.slug}: link that place instead.`;
+  const taken = places.find((p) => p.slug === slugOf(branch));
+  return taken ? `There is a place named ${taken.slug} already: link it, or give the item another branch.` : null;
+}
+
+/** The agent an item starts: the one it names, else the app's default. A
+ *  model the item names goes with it; the default model belongs to its own
+ *  harness only. */
+export function agentFor(item: Pick<WorkItem, "ai" | "model">, defaults: { provider: string; models: Record<string, string | undefined> }): { provider: string; model: string } {
+  const provider = item.ai || defaults.provider;
+  return { provider, model: item.model || defaults.models[provider] || "" };
+}
+
+/** A `new: <path>` split for the New project dialog's two fields. */
+export function newPath(path: string): { location: string; name: string } {
+  const p = path.trim().replace(/\/+$/, "");
+  const i = p.lastIndexOf("/");
+  return i < 0 ? { location: "", name: p } : { location: p.slice(0, i) || "/", name: p.slice(i + 1) };
+}
 
 // ── the drop rules (§6.1) ───────────────────────────────────────────────────
 // A drop onto something that cannot take it is `null`: no highlight, nothing
@@ -148,9 +288,20 @@ export function planSources(open: DocRow | null, selected: readonly string[], ro
   return open?.id && isIdea(open.id) ? [open.id] : [];
 }
 
-/** A work item's status line in phase 4: its `started:` line as written, or
- *  "not started". Phase 5 judges the place; this only shows the text. */
-export const workStatus = (w: WorkItem): string => (w.started ? `started: ${w.started}` : "not started");
+/** A work item's status: what its `started:` line says, and what is there. */
+export function workStatus(w: WorkItem, at: ItemPlace): string {
+  const when = w.place ? `started ${w.place.at}` : "";
+  switch (at.kind) {
+    case "none": return "not started";
+    case "unreadable": return `started: ${w.started}`;
+    case "unknown": return when;
+    case "unregistered": return `${when} · its project is not registered`;
+    case "gone": return `${when} · place removed`;
+    case "busy": return `${when} · busy`;
+    case "waiting": return `${when} · waiting on you`;
+    case "there": return `${when} · ${at.place?.tmux_session.up ? "open" : "there"}`;
+  }
+}
 
 /** The main window's hand-off to the Ideas window: the document to open,
  *  written to localStorage under this key just before `open_companion`
@@ -161,6 +312,21 @@ export const SHOW_KEY = "wt.ideas.show";
 /** …and the other way: the workspace the main window shows, written before
  *  the companion raises it (`raise_window`). The same shape and age rule. */
 export const WS_SHOW_KEY = "wt.workspace.show";
+/** …and an act the main window's own dialogs do (phase 5): clone or create
+ *  the plan's project `name`, or show a place. The same shape and age rule;
+ *  nothing is done from it but opening a dialog, filled in, or selecting. */
+export const MAIN_ASK_KEY = "wt.main.ask";
+export type MainAsk = { act: "project"; plan: string; name: string } | { act: "place"; root: string; slug: string };
+export function mainAsk(raw: string | null, now: number): MainAsk | null {
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw) as Record<string, unknown>;
+    if (typeof v.at !== "number" || now - v.at > SHOW_TTL_MS || v.at > now + 5_000) return null;
+    if (v.act === "project" && typeof v.plan === "string" && /^[0-9A-HJKMNP-TV-Z]{26}$/.test(v.plan) && typeof v.name === "string" && v.name) return { act: "project", plan: v.plan, name: v.name };
+    if (v.act === "place" && typeof v.root === "string" && v.root.startsWith("/") && typeof v.slug === "string" && v.slug) return { act: "place", root: v.root, slug: v.slug };
+    return null;
+  } catch { return null; }
+}
 export const SHOW_TTL_MS = 60_000;
 export function showRequest(raw: string | null, now: number): string | null {
   if (!raw) return null;

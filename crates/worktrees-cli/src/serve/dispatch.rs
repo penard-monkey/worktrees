@@ -1,4 +1,4 @@
-//! The 286 commands, each with its exposure, capability and objects, in ONE
+//! The 290 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -1445,6 +1445,13 @@ commands! { cx, a;
     plan_add_ideas: HostConsole [console, idea(id)] => plans::plan_add_ideas(&cx.ctx, a.get("id")?, a.get("ideas")?, a.get("expected_mtime")?),
     plan_remove_idea: HostConsole [console, idea(id)] => plans::plan_remove_idea(&cx.ctx, a.get("id")?, a.get("idea")?, a.get("expected_mtime")?),
     plan_add_project: HostConsole [console, idea(id)] => plans::plan_add_project(&cx.ctx, a.get("id")?, a.get("root")?, a.get("expected_mtime")?),
+    // Phase 5: what a plan does. `plan_start` starts an agent: drive-class, and
+    // console-only, so no device reaches its brief (`new_place`, which a device
+    // holds, still takes none). Its audit record has the brief's length and
+    // hash, never the text.
+    plan_set_project: HostConsole [console, idea(id), project(root)] => plans::plan_set_project(&cx.ctx, a.get("id")?, a.get("name")?, a.get("root")?, a.get("expected_mtime")?),
+    plan_start: HostConsole [console, idea(id), project(repo)] => plans::plan_start(&cx.ctx, a.get("id")?, a.get("line")?, a.get("title")?, a.get("repo")?, a.get("branch")?, a.get("brief")?, a.get("provider")?, a.get("model")?, a.get("force")?, a.get("expected_mtime")?),
+    plan_link_place: HostConsole [console, idea(id), place(repo, slug)] => plans::plan_link_place(&cx.ctx, a.get("id")?, a.get("line")?, a.get("title")?, a.get("repo")?, a.get("slug")?, a.get("expected_mtime")?),
     workspace_from_plan: HostConsole [console, idea(plan)] => plans::workspace_from_plan(&cx.ctx, a.get("plan")?),
     workspace_set_plan: HostConsole => plans::workspace_set_plan(&cx.ctx, a.get("id")?, a.get("plan")?),
     workspace_link_idea: HostConsole [console, idea(idea)] => plans::workspace_link_idea(&cx.ctx, a.get("id")?, a.get("idea")?),
@@ -1493,7 +1500,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 286 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 290 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1515,7 +1522,8 @@ mod tests {
     /// `idea_combine`, `idea_split`, `idea_related`, `idea_versions`,
     /// `idea_restore`), phase 4's ten plan and workspace rows (`plan_*`,
     /// `workspace_from_plan`, `workspace_set_plan`, `workspace_link_idea`,
-    /// `workspace_unlink_idea`, `workspace_overview`), and the chat's images (`read_place_image`, `agent_call_image`), and phase S's sixteen
+    /// `workspace_unlink_idea`, `workspace_overview`) and phase 5's three
+    /// (`plan_set_project`, `plan_start`, `plan_link_place`), and the chat's images (`read_place_image`, `agent_call_image`), and phase S's sixteen
     /// idea-session console rows (`idea_conversation*`, `idea_*` over the agent bodies, `idea_term_open`), and group
     /// chat's eighteen share rows (fourteen console with PR D's `share_used` and `share_check`, four
     /// `guest`), its thread's two (`thread_read`, `thread_post`, `guest`) and PR C's
@@ -1526,7 +1534,7 @@ mod tests {
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 287, "the table has 287 commands");
+        assert_eq!(TABLE.len(), 290, "the table has 290 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1942,7 +1950,7 @@ mod tests {
     /// `push_allow_security`); Settings → Agent policy → Limits'
     /// `limits_settings` (`read`) and `set_limits` (`admin`); and the policy
     /// presets' `policy_preset_status` (`read`) and `apply_policy_preset`
-    /// (console); the named workspaces' seven (console); and the idea board's seven and phase 3's seven (console); phase 4's ten (console); phase S's sixteen idea-session rows (console); `read_place_image` and `agent_call_image` are `read`; the host's sleep hold's `get_keep_awake` (`read`) and `set_keep_awake` (`admin`); and group chat's
+    /// (console); the named workspaces' seven (console); and the idea board's seven and phase 3's seven (console); phase 4's ten and phase 5's three (console); phase S's sixteen idea-session rows (console); `read_place_image` and `agent_call_image` are `read`; the host's sleep hold's `get_keep_awake` (`read`) and `set_keep_awake` (`admin`); and group chat's
     /// shares: fourteen console rows (`share_*` for the owner, `share_used`, `share_check`, `guest_places_hide`,
     /// `shares_all`, `guests_list`, `guest_remove`, `owner_set_name`) and the
     /// four `guest` rows (`GUEST_ROWS`), the capability's first, the thread's
@@ -1964,7 +1972,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 71), ("write", 23), ("admin", 42), ("console", 109), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 71), ("write", 23), ("admin", 42), ("console", 112), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7), ("guest", 8),
         ]
         .into();
@@ -2129,6 +2137,7 @@ mod tests {
         for cmd in [
             "plan_make", "plan_read", "plan_add_ideas", "plan_remove_idea", "plan_add_project", "workspace_from_plan",
             "workspace_set_plan", "workspace_link_idea", "workspace_unlink_idea", "workspace_overview",
+            "plan_set_project", "plan_start", "plan_link_place",
         ] {
             assert_eq!(exposure(cmd), Some(Exposure::HostConsole), "{cmd}: desktop only");
         }

@@ -1,6 +1,8 @@
 /** A named workspace's overview (idea board phase 4, §9.2): its plan and
  *  linked ideas, and the plan's Projects and Work as core's reader answers
- *  them, READ-ONLY here (phase 5 clones, creates and starts). Shown in the
+ *  them. A project to clone or create opens the Add project dialogs filled in;
+ *  a work item is reviewed and started, or takes a place dropped from the nav
+ *  (phase 5). The plan's text itself is edited in the Ideas window. Shown in the
  *  main area when the workspace's name is clicked and no place is selected.
  *
  *  "plan ▸" and an idea open the document in the Ideas window. The plan and
@@ -9,7 +11,7 @@
  *  dragged there is linked. Every drag has its menu path here too (Link a
  *  plan ▸, Link an idea ▸). The rules and calls are `plans.ts`'s. */
 import { useState } from "react";
-import { STATE_WORDS, problemLine, workStatus, type Overview } from "./plans";
+import { STATE_WORDS, itemFree, itemPlace, problemLine, workStatus, type Activity, type Overview, type Snap, type WorkItem } from "./plans";
 
 export type DocLite = { id: string; title: string; kind: "idea" | "plan" };
 
@@ -26,6 +28,15 @@ export function WorkspaceOverview(props: {
   linkIdea(id: string): void;
   unlinkIdea(id: string): void;
   arm(e: React.PointerEvent, d: DocLite): void;
+  snap: Snap;
+  activity: Activity;
+  gone: ReadonlySet<string>;
+  /** The work item (its line) a dragged place is over. */
+  workHot: number | null;
+  bringProject(name: string): void;
+  review(w: WorkItem): void;
+  linkPlace(w: WorkItem): void;
+  showPlace(root: string, slug: string): void;
 }) {
   const ov = props.ov;
   const [pick, setPick] = useState<"plan" | "idea" | null>(null);
@@ -115,6 +126,9 @@ export function WorkspaceOverview(props: {
                         <span className="ws-ov-name">{p.name}</span>
                         <span className={"ws-ov-state " + p.state}>{STATE_WORDS[p.state]}{p.state === "registered" && !p.in_workspace ? " · not in this workspace" : ""}</span>
                         <span className="ws-ov-detail" title={p.root ?? p.url ?? p.path}>{p.root ?? p.url ?? p.path ?? ""}</span>
+                        {(p.state === "to-clone" || p.state === "to-create") && (
+                          <button className="ctrl sm" data-testid="ws-ov-bring" data-name={p.name} onClick={() => props.bringProject(p.name)}>{p.state === "to-clone" ? "Clone…" : "Create…"}</button>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -123,16 +137,30 @@ export function WorkspaceOverview(props: {
                 {ov.work === null ? <div className="empty small">The plan has no Work section.</div>
                   : ov.work.length === 0 ? <div className="empty small">The plan lists no work yet.</div> : (
                   <div className="ws-ov-rows">
-                    {ov.work.map((w) => (
-                      <div key={w.line} data-testid="ws-ov-work">
-                        <button className="ws-ov-row ws-ov-row-btn" onClick={() => setBrief((b) => (b === w.line ? null : w.line))} aria-expanded={brief === w.line}>
-                          <span className="ws-ov-name">{w.title || "(no title)"}</span>
-                          <span className="ws-ov-detail">{[w.project, w.branch].filter(Boolean).join(" · ")}</span>
-                          <span className="ws-ov-state">{workStatus(w)}</span>
-                        </button>
-                        {brief === w.line && <pre className="ws-ov-brief">{w.brief ?? "(no brief)"}</pre>}
-                      </div>
-                    ))}
+                    {ov.work.map((w, n) => {
+                      const at = itemPlace(w, ov.work_states[n], props.snap, props.activity, props.gone);
+                      return (
+                        <div key={w.line} className={props.workHot === w.line ? "ws-ov-work on" : "ws-ov-work"} data-testid="ws-ov-work" data-drop="work" data-work-line={w.line} data-place={at.kind}>
+                          <div className="ws-ov-row">
+                            <button className="ws-ov-item" onClick={() => setBrief((b) => (b === w.line ? null : w.line))} aria-expanded={brief === w.line}>
+                              <span className="ws-ov-name">{w.title || "(no title)"}</span>
+                              <span className="ws-ov-detail">{[w.project, w.branch].filter(Boolean).join(" · ")}</span>
+                            </button>
+                            <span className={`ws-ov-state at-${at.kind}`} title={w.started ?? undefined}>{workStatus(w, at)}</span>
+                            {at.place && at.root && (
+                              <button className="ctrl sm" data-testid="ws-ov-show-place" onClick={() => props.showPlace(at.root!, at.place!.slug)}>Show ▸</button>
+                            )}
+                            {itemFree(at) && (
+                              <>
+                                <button className="ctrl sm" data-testid="ws-ov-review" title="Read its brief, then Start" onClick={() => props.review(w)}>Review…</button>
+                                <button className="ctrl sm" data-testid="ws-ov-link-place" title="Record a place that exists already as this item's (or drag one here from the nav)" onClick={() => props.linkPlace(w)}>Link a place…</button>
+                              </>
+                            )}
+                          </div>
+                          {brief === w.line && <pre className="ws-ov-brief">{w.brief ?? "(no brief)"}</pre>}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </>

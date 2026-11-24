@@ -21,15 +21,19 @@
 //! branch: jellyfin-role
 //! brief: |
 //!   Goal, deliverable, rules, when to stop.
-//! started: homelab-ansible · jellyfin-role · 2026-11-12
+//! started: /Users/d/workspace/homelab-ansible · jellyfin-role · 2026-11-12 09:30
 //! ```
 //!
 //! - A project line is `- <name> (<kind>)`; the kind is the LAST
 //!   parenthesised group, so a name may hold parentheses of its own.
 //! - A work item starts at `### <title>` and holds `project:`, `branch:`,
-//!   `brief:` (`|` and an indented block, or one line) and `started:`.
-//!   `started:` is phase 5's (the app writes it when a place starts); this
-//!   reader keeps its text and judges nothing in it.
+//!   `brief:` (`|` and an indented block, or one line), optionally `ai:` and
+//!   `model:` (the agent to start, else the app's default), and `started:`.
+//! - `started:` is the app's own line (phase 5, [`with_started`]): `<project>
+//!   · <place> · <when>`, where the project is a registered root (or a name,
+//!   as a hand might write it). It is provenance: what is THERE is asked of
+//!   the snapshot by (root, slug), never stored. A line that is not those
+//!   three parts is named, and its text kept.
 //! - Blank lines and one-line HTML comments (`<!-- … -->`) are skipped in
 //!   both sections. Any other line is read or named.
 //! - Headings are found outside fences; a section ends at the next `#` or
@@ -64,8 +68,68 @@ pub struct WorkItem {
     pub project: Option<String>,
     pub branch: Option<String>,
     pub brief: Option<String>,
-    /// Phase 5's provenance line, as written.
+    /// The harness to start, when the item says one.
+    pub ai: Option<String>,
+    /// The model to start it with, when the item says one.
+    pub model: Option<String>,
+    /// The provenance line, as written.
     pub started: Option<String>,
+    /// The provenance line, read ([`Started`]).
+    pub place: Option<Started>,
+    /// Lines the edits below need: the `project:` and `started:` lines, and
+    /// the item's last line that is not blank.
+    #[serde(skip)]
+    project_line: Option<usize>,
+    #[serde(skip)]
+    started_line: Option<usize>,
+    #[serde(skip)]
+    last_line: usize,
+}
+
+/// Which place a work item started (or was linked to): `<project> · <slug> ·
+/// <at>`.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct Started {
+    /// The project: its registered root when the app wrote it.
+    pub project: String,
+    pub slug: String,
+    /// When, as written (`2026-11-12 09:30`, local time).
+    pub at: String,
+}
+
+impl Started {
+    /// `<project> · <slug> · <at>`, or `None` for any other shape.
+    pub fn parse(text: &str) -> Option<Started> {
+        let mut it = text.rsplitn(3, '·').map(str::trim);
+        let (at, slug, project) = (it.next()?, it.next()?, it.next()?);
+        let ok = !at.is_empty() && !project.is_empty() && !slug.is_empty() && !slug.contains(char::is_whitespace);
+        ok.then(|| Started { project: project.into(), slug: slug.into(), at: at.into() })
+    }
+
+    /// The value the app writes. Refused when it would not read back as
+    /// itself (a root that ends in a `·`, a slug with a space).
+    pub fn text(&self) -> Result<String, String> {
+        let t = format!("{} · {} · {}", self.project, self.slug, self.at);
+        if t.chars().any(char::is_control) || Started::parse(&t).as_ref() != Some(self) {
+            return Err(format!("not a place to record: {t:?}"));
+        }
+        Ok(t)
+    }
+}
+
+/// `2026-11-12 09:30`, the host's local time: what a person reads in the
+/// plan. Nothing orders by it. UTC when the local time cannot be had.
+pub fn when(epoch: i64) -> String {
+    let t = epoch as libc::time_t;
+    // SAFETY: `localtime_r` writes only into `tm`, and reads only `t`.
+    unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        if !libc::localtime_r(&t, &mut tm).is_null() {
+            return format!("{:04}-{:02}-{:02} {:02}:{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min);
+        }
+    }
+    let s = epoch.rem_euclid(86_400);
+    format!("{} {:02}:{:02}", crate::ideas::date_of(epoch), s / 3600, s / 60 % 60)
 }
 
 /// A line the reader could not read, and why.
@@ -185,7 +249,7 @@ fn skippable(t: &str) -> bool {
 }
 
 const PROJECT_FORM: &str = "write `- <name> (registered)`, `- <name> (clone: <url>)` or `- <name> (new: <path>)`";
-const WORK_KEYS: &str = "`project:`, `branch:`, `brief:` or `started:`";
+const WORK_KEYS: &str = "`project:`, `branch:`, `brief:`, `ai:`, `model:` or `started:`";
 
 fn project_line(l: &Line, problems: &mut Vec<Problem>) -> Option<Project> {
     let bad = |problems: &mut Vec<Problem>, words: String| {
@@ -316,6 +380,11 @@ pub fn read(text: &str) -> Sections {
                 }
             }
             Sec::Work => {
+                if !l.text.trim().is_empty() {
+                    if let Some(it) = item.as_mut().filter(|_| !l.text.starts_with("### ")) {
+                        it.last_line = l.n;
+                    }
+                }
                 if let Some(b) = brief.as_mut() {
                     if l.text.trim().is_empty() || l.text.starts_with(' ') || l.text.starts_with('\t') {
                         b.push(l.text);
@@ -336,7 +405,7 @@ pub fn read(text: &str) -> Sections {
                         bad(&mut problems, "a work item's heading needs a title".into());
                     }
                     item_heading = l.text.to_string();
-                    item = Some(WorkItem { line: l.n, title: title.to_string(), ..Default::default() });
+                    item = Some(WorkItem { line: l.n, last_line: l.n, title: title.to_string(), ..Default::default() });
                     continue;
                 }
                 if skippable(l.text) {
@@ -354,6 +423,8 @@ pub fn read(text: &str) -> Sections {
                 let slot = match key {
                     "project" => &mut it.project,
                     "branch" => &mut it.branch,
+                    "ai" => &mut it.ai,
+                    "model" => &mut it.model,
                     "started" => &mut it.started,
                     "brief" => &mut it.brief,
                     _ => {
@@ -379,6 +450,17 @@ pub fn read(text: &str) -> Sections {
                     continue;
                 }
                 *slot = Some(value.to_string());
+                match key {
+                    "project" => it.project_line = Some(l.n),
+                    "started" => {
+                        it.started_line = Some(l.n);
+                        it.place = Started::parse(value);
+                        if it.place.is_none() && !value.is_empty() {
+                            bad(&mut problems, "not a started line: the app writes `started: <project> · <place> · <when>`".into());
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -415,6 +497,98 @@ pub fn section_span(text: &str, name: &str) -> Option<(usize, usize, usize)> {
     found.map(|(h, b)| (h, b, text.len()))
 }
 
+/// The item at `line` titled `title` (both, so a line number from a text that
+/// has since changed names nothing), or the ONE item so titled when the line
+/// has moved.
+pub fn find_item<'a>(s: &'a Sections, line: usize, title: &str) -> Result<&'a WorkItem, String> {
+    let work = s.work.as_deref().unwrap_or_default();
+    if let Some(it) = work.iter().find(|w| w.line == line && w.title == title) {
+        return Ok(it);
+    }
+    let mut named = work.iter().filter(|w| w.title == title);
+    match (named.next(), named.next()) {
+        (Some(it), None) => Ok(it),
+        (Some(_), Some(_)) => Err(format!("the plan has more than one item “{title}”, and none on line {line}: reload to see the latest")),
+        _ => Err(format!("the plan has no item “{title}”")),
+    }
+}
+
+fn eol(text: &str) -> &'static str {
+    match text.find('\n') {
+        Some(i) if i > 0 && text.as_bytes()[i - 1] == b'\r' => "\r\n",
+        _ => "\n",
+    }
+}
+
+/// `text` with the content of line `n` replaced, its ending kept.
+fn with_line(text: &str, n: usize, new: &str) -> Option<String> {
+    let ls = lines(text);
+    let l = ls.get(n.checked_sub(1)?)?;
+    Some(format!("{}{new}{}", &text[..l.start], &text[l.start + l.text.len()..]))
+}
+
+/// `text` with the item's `started:` line set to `s`: the line it has (an
+/// empty one, or one whose place is gone), else a new one after the item's
+/// last line. Nothing else in the document moves, which is checked by reading
+/// the result back.
+pub fn with_started(text: &str, line: usize, title: &str, s: &Started) -> Result<String, String> {
+    let before = read(text);
+    let it = find_item(&before, line, title)?.clone();
+    let new = format!("started: {}", s.text()?);
+    let out = match it.started_line {
+        Some(n) => with_line(text, n, &new),
+        None => lines(text).get(it.last_line.wrapping_sub(1)).map(|l| {
+            let sep = eol(text);
+            let lead = if text[..l.next].ends_with('\n') { "" } else { sep };
+            format!("{}{lead}{new}{sep}{}", &text[..l.next], &text[l.next..])
+        }),
+    }
+    .ok_or("the item's lines could not be found")?;
+    let after = read(&out);
+    let same = |a: &WorkItem, b: &WorkItem| (&a.title, &a.project, &a.branch, &a.brief, &a.ai, &a.model) == (&b.title, &b.project, &b.branch, &b.brief, &b.ai, &b.model);
+    let (w0, w1) = (before.work.unwrap_or_default(), after.work.unwrap_or_default());
+    let ok = w0.len() == w1.len()
+        && w0.iter().zip(&w1).all(|(a, b)| same(a, b) && if a.line == it.line { b.place.as_ref() == Some(s) } else { a.started == b.started });
+    if !ok {
+        return Err(format!("“{title}” could not take a `started:` line without changing the rest of the plan: add it by hand: `{new}`"));
+    }
+    Ok(out)
+}
+
+/// `text` with the project line `name` made `- <to> (registered)`, and the
+/// `project:` of every work item that named it following when the name
+/// changed. A line that says so already is left.
+pub fn with_registered(text: &str, name: &str, to: &str) -> Result<String, String> {
+    if to.trim() != to || to.is_empty() || to.chars().any(char::is_control) || to.starts_with('(') {
+        return Err(format!("not a project name: {to:?}"));
+    }
+    let s = read(text);
+    let projects = s.projects.as_deref().unwrap_or_default();
+    let p = projects.iter().find(|p| p.name == name).ok_or_else(|| format!("the plan lists no project “{name}”"))?;
+    if p.source == Source::Registered && name == to {
+        return Ok(text.to_string());
+    }
+    if name != to && projects.iter().any(|x| x.name == to) {
+        return Err(format!("the plan lists “{to}” already"));
+    }
+    let ls = lines(text);
+    let at = ls[p.line - 1].text;
+    let bullet: String = at.chars().take_while(|c| c.is_whitespace() || *c == '-' || *c == '*').collect();
+    let mut out = with_line(text, p.line, &format!("{bullet}{to} (registered)")).ok_or("the project's line could not be found")?;
+    if name != to {
+        for w in s.work.iter().flatten().filter(|w| w.project.as_deref() == Some(name)) {
+            if let Some(n) = w.project_line {
+                out = with_line(&out, n, &format!("project: {to}")).ok_or("an item's line could not be found")?;
+            }
+        }
+    }
+    let back = read(&out);
+    if !back.projects.iter().flatten().any(|x| x.line == p.line && x.name == to && x.source == Source::Registered) {
+        return Err(format!("“{to}” does not read back as a project's name"));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,6 +615,7 @@ started: homelab-ansible · jellyfin-role · 2026-11-12\n\n### Config repo\nproj
         assert_eq!((w[0].line, w[0].title.as_str()), (18, "Ansible role for Jellyfin"));
         assert_eq!(w[0].brief.as_deref(), Some("Goal, deliverable, rules.\n\nWhen to stop."));
         assert_eq!(w[0].started.as_deref(), Some("homelab-ansible · jellyfin-role · 2026-11-12"), "kept, not judged");
+        assert_eq!(w[0].place, Some(Started { project: "homelab-ansible".into(), slug: "jellyfin-role".into(), at: "2026-11-12".into() }));
         assert_eq!((w[1].project.as_deref(), w[1].branch.as_deref(), w[1].brief.as_deref()), (Some("jellyfin-config"), Some("main-config"), Some("one line")));
     }
 
@@ -503,6 +678,76 @@ started: homelab-ansible · jellyfin-role · 2026-11-12\n\n### Config repo\nproj
             n += 1;
         }
         assert!(n >= 1, "no fixture was read");
+    }
+
+    fn st(project: &str, slug: &str) -> Started {
+        Started { project: project.into(), slug: slug.into(), at: "2025-11-23 12:14".into() }
+    }
+
+    /// The round trip: written by `with_started`, read back by `read`, every
+    /// other byte the document had still there and in place.
+    #[test]
+    fn a_started_line_is_written_and_read_back() {
+        let s = st("/Users/d/a · b/proj", "jelly.fin-role");
+        let w = when(1_763_900_040);
+        assert!(w.len() == 16 && w.starts_with("2025-11-2") && w.ends_with(":14"), "{w}");
+        assert!(st("p", "s").text().is_ok());
+        for (text, title, line) in [
+            ("## Work\n### A\nproject: p\nbranch: b\nbrief: |\n  Goal.\n\n  Stop.\n\n\n### B\nproject: q\nbranch: c\n\n## Notes\nx\n", "A", 2),
+            ("## Work\n### A\nproject: p\nbranch: b\nbrief: |\n  Goal.\n\n  Stop.\n\n\n### B\nproject: q\nbranch: c\n\n## Notes\nx\n", "B", 11),
+            ("## Work\r\n### A\r\nproject: p\r\nbranch: b\r\n\r\n## Notes\r\n", "A", 2),
+            ("## Work\n### A\nproject: p\nbranch: b\nbrief: one line", "A", 2),
+            ("## Work\n### A\nproject: p\nstarted:\nbranch: b\n", "A", 2),
+            ("## Work\n### A\nproject: p\nbranch: b\nstarted: old · gone · 2026-01-01\n### B\nproject: p\nbranch: c\n", "A", 2),
+        ] {
+            let out = with_started(text, line, title, &s).unwrap();
+            let w = read(&out).work.unwrap();
+            let it = w.iter().find(|w| w.title == title).unwrap();
+            assert_eq!(it.place.as_ref(), Some(&s), "{out:?}");
+            let line_out = out.lines().find(|l| l.starts_with("started:") && l.contains("jelly")).unwrap();
+            assert_eq!(line_out, "started: /Users/d/a · b/proj · jelly.fin-role · 2025-11-23 12:14");
+            let keep = |t: &str| t.lines().filter(|l| !l.starts_with("started:")).map(str::to_string).collect::<Vec<_>>();
+            assert_eq!(keep(&out), keep(text), "nothing else moved");
+            assert_eq!(out.contains("\r\n"), text.contains("\r\n"));
+            assert!(!out.contains("\r\n") || !out.replace("\r\n", "").contains('\n'), "one line ending");
+            assert_eq!(read(&out).problems.len(), read(text).problems.len());
+        }
+        let t = "## Work\n### A\nproject: p\nbranch: b\n### A\nproject: p\nbranch: c\n";
+        assert_eq!(read(&with_started(t, 5, "A", &s).unwrap()).work.unwrap()[1].place.as_ref(), Some(&s), "the line picks between two of one title");
+        assert!(with_started(t, 9, "A", &s).unwrap_err().contains("more than one item"));
+        assert!(with_started(t, 2, "Z", &s).unwrap_err().contains("no item “Z”"));
+        assert!(with_started(t, 2, "A", &st("/p", "a b")).unwrap_err().contains("not a place"));
+        assert!(with_started(t, 2, "A", &st("/p\nproject: x", "a")).is_err(), "never a second line");
+        // Prose the reader names stays where it is, above the new line.
+        let odd = "## Work\n### A\nproject: p\nbranch: b\n```\nnot a key\n```\n";
+        let out = with_started(odd, 2, "A", &s).unwrap();
+        assert!(out.ends_with("```\nstarted: /Users/d/a · b/proj · jelly.fin-role · 2025-11-23 12:14\n"), "{out}");
+    }
+
+    #[test]
+    fn a_started_line_that_is_not_three_parts_is_named_and_kept() {
+        let t = "## Work\n### A\nproject: p\nbranch: b\nstarted: yesterday\nai: codex\nmodel: gpt-5\n";
+        let s = read(t);
+        assert_eq!(s.problems.iter().map(|p| p.line).collect::<Vec<_>>(), vec![5], "{:?}", s.problems);
+        let w = &s.work.unwrap()[0];
+        assert_eq!((w.started.as_deref(), &w.place), (Some("yesterday"), &None));
+        assert_eq!((w.ai.as_deref(), w.model.as_deref()), (Some("codex"), Some("gpt-5")));
+    }
+
+    #[test]
+    fn a_project_line_becomes_registered_and_its_items_follow_a_new_name() {
+        let out = with_registered(PLAN, "homelab-ansible", "homelab-ansible").unwrap();
+        assert_eq!(out, PLAN.replace("- homelab-ansible      (clone: git@github.com:david/homelab-ansible.git)", "- homelab-ansible (registered)"));
+        assert_eq!(with_registered(&out, "homelab-ansible", "homelab-ansible").unwrap(), out, "already so: nothing written");
+        let out = with_registered(PLAN, "jellyfin-config", "/w/jelly (x)").unwrap();
+        let s = read(&out);
+        assert!(s.problems.is_empty(), "{:?}", s.problems);
+        assert_eq!(s.projects.unwrap()[2].name, "/w/jelly (x)");
+        let w = s.work.unwrap();
+        assert_eq!((w[0].project.as_deref(), w[1].project.as_deref()), (Some("homelab-ansible"), Some("/w/jelly (x)")));
+        assert!(with_registered(PLAN, "nope", "x").unwrap_err().contains("no project “nope”"));
+        assert!(with_registered(PLAN, "jellyfin-config", "worktrees").unwrap_err().contains("already"));
+        assert!(with_registered(PLAN, "jellyfin-config", "a\nb").is_err());
     }
 
     #[test]
