@@ -9,6 +9,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 - **A chat answer can start with `#`, `!` or `@`.** Typing `#2. Also, let's use the prefix ot instead of go.` into a question's free-text row was refused ("An answer can't start with #"), because answers shared the composer's rule, where a leading `# ! @ /` runs something. An answer goes into a field the prompt itself opened, and on Claude 2.1.331 those symbols only insert text there (the free-text row, a preview question's notes, a permission prompt's amend field), so only a leading `/` is refused now. Messages and slash commands keep the composer's rule. Codex's question notes are not measured and keep refusing a leading `@ ! #`.
 
+- **A markdown link to a local file in the chat did nothing.** A reply ending in `[Open the prototype](/path/to/index.html)` drew a link that was dead: the chat acted only on `http(s)`. It now follows the Files and Plan panes' rule: `http(s)` opens in the browser, a path (absolute, or relative to the place; `%20` decoded, `#fragment` dropped) opens in the Files tab, where the file's own Open button is the step before anything runs, and any other scheme is refused with a message. A shared session, which has no Files tab, says it cannot open a file on the host's computer.
+
 ## [0.53.1] - 2026-11-23
 
 ### Fixed
