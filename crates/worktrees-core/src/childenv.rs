@@ -146,8 +146,8 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
 }
 
 /// [`edits`] and [`start_dir`], applied to a std `Command`; returned for
-/// chaining. For a `Command` made elsewhere (a test's, or one handed to
-/// `TmuxServer::configure`); [`command`] already does this.
+/// chaining. For a `Command` made elsewhere (a test's); [`command`] already
+/// does this.
 pub fn scrub(cmd: &mut Command) -> &mut Command {
     if let Some(d) = start_dir() {
         cmd.current_dir(d);

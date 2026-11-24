@@ -678,14 +678,16 @@ this repo's settings in `.claude/close-out.md`).
 - **Nested lanes: shallow-tree implementation and remaining decisions.** #458
   merged the design only: opt-in hubs, first-class flat lanes, parent-aware
   Git/close-out and scoped worktrees mutations. Settle the open choices in
-  [proposal §11](docs/proposals/nested-lanes.md), then build phase 2 after tmux
-  phase 1a routing/sandbox namespace/restart-based drain. Review policy belongs
-  to the owner, never the tool. `tmux-no-start` and `tmux-routing` are separate
-  active lanes; do not duplicate their work. See
+  [proposal §11](docs/proposals/nested-lanes.md), then build phase 2. Review
+  policy belongs to the owner, never the tool. Phase 1a (one tmux server per
+  project) was not built: #464 was closed on 2026-11-23, and the session-name
+  collision it solved was fixed without it. It is wanted only if nested lanes
+  goes ahead and one crash must not end every project's sessions; start from
+  the design, not the branch. See
   [session archive](docs/sessions/2026-10-08-nested-lanes/summary.md).
 - **Tmux phase 1b: verified lease and socket recovery.** Follow #458's separate
   design for endpoint/PID/start identity, startup serialization and bounded
-  SIGUSR1 recovery. This does not block nested lanes after phase 1a. Test on
+  SIGUSR1 recovery. This does not block nested lanes. Test on
   isolated named servers on both platforms; the separate non-launch `-N`
   hotfix does not protect intentional launch paths. See
   [session archive](docs/sessions/2026-10-08-nested-lanes/summary.md).
