@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.53.1] - 2026-11-23
+
+### Fixed
+
+- **Two dependency advisories.** `url` 2.5.8 → 2.5.9 (RUSTSEC-2026-0592: a stack overflow in `Url::origin()` on nested `blob:` URLs) and `cookie` 0.18.1 → 0.18.3 (RUSTSEC-2026-0594). v0.53.0 was tagged and never published: its release run stopped at the advisory gate, so this is the release that carries everything below.
+
 ## [0.53.0] - 2026-11-23
 
 ### Added
