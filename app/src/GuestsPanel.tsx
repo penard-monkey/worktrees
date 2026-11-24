@@ -39,6 +39,10 @@ export function GuestsSection({ onRemote }: { onRemote: () => void }) {
     }
   };
   const shownName = name ?? (s.owner === "owner" ? "" : s.owner);
+  // A removed guest (no device left unrevoked) is not a guest any more: the
+  // record stays on the host so threads still name them, but it is listed
+  // nowhere and its name is free (`GuestView::removed`).
+  const guests = s.guests.filter(guestLive);
   const sharesOfGuest = (g: Guest) => (s.shares ?? []).filter((x) => x.guests.some((y) => y.principal === g.id)).length;
 
   return (
@@ -62,14 +66,14 @@ export function GuestsSection({ onRemote }: { onRemote: () => void }) {
         <button className="enter-btn sm" data-testid="invite-guest" onClick={() => setInviting({ id: null, name: "" })}>Invite a guest</button>
       </div>
 
-      {s.guests.length === 0 ? (
+      {guests.length === 0 ? (
         <div className="ra-note">No guests yet.</div>
       ) : (
         <ul className="ra-guests" aria-label="Guests">
-          {s.guests.map((g) => (
+          {guests.map((g) => (
             <li key={g.id} className="ra-guest" data-guest={g.id}>
               <div className="ra-guest-head">
-                <span className={`ra-dot ${guestLive(g) ? "on" : "off"}`} aria-hidden />
+                <span className="ra-dot on" aria-hidden />
                 <b>{g.name}</b>
                 <span className="ra-note">since {when(g.created_at)} · {sharesOfGuest(g)} {sharesOfGuest(g) === 1 ? "share" : "shares"}</span>
                 <span className="ra-guest-acts">
@@ -78,7 +82,6 @@ export function GuestsSection({ onRemote }: { onRemote: () => void }) {
                 </span>
               </div>
               <ul className="ra-guest-devs">
-                {g.devices.length === 0 && <li className="ra-note">No device.</li>}
                 {g.devices.map((d) => (
                   <li key={d.id} className="ra-note">
                     {d.name}

@@ -168,7 +168,7 @@ fn en0() -> Iface {
 
 fn world(rt: &tokio::runtime::Runtime, tag: &str, pin: &str) -> World {
     let key = Arc::new(DeviceKey::generate().unwrap());
-    world_keeping(rt, tag, pin, Keys::device_only(key.clone()), |store, rec| store.add(rec, &key))
+    world_keeping(rt, tag, pin, Keys::device_only(key.clone()), |store, rec| store.add(rec, &key).map(drop))
 }
 
 /// [`world`], with `keys` this device's and the host kept by `keep`.
@@ -609,7 +609,7 @@ fn a_key_that_refuses_a_candidates_handshake_ends_the_round() {
 /// A device whose keys are opaque signers, its host kept with `add_record`.
 fn record_only(rt: &tokio::runtime::Runtime, tag: &str, pin: &str) -> (World, Arc<Opaque>) {
     let key = Opaque::new();
-    let w = world_keeping(rt, tag, pin, Keys::device_only(key.clone()), |store, rec| store.add_record(rec));
+    let w = world_keeping(rt, tag, pin, Keys::device_only(key.clone()), |store, rec| store.add_record(rec).map(drop));
     (w, key)
 }
 

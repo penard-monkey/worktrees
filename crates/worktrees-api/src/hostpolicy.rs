@@ -3,7 +3,7 @@
 //! keeps of a dock shell — kept on the host (`host-policy.json` in the config
 //! dir) and never in a client's own settings.
 //!
-//! Five, in two kinds. Two decide what an agent may do (OWASP review M2,
+//! Six. Five of them are older than this file, in two kinds. Two decide what an agent may do (OWASP review M2,
 //! `docs/proposals/server-edition.md`, "Queued"): Settings → Codex →
 //! Permissions (`codex_permissions`) and Settings → pi → Project trust
 //! (`pi_project_trust`). Three configure an object only the engine has
@@ -14,7 +14,8 @@
 //! process-global statics by the page. Under one engine per host that meant
 //! the client that loaded LAST decided for every client — opening a page was
 //! enough to widen Codex, or to turn scrollback persistence back on until
-//! hydration landed.
+//! hydration landed. The sixth, `keep_awake`, was born here: it has no copy in
+//! `ui-state.json` and no migration, and `keepawake` reads and writes it.
 //!
 //! The rules:
 //! - **Only an explicit act writes it**: `set_codex_permissions` /
@@ -54,6 +55,9 @@ pub const PI_PROJECT_TRUST: &str = "pi_project_trust";
 pub const FETCH_INTERVAL_MIN: &str = "fetch_interval_min";
 pub const TERM_PERSIST_SCROLLBACK: &str = "term_persist_scrollback";
 pub const TERM_PER_TAB_HISTORY: &str = "term_per_tab_history";
+/// Hold this host's idle sleep off while the engine runs (`keepawake`, which
+/// owns the hold; `set_keep_awake` is its only writer).
+pub const KEEP_AWAKE: &str = "keep_awake";
 /// The policy preset last applied (`presets`): `{name, version}`. Not a
 /// policy itself — the values it set live in their own homes — and an older
 /// build keeps it untouched (a key this build does not know survives a write).
@@ -161,6 +165,12 @@ impl EngineOpts {
             term_per_tab_history: known(m, TERM_PER_TAB_HISTORY, Value::as_bool).unwrap_or(d.term_per_tab_history),
         }
     }
+}
+
+/// Whether the host was told to keep awake. Off when absent, and when the
+/// value is not one this build knows.
+pub fn keep_awake(config_dir: &Path) -> bool {
+    known(&read(config_dir), KEEP_AWAKE, Value::as_bool).unwrap_or(false)
 }
 
 fn fetch_interval(v: &Value) -> Option<u64> {

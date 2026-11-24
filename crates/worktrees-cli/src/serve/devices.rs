@@ -234,6 +234,12 @@ pub struct Disabled {
     pub reason: DisabledReason,
 }
 
+/// The owner record's `name` until the host sets one (`set_owner_name`). It
+/// is a placeholder the file needs, never a name: `principal_name` answers
+/// `None` for it, so a guest reads "OWNER'S PLACES" nowhere (v0.52.0's
+/// three-VM run) and falls back to a name it has.
+pub const OWNER_UNNAMED: &str = "owner";
+
 /// A person (§2.1). Phase 2 has exactly one, the owner.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -247,7 +253,7 @@ pub struct PrincipalRecord {
 
 impl PrincipalRecord {
     fn owner(now: i64) -> PrincipalRecord {
-        PrincipalRecord { id: PrincipalId::owner(), name: "owner".into(), caps: Caps::ALL, projects: Projects::All, created_at: now }
+        PrincipalRecord { id: PrincipalId::owner(), name: OWNER_UNNAMED.into(), caps: Caps::ALL, projects: Projects::All, created_at: now }
     }
 
     pub fn grant(&self) -> Grant {
@@ -701,6 +707,18 @@ pub struct GuestView {
     pub devices: Vec<DeviceView>,
 }
 
+impl GuestView {
+    /// Removed (the console's Remove, or every device revoked one by one):
+    /// no device left that is not a tombstone. The record stays, so the
+    /// threads still name what they wrote, but the owner no longer has them
+    /// as a guest: the app lists them nowhere, and their name is free — an
+    /// invite by it re-admits this same person (`Invite::from_value`). The
+    /// app's `guestLive` is the same rule.
+    pub fn removed(&self) -> bool {
+        self.devices.iter().all(DeviceRecord::is_revoked)
+    }
+}
+
 struct State {
     /// The file, or why it cannot be read.
     file: Result<DevicesFile, String>,
@@ -1032,7 +1050,8 @@ impl DeviceRegistry {
     }
 
     /// The guest principals (group chat §2.1), each with its devices,
-    /// tombstones included: the console's people list. `None` while the
+    /// tombstones and removed guests included ([`GuestView::removed`]: the
+    /// app lists only the others, and names old posts from all). `None` while the
     /// file is unreadable.
     pub fn guests(&self) -> Result<Vec<GuestView>, String> {
         let f = self.snapshot().ok_or_else(|| self.readable().unwrap_err())?;
@@ -1054,11 +1073,12 @@ impl DeviceRegistry {
         st.file.as_ref().ok()?.principal(id).filter(|p| p.is_guest()).cloned()
     }
 
-    /// A principal's display name: the owner's record names the owner (its
-    /// `name`, `"owner"` until the host sets one), a guest's names the guest.
+    /// A principal's display name: the owner's record names the owner once
+    /// the host has set one (`None` while it holds `OWNER_UNNAMED`), a
+    /// guest's names the guest.
     pub fn principal_name(&self, id: &PrincipalId) -> Option<String> {
         let st = self.state.read().unwrap();
-        st.file.as_ref().ok()?.principal(id).map(|p| p.name.clone())
+        st.file.as_ref().ok()?.principal(id).filter(|p| !(p.id.is_owner() && p.name == OWNER_UNNAMED)).map(|p| p.name.clone())
     }
 
     // ── changes ──────────────────────────────────────────────────────────────

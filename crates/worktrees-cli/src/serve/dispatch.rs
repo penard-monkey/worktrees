@@ -1,4 +1,4 @@
-//! The 267 commands, each with its exposure, capability and objects, in ONE
+//! The 286 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -39,7 +39,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::sync::Arc;
-use worktrees_api::{agents, config, files, hostenv, ideas, ideasessions, macprivacy, meta, ops, prefs, presets, profiles, project, status, term, viewer, workspace, workspaces, Ctx};
+use worktrees_api::{agents, config, files, hostenv, ideas, ideasessions, keepawake, macprivacy, meta, ops, plans, prefs, presets, profiles, project, status, term, viewer, workspace, workspaces, Ctx};
 use worktrees_core::authz::{self, Caller, Capability, Caps, DeviceId, Grant, Projects, Registry};
 use worktrees_core::fetchpolicy::Fetcher;
 
@@ -786,7 +786,7 @@ pub fn cap_of(cmd: &str) -> Option<Capability> {
 pub const GLOBAL_OK: &[&str] = &[
     // read
     "settings_info", "get_settings", "quota_settings", "slots_settings", "limits_settings", "policy_preset_status", "claude_usage", "codex_usage", "kimi_usage", "claude_status",
-    "check_update", "harness_sessions", "list_releases", "get_ai_config", "get_codex_permissions", "get_fetch_interval",
+    "check_update", "harness_sessions", "list_releases", "get_ai_config", "get_codex_permissions", "get_fetch_interval", "get_keep_awake",
     "get_term_history_opts", "agent_guidance_status", "agent_guidance_diff", "agent_models", "agent_user_skills", "pi_hosts",
     "kimi_version", "tmux_check", "log_info", "get_changelog", "new_profile_id", "skills_list", "ui_usage",
     // write
@@ -919,6 +919,8 @@ commands! { cx, a;
     // Host policy (`worktrees_api::hostpolicy`): `admin`, not console-only like Codex's, as it widens no agent (decision 6).
     set_fetch_interval: Engine [admin, all] => ops::set_fetch_interval(&cx.ctx, a.get("mins")?),
     get_fetch_interval: Engine [read, global] => ops::get_fetch_interval(),
+    set_keep_awake: Engine [admin, all] => keepawake::set_keep_awake(&cx.ctx, a.get("on")?),
+    get_keep_awake: Engine [read, global] => keepawake::get_keep_awake(&cx.ctx),
     fetch_origin: Engine [write, project(root)] => ops::fetch_origin(a.get("root")?),
     list_drafts: Engine [read, filtered(drafts)] => ops::list_drafts(),
     close_place: Engine [write, place(repo, slug), opt(session_of(session, repo, slug))] => ops::close_place(
@@ -1422,6 +1424,21 @@ commands! { cx, a;
     workspace_set_projects: HostConsole => workspaces::workspace_set_projects(a.get("id")?, a.get("roots")?),
     workspace_reorder: HostConsole => workspaces::workspace_reorder(a.get("ids")?),
     workspace_set_color: HostConsole => workspaces::workspace_set_color(a.get("id")?, a.get("color")?),
+    // ── plans and their workspaces (idea board phase 4, `worktrees_api::plans`) ──
+    // A plan is a document in the ideas folder (`plan_of:`); a workspace
+    // gains its `plan` (one plan, at most one workspace) and linked `ideas`.
+    // Each act is one operation with plain parameters (§7.1); a change to a
+    // plan copies it to history first. Console, as every ideas row.
+    plan_make: HostConsole => plans::plan_make(&cx.ctx, a.get("ideas")?, a.get("title")?, a.get("draft")?),
+    plan_read: HostConsole [console, idea(id)] => plans::plan_read(&cx.ctx, a.get("id")?),
+    plan_add_ideas: HostConsole [console, idea(id)] => plans::plan_add_ideas(&cx.ctx, a.get("id")?, a.get("ideas")?, a.get("expected_mtime")?),
+    plan_remove_idea: HostConsole [console, idea(id)] => plans::plan_remove_idea(&cx.ctx, a.get("id")?, a.get("idea")?, a.get("expected_mtime")?),
+    plan_add_project: HostConsole [console, idea(id)] => plans::plan_add_project(&cx.ctx, a.get("id")?, a.get("root")?, a.get("expected_mtime")?),
+    workspace_from_plan: HostConsole [console, idea(plan)] => plans::workspace_from_plan(&cx.ctx, a.get("plan")?),
+    workspace_set_plan: HostConsole => plans::workspace_set_plan(&cx.ctx, a.get("id")?, a.get("plan")?),
+    workspace_link_idea: HostConsole [console, idea(idea)] => plans::workspace_link_idea(&cx.ctx, a.get("id")?, a.get("idea")?),
+    workspace_unlink_idea: HostConsole => plans::workspace_unlink_idea(&cx.ctx, a.get("id")?, a.get("idea")?),
+    workspace_overview: HostConsole => plans::workspace_overview(&cx.ctx, a.get("id")?),
 }
 
 #[cfg(test)]
@@ -1465,7 +1482,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 244 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 286 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1485,17 +1502,20 @@ mod tests {
     /// `idea_create`, `idea_write`, `idea_rename`, `idea_remove`,
     /// `idea_adopt`) and phase 3's seven (`idea_relate`, `idea_merge`,
     /// `idea_combine`, `idea_split`, `idea_related`, `idea_versions`,
-    /// `idea_restore`), and the chat's images (`read_place_image`, `agent_call_image`), and phase S's fifteen
+    /// `idea_restore`), phase 4's ten plan and workspace rows (`plan_*`,
+    /// `workspace_from_plan`, `workspace_set_plan`, `workspace_link_idea`,
+    /// `workspace_unlink_idea`, `workspace_overview`), and the chat's images (`read_place_image`, `agent_call_image`), and phase S's fifteen
     /// idea-session console rows (`idea_conversation*`, `idea_*` over the agent bodies), and group
     /// chat's eighteen share rows (fourteen console with PR D's `share_used` and `share_check`, four
     /// `guest`), its thread's two (`thread_read`, `thread_post`, `guest`) and PR C's
-    /// two `guest` history rows (`shared_turns`, `shared_tool_call`); the check scripts
+    /// two `guest` history rows (`shared_turns`, `shared_tool_call`), and the host's sleep
+    /// hold (`get_keep_awake`, `set_keep_awake`); the check scripts
     /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 274, "the table has 274 commands");
+        assert_eq!(TABLE.len(), 286, "the table has 286 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1831,6 +1851,11 @@ mod tests {
         ("idea_restore", "id", "an idea's ULID that may have no live file (restoring a removed or merged-away idea makes it again); the body checks it is a ULID (a console act)"),
         ("share_request", "slug", "a place NAME a guest asks about (group chat §2.2): resolving it would answer whether it exists, which the row must not; the body stores it, answered alike for a real, hidden or missing place"),
         ("thread_post", "id", "the client's own id for its post (group chat §4), so a retry returns the original; it names nothing on the host, and the body checks its shape"),
+        ("plan_add_project", "root", "a registered root whose registry NAME is written into the plan's `## Projects`; the body refuses one the registry does not hold (a console act)"),
+        ("workspace_set_plan", "id", "a named workspace's id (a console act); `plan` is a plan's id or null, which the body resolves and checks is a plan"),
+        ("workspace_link_idea", "id", "a named workspace's id (a console act)"),
+        ("workspace_unlink_idea", "id", "a named workspace's id (a console act); `idea` may name an idea that is gone"),
+        ("workspace_overview", "id", "a named workspace's id (a console act)"),
         ("read_place_image", "path", "a path in the PLACE (relative to its root, or absolute under it): the body resolves it under `place(repo, slug)`'s own root by `safepath::place_image`, which is not a `file(path)` judged against every project"),
     ];
 
@@ -1906,7 +1931,7 @@ mod tests {
     /// `push_allow_security`); Settings → Agent policy → Limits'
     /// `limits_settings` (`read`) and `set_limits` (`admin`); and the policy
     /// presets' `policy_preset_status` (`read`) and `apply_policy_preset`
-    /// (console); the named workspaces' seven (console); and the idea board's seven and phase 3's seven (console); phase S's fifteen idea-session rows (console); `read_place_image` and `agent_call_image` are `read`; and group chat's
+    /// (console); the named workspaces' seven (console); and the idea board's seven and phase 3's seven (console); phase 4's ten (console); phase S's fifteen idea-session rows (console); `read_place_image` and `agent_call_image` are `read`; the host's sleep hold's `get_keep_awake` (`read`) and `set_keep_awake` (`admin`); and group chat's
     /// shares: fourteen console rows (`share_*` for the owner, `share_used`, `share_check`, `guest_places_hide`,
     /// `shares_all`, `guests_list`, `guest_remove`, `owner_set_name`) and the
     /// four `guest` rows (`GUEST_ROWS`), the capability's first, the thread's
@@ -1928,7 +1953,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 70), ("write", 23), ("admin", 41), ("console", 98), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 71), ("write", 23), ("admin", 42), ("console", 108), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7), ("guest", 8),
         ]
         .into();
@@ -2057,6 +2082,43 @@ mod tests {
         assert_eq!((back["id"].as_str(), back.get("merged")), (Some(b.as_str()), None), "B is its own again");
         assert!(run("idea_versions", json!({"id": "../x"})).is_err());
         for cmd in ["idea_relate", "idea_merge", "idea_combine", "idea_split", "idea_related", "idea_versions", "idea_restore"] {
+            assert_eq!(exposure(cmd), Some(Exposure::HostConsole), "{cmd}: desktop only");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Phase 4's plan rows through the dispatcher: a plan from two ideas, an
+    /// idea added and taken out, the reader's problems named by line. The
+    /// workspace rows read the real `workspaces.json`, which a test's engine
+    /// may not write (serve/tests.rs): their bodies are tested in
+    /// `worktrees_api::plans`; here they are only declared console.
+    #[test]
+    fn the_plan_rows_are_one_act_each_and_name_a_bad_line() {
+        let (c, dir, _rx) = call("plans");
+        let c = Call { ctx: c.ctx.clone().with_ideas_dir(dir.join("ideas")), ..c };
+        let run = |cmd: &str, v: Value| super::call(&c, cmd, &args(v));
+        let mk = |t: &str| run("idea_create", json!({"title": t})).unwrap()["id"].as_str().unwrap().to_string();
+        let (a, b) = (mk("Jellyfin"), mk("GPU"));
+        let p = run("plan_make", json!({"ideas": [a], "title": "Home"})).unwrap();
+        assert_eq!((p["kind"].as_str(), p["file"].as_str()), (Some("plan"), Some("plan-home.md")));
+        let pid = p["id"].as_str().unwrap().to_string();
+        let p = run("plan_add_ideas", json!({"id": pid, "ideas": [b], "expectedMtime": p["mtime_ms"]})).unwrap();
+        assert!(p["content"].as_str().unwrap().contains(&format!("plan_of: [{a}, {b}]")));
+        let text = p["content"].as_str().unwrap().replace("## Work\n", "## Work\n### Role\nprojet: x\nbranch: y\n");
+        run("idea_write", json!({"id": pid, "content": text})).unwrap();
+        let r = run("plan_read", json!({"id": pid})).unwrap();
+        let probs = r["problems"].as_array().unwrap();
+        assert!(probs.iter().any(|x| x["text"] == json!("projet: x") && x["words"].as_str().unwrap().contains("unknown key")), "{r}");
+        assert_eq!(r["doc"]["content"], json!(text), "the document is answered whatever the problems");
+        assert_eq!(r["ideas"].as_array().unwrap().len(), 2);
+        let p = run("plan_remove_idea", json!({"id": pid, "idea": a})).unwrap();
+        assert!(p["content"].as_str().unwrap().contains(&format!("plan_of: [{b}]")));
+        assert!(run("plan_make", json!({"ideas": [a], "draft": "---\nid: x\n---\n"})).unwrap_err().as_str().unwrap().contains("frontmatter"));
+        assert!(run("plan_read", json!({"id": a})).unwrap_err().as_str().unwrap().contains("not a plan"));
+        for cmd in [
+            "plan_make", "plan_read", "plan_add_ideas", "plan_remove_idea", "plan_add_project", "workspace_from_plan",
+            "workspace_set_plan", "workspace_link_idea", "workspace_unlink_idea", "workspace_overview",
+        ] {
             assert_eq!(exposure(cmd), Some(Exposure::HostConsole), "{cmd}: desktop only");
         }
         let _ = std::fs::remove_dir_all(&dir);

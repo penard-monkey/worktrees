@@ -63,6 +63,13 @@ pub struct Workspace {
     /// build from before colors keeps it in `extra` and writes it back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// The plan it came from (phase 4, §2.3): a plan document's id in the
+    /// ideas folder. One plan has at most one workspace ([`set_plan_at`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// Ideas linked to it as context (§2.3), by id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ideas: Vec<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -269,6 +276,101 @@ pub fn reorder_at(p: &Path, ids: &[String]) -> Result<(), String> {
     })
 }
 
+// ── phase 4: a workspace's plan and ideas (§2.3) ────────────────────────────
+
+/// The workspace whose plan is `plan`, if any.
+pub fn for_plan<'a>(f: &'a WorkspacesFile, plan: &str) -> Option<&'a Workspace> {
+    f.workspaces.iter().find(|w| w.plan.as_deref() == Some(plan))
+}
+
+/// Set (or, with `None`, clear) workspace `id`'s plan. **One plan has at most
+/// one workspace**: a plan another workspace already has is refused, naming
+/// it. Setting the plan it has writes nothing.
+pub fn set_plan_at(p: &Path, id: &str, plan: Option<&str>) -> Result<(), String> {
+    if let Some(pl) = plan {
+        if !crate::ulid::is_valid(pl) {
+            return Err(format!("not a plan id: {pl:?}"));
+        }
+    }
+    edit_at(p, |f| {
+        if let Some(pl) = plan {
+            if let Some(other) = f.workspaces.iter().find(|w| w.id != id && w.plan.as_deref() == Some(pl)) {
+                return Err(format!("that plan already has a workspace, '{}': a plan has at most one", other.name));
+            }
+        }
+        f.get_mut(id)?.plan = plan.map(str::to_string);
+        Ok(())
+    })
+}
+
+/// Link the idea `idea` to workspace `id` (appended, once).
+pub fn link_idea_at(p: &Path, id: &str, idea: &str) -> Result<(), String> {
+    if !crate::ulid::is_valid(idea) {
+        return Err(format!("not an idea id: {idea:?}"));
+    }
+    edit_at(p, |f| {
+        let w = f.get_mut(id)?;
+        if !w.ideas.iter().any(|i| i == idea) {
+            w.ideas.push(idea.to_string());
+        }
+        Ok(())
+    })
+}
+
+/// Unlink `idea` from workspace `id`; one it does not hold writes nothing.
+pub fn unlink_idea_at(p: &Path, id: &str, idea: &str) -> Result<(), String> {
+    edit_at(p, |f| {
+        f.get_mut(id)?.ideas.retain(|i| i != idea);
+        Ok(())
+    })
+}
+
+/// "Make workspace" from the plan `plan` (§2.3, phase 4): the workspace
+/// that already has this plan, untouched (`false`), or a NEW one (`true`)
+/// named `name` (`name 2`, `name 3`, … while the name is taken), holding the
+/// plan, `ideas` and `roots` (each must pass `can_add`, the caller's "is it
+/// registered"). One edit under the lock, so two clicks make one workspace.
+pub fn from_plan_at(
+    p: &Path,
+    name: &str,
+    plan: &str,
+    ideas: &[String],
+    roots: &[String],
+    can_add: impl Fn(&str) -> bool,
+) -> Result<(Workspace, bool), String> {
+    if !crate::ulid::is_valid(plan) {
+        return Err(format!("not a plan id: {plan:?}"));
+    }
+    let base = clean_name(name)?;
+    edit_at(p, |f| {
+        if let Some(w) = for_plan(f, plan) {
+            return Ok((w.clone(), false));
+        }
+        let name = (1..)
+            .map(|n| if n == 1 { base.clone() } else { format!("{base} {n}") })
+            .find(|n| !name_taken(f, n, None))
+            .expect("an unbounded range finds a free name");
+        let mut projects: Vec<ProjectRef> = Vec::new();
+        for r in roots {
+            if !r.starts_with('/') || !can_add(r) {
+                return Err(format!("not a registered project: {r}"));
+            }
+            if !projects.iter().any(|x| &x.root == r) {
+                projects.push(ProjectRef { root: r.clone(), ..Default::default() });
+            }
+        }
+        let mut ids: Vec<String> = Vec::new();
+        for i in ideas {
+            if crate::ulid::is_valid(i) && !ids.contains(i) {
+                ids.push(i.clone());
+            }
+        }
+        let w = Workspace { id: crate::ulid::new(), name, projects, plan: Some(plan.to_string()), ideas: ids, ..Default::default() };
+        f.workspaces.push(w.clone());
+        Ok((w, true))
+    })
+}
+
 pub fn create(name: &str) -> Result<Workspace, String> {
     create_at(&path(), name)
 }
@@ -286,6 +388,15 @@ pub fn reorder(ids: &[String]) -> Result<(), String> {
 }
 pub fn set_color(id: &str, color: Option<&str>) -> Result<(), String> {
     set_color_at(&path(), id, color)
+}
+pub fn set_plan(id: &str, plan: Option<&str>) -> Result<(), String> {
+    set_plan_at(&path(), id, plan)
+}
+pub fn link_idea(id: &str, idea: &str) -> Result<(), String> {
+    link_idea_at(&path(), id, idea)
+}
+pub fn unlink_idea(id: &str, idea: &str) -> Result<(), String> {
+    unlink_idea_at(&path(), id, idea)
 }
 
 #[cfg(test)]
@@ -415,6 +526,106 @@ mod tests {
         assert_eq!(fs::read_to_string(t.file()).unwrap(), "{not json");
         fs::write(t.file(), "  \n").unwrap();
         assert_eq!(read_at(&t.file()).unwrap(), WorkspacesFile::default(), "empty is empty");
+    }
+
+    #[test]
+    fn one_plan_has_at_most_one_workspace() {
+        let t = Tmp::new("plan");
+        let (pl, idea) = (crate::ulid::new(), crate::ulid::new());
+        let (w, made) = from_plan_at(&t.file(), "Plan: Jellyfin", &pl, &[idea.clone(), idea.clone(), "junk".into()], &s(&["/a", "/a"]), any).unwrap();
+        assert!(made);
+        assert_eq!((w.name.as_str(), w.plan.as_deref(), w.ideas.clone()), ("Plan: Jellyfin", Some(pl.as_str()), vec![idea.clone()]));
+        assert_eq!(w.projects.iter().map(|p| p.root.as_str()).collect::<Vec<_>>(), ["/a"]);
+        // Again from the same plan: the same workspace, nothing written.
+        let m0 = fs::metadata(t.file()).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let (again, made) = from_plan_at(&t.file(), "Other name", &pl, &[], &[], any).unwrap();
+        assert!(!made);
+        assert_eq!(again.id, w.id);
+        assert_eq!(fs::metadata(t.file()).unwrap().modified().unwrap(), m0);
+        // Another workspace may not take that plan; a second plan of the same
+        // name gets a free name.
+        let other = create_at(&t.file(), "Other").unwrap();
+        let e = set_plan_at(&t.file(), &other.id, Some(&pl)).unwrap_err();
+        assert!(e.contains("already has a workspace, 'Plan: Jellyfin'"), "{e}");
+        assert_eq!(read_at(&t.file()).unwrap().workspaces[1].plan, None);
+        let pl2 = crate::ulid::new();
+        let (w2, _) = from_plan_at(&t.file(), "plan: jellyfin", &pl2, &[], &[], any).unwrap();
+        assert_eq!(w2.name, "plan: jellyfin 2");
+        assert!(from_plan_at(&t.file(), "X", &crate::ulid::new(), &[], &s(&["/never"]), |r| r != "/never").unwrap_err().contains("not a registered"));
+        // Its own plan again is fine; clearing frees the plan.
+        set_plan_at(&t.file(), &w.id, Some(&pl)).unwrap();
+        set_plan_at(&t.file(), &w.id, None).unwrap();
+        set_plan_at(&t.file(), &other.id, Some(&pl)).unwrap();
+        assert!(set_plan_at(&t.file(), &other.id, Some("../x")).is_err());
+        // Ideas link once and unlink.
+        link_idea_at(&t.file(), &other.id, &idea).unwrap();
+        link_idea_at(&t.file(), &other.id, &idea).unwrap();
+        assert_eq!(read_at(&t.file()).unwrap().workspaces[1].ideas, vec![idea.clone()]);
+        unlink_idea_at(&t.file(), &other.id, &idea).unwrap();
+        let f = read_at(&t.file()).unwrap();
+        assert!(f.workspaces[1].ideas.is_empty());
+        let raw = fs::read_to_string(t.file()).unwrap();
+        assert!(!raw.contains("\"ideas\": []"), "an empty list is not written: {raw}");
+    }
+
+    /// The card's color (#659), the project order (#660) and phase 4's plan
+    /// and ideas live in one record: no edit of one drops another.
+    #[test]
+    fn color_projects_plan_and_ideas_keep_each_other() {
+        let t = Tmp::new("keep-all");
+        let (pl, idea) = (crate::ulid::new(), crate::ulid::new());
+        let w = create_at(&t.file(), "W").unwrap();
+        set_color_at(&t.file(), &w.id, Some("teal")).unwrap();
+        set_projects_at(&t.file(), &w.id, &s(&["/a", "/b"]), any).unwrap();
+        set_plan_at(&t.file(), &w.id, Some(&pl)).unwrap();
+        link_idea_at(&t.file(), &w.id, &idea).unwrap();
+        let same = |what: &str, roots: &[&str], color: Option<&str>| {
+            let f = read_at(&t.file()).unwrap();
+            let w = &f.workspaces[0];
+            assert_eq!(w.color.as_deref(), color, "{what}: color");
+            assert_eq!((w.plan.as_deref(), w.ideas.as_slice()), (Some(pl.as_str()), &[idea.clone()][..]), "{what}: plan and ideas");
+            assert_eq!(w.projects.iter().map(|p| p.root.as_str()).collect::<Vec<_>>(), roots, "{what}: projects");
+            assert!(w.extra.is_empty(), "{what}: every field is read by its name, none falls into `extra`: {:?}", w.extra);
+        };
+        same("after linking", &["/a", "/b"], Some("teal"));
+        set_projects_at(&t.file(), &w.id, &s(&["/b", "/a"]), any).unwrap();
+        same("after a move inside it", &["/b", "/a"], Some("teal"));
+        rename_at(&t.file(), &w.id, "Renamed").unwrap();
+        reorder_at(&t.file(), &s(&[&w.id])).unwrap();
+        set_color_at(&t.file(), &w.id, None).unwrap();
+        same("after clearing the color", &["/b", "/a"], None);
+        // And a workspace made from a plan takes a color as any other.
+        let (m, _) = from_plan_at(&t.file(), "M", &crate::ulid::new(), &[], &[], any).unwrap();
+        assert_eq!(m.color, None);
+        set_color_at(&t.file(), &m.id, Some("red")).unwrap();
+        set_plan_at(&t.file(), &m.id, None).unwrap();
+        assert_eq!(read_at(&t.file()).unwrap().workspaces[1].color.as_deref(), Some("red"));
+    }
+
+    /// The nav's Everything Else is the page's alone (#684): derived, never
+    /// stored, under an id core cannot mint. So no plan or idea can be put on
+    /// it, and nothing is written; nor does a plan of that name make it.
+    #[test]
+    fn everything_else_takes_no_plan_and_no_idea() {
+        const EE: &str = "everything-else";
+        let t = Tmp::new("ee");
+        create_at(&t.file(), "W").unwrap();
+        let before = fs::read_to_string(t.file()).unwrap();
+        let (pl, idea) = (crate::ulid::new(), crate::ulid::new());
+        assert!(!crate::ulid::is_valid(EE));
+        for e in [
+            set_plan_at(&t.file(), EE, Some(&pl)).unwrap_err(),
+            set_plan_at(&t.file(), EE, None).unwrap_err(),
+            link_idea_at(&t.file(), EE, &idea).unwrap_err(),
+            unlink_idea_at(&t.file(), EE, &idea).unwrap_err(),
+        ] {
+            assert!(e.contains(EE), "it names what was not found: {e}");
+        }
+        assert_eq!(fs::read_to_string(t.file()).unwrap(), before, "a refusal writes nothing");
+        assert!(from_plan_at(&t.file(), "X", EE, &[], &[], any).is_err(), "nor is it a plan");
+        let (w, made) = from_plan_at(&t.file(), "Everything Else", &pl, &[], &[], any).unwrap();
+        assert!(made && w.id != EE && crate::ulid::is_valid(&w.id), "a plan of that name makes a named workspace: {}", w.id);
     }
 
     #[test]
