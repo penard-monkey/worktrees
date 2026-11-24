@@ -2080,6 +2080,18 @@ impl ConnAudit {
                     detail.insert("conv".into(), json!(ident(c)));
                 }
             }
+            // A work item's Start (idea board phase 5): the brief its agent
+            // opens on, as its length and hash, never its text — and the
+            // branch its place is cut on. The project is the record's own.
+            "plan_start" => {
+                if let Some(Value::String(t)) = arg(args, "brief") {
+                    detail.insert("bytes".into(), json!(t.len()));
+                    detail.insert("sha256".into(), json!(sha256_hex(t.as_bytes())));
+                }
+                if let Some(Value::String(b)) = arg(args, "branch") {
+                    detail.insert("branch".into(), json!(ident(b)));
+                }
+            }
             // A guest's share request (group chat §2.2): the place it named
             // (the slug is the object) and its note's length and hash, never
             // the note — the same record whether the place is real or not.
@@ -4091,6 +4103,56 @@ mod tests {
         let refused = through(&pcx, &p, &g.w, "idea_send", json!({ "id": id, "conv": conv.id, "text": "x" }));
         assert_eq!(refused, Err(json!("console-only")), "{refused:?}");
         assert_eq!(pane.sent.lock().unwrap().len(), 1);
+    }
+
+    /// Idea board phase 5: a plan's Start is a console act whose brief reaches
+    /// the log as its length and SHA-256, never its text. A `-`-led branch is
+    /// refused in the body, before anything is made; a project this host does
+    /// not hold, before the body; and a device reaches none of the three rows.
+    #[test]
+    fn a_plan_start_is_recorded_by_hash_never_its_brief() {
+        let mut g = Gate::new("planstart", Caller::console());
+        let ideas = g.top.join("ideas");
+        g.cx.ctx = g.cx.ctx.clone().with_ideas_dir(ideas.clone());
+        let a = worktrees_core::ideas::create_at(&ideas, "Talk").unwrap().idea.id.unwrap();
+        let body = format!("# Plan: T\n\n## Projects\n- {} (registered)\n\n## Work\n### Role\nproject: {}\nbranch: feat/role\n", g.root, g.root);
+        let plan = worktrees_core::ideas::make_plan_at(&ideas, &[a], None, Some(&body)).unwrap();
+        let id = plan.idea.id.clone().unwrap();
+        let line = plan.content.lines().position(|l| l == "### Role").unwrap() + 1;
+        let c = ConnAudit::new(g.a.clone(), 7, Some("127.0.0.1".into()), Caller::console());
+        let brief = "do the SECRET-BRIEF-1 thing";
+        let start = |branch: &str, repo: &str| json!({ "id": id, "line": line, "title": "Role", "repo": repo, "branch": branch, "brief": brief });
+        let e = through(&g.cx, &c, &g.w, "plan_start", start("--all", &g.root)).unwrap_err();
+        assert!(e.as_str().unwrap().contains("may not begin with"), "{e}");
+        // The scratch repo is the resolver's, not the registry file's, so the
+        // body refuses it: nothing is created, and the plan is as it was.
+        let e = through(&g.cx, &c, &g.w, "plan_start", start("feat/role", &g.root)).unwrap_err();
+        assert!(e.as_str().unwrap().contains("not a registered project"), "{e}");
+        assert_eq!(worktrees_core::ideas::read_at(&ideas, &id).unwrap().content, plan.content);
+        assert!(!std::path::Path::new(&g.root).join(".worktrees/feat-role").exists());
+        let raw = std::fs::read_to_string(g.d.join(FILE)).unwrap();
+        assert!(!raw.contains("SECRET-BRIEF"), "the brief reached the log:\n{raw}");
+        let recs = g.records("call", "plan_start");
+        assert_eq!(recs.len(), 2, "{recs:#?}");
+        assert_eq!((&recs[1]["detail"]["bytes"], &recs[1]["detail"]["sha256"]), (&json!(brief.len()), &json!(sha256_hex(brief.as_bytes()))));
+        assert_eq!((&recs[1]["detail"]["branch"], &recs[1]["outcome"]), (&json!("feat/role"), &json!("err")));
+        // A project or a place this host does not hold never reaches the body.
+        assert!(through(&g.cx, &c, &g.w, "plan_start", start("feat/role", "/nowhere")).is_err());
+        assert!(through(&g.cx, &c, &g.w, "plan_link_place", json!({ "id": id, "line": line, "title": "Role", "repo": g.root, "slug": "-x" })).is_err());
+        assert!(through(&g.cx, &c, &g.w, "plan_set_project", json!({ "id": id, "name": "x", "root": "/nowhere" })).is_err());
+        assert_eq!(g.records("refused", "plan_start").len(), 1);
+        assert_eq!(g.records("refused", "plan_link_place").len(), 1, "a slug that names no place");
+        // A device reaches none of them.
+        let mut pcx = g.cx.with(g.cx.ctx.clone(), g.cx.frames.clone());
+        pcx.caller = phone_caller();
+        let p = phone(&g.a, 9);
+        for (cmd, args) in [
+            ("plan_start", start("feat/role", &g.root)),
+            ("plan_link_place", json!({ "id": id, "line": line, "title": "Role", "repo": g.root, "slug": "(main)" })),
+            ("plan_set_project", json!({ "id": id, "name": "x", "root": g.root })),
+        ] {
+            assert_eq!(through(&pcx, &p, &g.w, cmd, args), Err(json!("console-only")), "{cmd}");
+        }
     }
 
     /// A slash command is recorded by its NAME, and its argument by length
