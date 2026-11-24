@@ -1488,7 +1488,12 @@ pub struct Relation {
 /// `related:`, `from:` or links name it or an id it absorbed. An id that
 /// resolves nowhere is left out; the idea itself never appears.
 pub fn related_at(root: &Path, id: &str) -> Result<Vec<Relation>, String> {
-    let idx = list_at(root)?;
+    related_in(&list_at(root)?, id)
+}
+
+/// [`related_at`] over an index already read, for an answer about every idea
+/// at once (one scan of the folder, not one per idea).
+pub fn related_in(idx: &Index, id: &str) -> Result<Vec<Relation>, String> {
     let me = idx.resolve(id)?.id.clone().unwrap_or_default();
     let mine = idx.rels(&me).cloned().unwrap_or_default();
     let names_me = |x: &str| x == me || idx.absorbed_by(x) == Some(me.as_str());
