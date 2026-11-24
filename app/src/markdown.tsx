@@ -133,8 +133,8 @@ function createSlugger(): (text: string) => string {
 }
 
 // Recursion guard. `**`×4000 in an 8 KB file lexes fine and then blows the
-// stack in the renderer — and with no error boundary above us that unmounts
-// the whole app window. Past this depth we stop descending and print the raw
+// stack in the renderer — and the boundary above App would then replace the
+// whole window with its crash screen. Past this depth we stop descending and print the raw
 // text, which is ugly but bounded.
 const MAX_DEPTH = 40;
 
@@ -432,7 +432,8 @@ export const Markdown = memo(function Markdown(props: MarkdownProps) {
   // then 4000 `*` (8 KB) is enough, as is a 2000-deep blockquote. That is a
   // RangeError from inside marked, which our own depth guard cannot prevent,
   // so it is caught here and the document degrades to plain text rather than
-  // taking the pane (or, without the boundary above, the window) with it.
+  // taking the pane (or, in a host with no boundary of its own, the window)
+  // with it.
   const parsed = useMemo(() => {
     try {
       return { tokens: marked.lexer(props.src, { gfm: true, breaks: false }), failed: false };

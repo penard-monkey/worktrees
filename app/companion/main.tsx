@@ -70,9 +70,14 @@ async function boot() {
     void door.connect();
   }
   const { Companion } = await import("./Companion");
+  // A second React root, so a second boundary: the main window's is not above
+  // this one.
+  const { AppErrorBoundary } = await import("../src/AppErrorBoundary");
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>
-      <Companion />
+      <AppErrorBoundary where="Ideas window">
+        <Companion />
+      </AppErrorBoundary>
     </React.StrictMode>,
   );
   // The cross-window drag probe: dev builds only, and only when asked for.

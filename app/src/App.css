@@ -4058,3 +4058,20 @@ body.dragging .ws-h { cursor: grabbing; }
 /* Phase S: an idea conversation waits on the person — the lightbulb's dot. */
 .rail-icon.rail-waiting { position: relative; }
 .rail-icon.rail-waiting::after { content: ""; position: absolute; top: 3px; right: 3px; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); }
+
+/* The crash screen above a window's React root (AppErrorBoundary.tsx). */
+.app-crash {
+  position: fixed; inset: 0; overflow: auto;
+  display: flex; flex-direction: column; align-items: center; justify-content: safe center; gap: var(--s3);
+  padding: var(--s5); text-align: center;
+  background: var(--bg-abyss); color: var(--txt); font-family: var(--font-ui); font-size: var(--fs-body);
+}
+.app-crash h1 { margin: 0; color: var(--txt-hi); font-size: var(--fs-title); }
+.app-crash p { margin: 0; max-width: 60ch; }
+.app-crash pre {
+  margin: 0; max-width: min(70ch, 100%); padding: var(--s3); text-align: left;
+  white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text;
+  background: var(--bg-panel); color: var(--txt-hi); border: 1px solid var(--line); border-radius: var(--r-sm);
+  font-family: var(--font-mono); font-size: var(--fs-label);
+}
+.app-crash > * { flex: none; }
