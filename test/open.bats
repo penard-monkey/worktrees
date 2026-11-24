@@ -295,10 +295,10 @@ session_count() {
   [ "$status" -eq 0 ]
   grep -qx '|new-session' "$TMUX_LOG.globals"
   for sub in list-sessions list-panes split-window select-pane set-option attach; do
-    grep -qx -- "-N|$sub" "$TMUX_LOG.globals" || { echo "no -N on $sub"; cat "$TMUX_LOG.globals"; false; }
+    grep -qE -- "^-N( -u)?\|$sub\$" "$TMUX_LOG.globals" || { echo "no -N on $sub"; cat "$TMUX_LOG.globals"; false; }
   done
   # Nothing but new-session runs without it.
-  [ "$(grep -v '^-N|' "$TMUX_LOG.globals" | grep -vcx '|new-session')" -eq 0 ]
+  [ "$(grep -vE '^-N( -u)?\|' "$TMUX_LOG.globals" | grep -vcx '|new-session')" -eq 0 ]
   # And the subcommand log reads exactly as it did before.
   grep -q 'attach -t repo-feat-x' "$TMUX_LOG"
   grep -q '^tmux new-session -d -s repo-feat-x' "$TMUX_LOG"

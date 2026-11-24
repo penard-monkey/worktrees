@@ -21,6 +21,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ### Fixed
 
+- **Two projects whose tmux sessions get the same name no longer share, or close, each other's session.** Two repositories in folders of the same name (or `app` with a place `x-feat` beside `app-x` with a place `feat`) name a session alike. `new` and `open` in the second reported the first one's session as its own, and `close` or `rm` there ended the other project's agent without asking. A session now belongs to a place by the folder it was created in: another project's is never shown, attached, typed into or closed as yours, and `new`/`open` say the name is taken, before anything is made, and how to give the project its own prefix. `doctor` names two registered places that clash. Needs tmux 3.2 or newer; on an older one the name still decides.
 - **A Read of an image under `.worktrees/` in a project's `(main)` shows the picture again.** The chat printed `preview not shown — outside this place` for every such thumbnail: the host refuses another place's tree in `(main)`, but the client did not know that part of the rule, so it never fell back to the picture Claude was shown. The client now knows the `(main)` rule (case-insensitively), and a Read thumbnail the host refuses as `outside this place` falls back to that picture too, whatever the reason (a link out, a case variant). A paired device still gets the same note as for any Read outside the place.
 
 - Group chat (beta): a guest the owner removed is told so. Its sidebar said

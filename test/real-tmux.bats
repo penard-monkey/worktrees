@@ -130,3 +130,125 @@ EOF
   "$REAL_TMUX" -S "$RT_SOCK" has-session -t repo-feat-x
   [ "$("$REAL_TMUX" -S "$RT_SOCK" display-message -p '#{pid}')" = "$RT_ORPHAN_PID" ]
 }
+
+# ── a session belongs to a place by where it IS, not by its name ─────────────
+# Two repositories can render one session name (the same folder name, or
+# `app` + `x-feat` against `app-x` + `feat`). The fake tmux keeps no
+# `#{session_path}`, so this is only provable on a real one.
+
+# A second repo whose folder is $1, under its own parent.
+other_repo() {
+  OTHER="$BATS_TEST_TMPDIR/elsewhere/$1"
+  mkdir -p "$OTHER"
+  git init -q -b main "$OTHER"
+  git -C "$OTHER" commit -q --allow-empty -m init
+  OTHER="$(cd "$OTHER" && pwd -P)"
+}
+rt() { "$REAL_TMUX" -S "$RT_SOCK" "$@"; }
+
+# bats test_tags=real-tmux
+@test "real tmux: new refuses a session name another repo's place holds, and makes nothing" {
+  [ -n "$REAL_TMUX" ] || skip "no real tmux"
+  other_repo repo
+  run_wt new feat --no-install --no-attach
+  [ "$status" -eq 0 ]
+  run_wt -C "$OTHER" new feat --no-install --no-attach --no-fetch
+  [ "$status" -eq 1 ]
+  grep -qF "'repo-feat' is already in use" <<<"$output"
+  [ ! -e "$OTHER/.worktrees/feat" ]
+  run git -C "$OTHER" show-ref --verify --quiet refs/heads/feat
+  [ "$status" -ne 0 ]
+}
+
+# bats test_tags=real-tmux
+@test "real tmux: close, rm and ls leave another repo's same-named session alone" {
+  [ -n "$REAL_TMUX" ] || skip "no real tmux"
+  other_repo repo
+  run_wt new feat --no-install --no-attach
+  [ "$status" -eq 0 ]
+  rt new-session -d -s "repo-feat~agent~codex" -c "$REPO/.worktrees/feat" "sleep 300"
+  rt new-session -d -s "repo-feat~term" -c "$REPO/.worktrees/feat" "sleep 300"
+  git -C "$OTHER" worktree add -q -b feat "$OTHER/.worktrees/feat"
+  run_wt -C "$OTHER" ls --json
+  [ "$status" -eq 0 ]
+  run python3 -c 'import json,sys; print([p["tmux_session"]["up"] for p in json.loads(sys.argv[1])["places"]])' "$output"
+  [ "$output" = "[False, False]" ]
+  run_wt -C "$OTHER" close feat
+  [ "$status" -eq 0 ]
+  rt has-session -t "=repo-feat"
+  rt has-session -t "=repo-feat~agent~codex"
+  rt has-session -t "=repo-feat~term"
+  run_wt -C "$OTHER" close --ai codex feat
+  rt has-session -t "=repo-feat~agent~codex"
+  run_wt -C "$OTHER" open feat --no-attach
+  [ "$status" -eq 1 ]
+  grep -qF "'repo-feat' is already in use" <<<"$output"
+  run_wt -C "$OTHER" rm -y feat
+  [ "$status" -eq 0 ]
+  [ ! -e "$OTHER/.worktrees/feat" ]
+  rt has-session -t "=repo-feat"
+  rt has-session -t "=repo-feat~agent~codex"
+  rt has-session -t "=repo-feat~term"
+}
+
+# bats test_tags=real-tmux
+@test "real tmux: overlapping prefixes do not share a session" {
+  [ -n "$REAL_TMUX" ] || skip "no real tmux"
+  other_repo repo-x
+  run_wt new x-feat --no-install --no-attach
+  [ "$status" -eq 0 ]
+  git -C "$OTHER" worktree add -q -b feat "$OTHER/.worktrees/feat"
+  run_wt -C "$OTHER" rm -y feat
+  [ "$status" -eq 0 ]
+  rt has-session -t "=repo-x-feat"
+}
+
+# bats test_tags=real-tmux
+@test "real tmux: the refusal's remedy works - a prefix of its own opens the place" {
+  [ -n "$REAL_TMUX" ] || skip "no real tmux"
+  other_repo repo
+  run_wt new feat --no-install --no-attach
+  echo other > "$OTHER/.worktree-prefix"
+  run_wt -C "$OTHER" new feat --no-install --no-attach --no-fetch
+  [ "$status" -eq 0 ]
+  rt has-session -t "=repo-feat"
+  rt has-session -t "=other-feat"
+}
+
+# bats test_tags=real-tmux
+@test "real tmux: a place keeps its session after its pane cds away, and after the repo moves" {
+  [ -n "$REAL_TMUX" ] || skip "no real tmux"
+  run_wt new feat --no-install --no-attach
+  rt new-session -d -s "repo-gone" -c "$REPO" "cd / && exec sleep 300"
+  git -C "$REPO" worktree add -q -b gone "$REPO/.worktrees/gone"
+  rt kill-session -t "=repo-gone"
+  rt new-session -d -s "repo-gone" -c "$REPO/.worktrees/gone" "cd / && exec sleep 300"
+  for _ in $(seq 50); do [ "$(rt list-panes -t '=repo-gone:' -F '#{pane_current_path}')" = / ] && break; sleep 0.1; done
+  run_wt close gone
+  [ "$status" -eq 0 ]
+  grep -qF "closed tmux repo-gone" <<<"$output"
+  mkdir -p "$BATS_TEST_TMPDIR/moved"
+  for _ in $(seq 50); do case "$(rt list-panes -t '=repo-feat:' -F '#{pane_current_path}')" in */feat) break;; esac; sleep 0.1; done
+  mv "$REPO" "$BATS_TEST_TMPDIR/moved/repo"
+  run_wt -C "$BATS_TEST_TMPDIR/moved/repo" close feat
+  [ "$status" -eq 0 ]
+  grep -qF "closed tmux repo-feat" <<<"$output"
+}
+
+# bats test_tags=real-tmux
+@test "real tmux: a non-UTF-8 locale neither hides a place's session nor lends it another's" {
+  [ -n "$REAL_TMUX" ] || skip "no real tmux"
+  # tmux prints every tab of its output as `_` to such a client.
+  export LC_ALL=C
+  other_repo repo
+  run_wt new feat --no-install --no-attach
+  [ "$status" -eq 0 ]
+  git -C "$OTHER" worktree add -q -b feat "$OTHER/.worktrees/feat"
+  run_wt -C "$OTHER" close feat
+  [ "$status" -eq 0 ]
+  rt has-session -t "=repo-feat"
+  run_wt close feat
+  [ "$status" -eq 0 ]
+  run rt has-session -t "=repo-feat"
+  [ "$status" -ne 0 ]
+}
