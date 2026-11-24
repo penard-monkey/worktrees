@@ -25,6 +25,10 @@
   --bg-field: var(--bg-elev);
   --line: #252838;       /* hairline borders / dividers */
   --line-strong: #33384f;/* focus base, active outline, splitter */
+  /* An EDITABLE field's edge: >= 3:1 (WCAG 1.4.11) against --bg-panel, --bg-tree
+     and --bg-abyss, the surfaces fields sit on (app/scripts/fieldlook-browser.mjs).
+     --line-strong is 1.3-2.8:1 there in every theme and read as "disabled". */
+  --line-field: #636881;
 
   --txt-hi: #e6eaff;     /* slugs, headings */
   --txt: #c0caf5;        /* body, notes */
@@ -182,8 +186,10 @@
   --bg-panel: #e1e2e7;
   --bg-elev: #eaebf0;
   --bg-input: #cbd1e1;
+  --bg-field: #ffffff; /* lighter than --bg-panel, as catppuccin-latte's */
   --line: #c4c8da;
   --line-strong: #a8aecb;
+  --line-field: #516ca8;
   --txt-hi: #28458a;
   --txt: #2b4c97;
   --txt-dim: #6172b0;
@@ -250,6 +256,7 @@
   --bg-input: #11111b;
   --line: #313244;
   --line-strong: #45475a;
+  --line-field: #676b81;
   --txt-hi: #cdd6f4;
   --txt: #bac2de;
   --txt-dim: #a6adc8;
@@ -309,6 +316,7 @@
   --bg-field: #ffffff;
   --line: #ccd0da;
   --line-strong: #acb0be;
+  --line-field: #797c90;
   --txt-hi: #4c4f69;
   --txt: #5c5f77;
   --txt-dim: #6c6f85;
@@ -376,6 +384,7 @@
   --bg-input: #292e39;
   --line: #4c566a;
   --line-strong: #616e88;
+  --line-field: #878e9b;
   --txt-hi: #eceff4;
   --txt: #d8dee9;
   --txt-dim: #81a1c1;
@@ -431,6 +440,7 @@
   --bg-input: #222424;
   --line: #504945;
   --line-strong: #665c54;
+  --line-field: #837b69;
   --txt-hi: #fbf1c7;
   --txt: #ebdbb2;
   --txt-dim: #bdae93;
