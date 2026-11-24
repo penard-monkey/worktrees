@@ -4,7 +4,7 @@
 // loads this file as a `data:` module and runs the real rules. guest.ts,
 // GuestNav.tsx and GuestSession.tsx draw with them.
 import type { Notice, Step, Turn } from "./chat";
-import type { GuestState } from "./guestdoor";
+import type { GuestState, RemovedBy } from "./guestdoor";
 
 /** A share's binding as a guest sees it (`Binding::guest_view`). */
 export type GuestBinding = { harness: string; state: "active" | "ended"; bound_at: number; ended_at: number | null };
@@ -67,8 +67,18 @@ export function mergeOlder(held: SharedTurn[], page: SharedTurn[]): SharedTurn[]
   return [...[...page].reverse().filter((t) => t.seq < until), ...held];
 }
 
+/** Why a removed guest cannot connect, in the owner's name. A refused key is
+ *  told apart from a close: TLS does not say whether it was a removal, a
+ *  disable or an expiry. */
+export function removedWords(by: RemovedBy, owner: string): string {
+  if (by === "disabled") return `${owner}'s host turned this device off`;
+  if (by === "refused") return `${owner}'s host no longer accepts this device`;
+  return `${owner} removed this device`;
+}
+
 /** What the view says about where this guest and this session stand. */
 export function standing(share: GuestShare, binding: GuestBinding | null, link: GuestState, owner: string): { live: boolean; words: string | null } {
+  if (link.kind === "removed") return { live: false, words: removedWords(link.by, owner) };
   if (link.kind === "offline") return { live: false, words: `${owner}'s host is offline` };
   if (share.state === "invited") return { live: false, words: `Asking ${owner} to let you in…` };
   if (share.state === "asked") return { live: false, words: `Waiting for ${owner} to let you in` };

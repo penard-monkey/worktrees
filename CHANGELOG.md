@@ -17,6 +17,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 - **A Read of an image under `.worktrees/` in a project's `(main)` shows the picture again.** The chat printed `preview not shown — outside this place` for every such thumbnail: the host refuses another place's tree in `(main)`, but the client did not know that part of the rule, so it never fell back to the picture Claude was shown. The client now knows the `(main)` rule (case-insensitively), and a Read thumbnail the host refuses as `outside this place` falls back to that picture too, whatever the reason (a link out, a case variant). A paired device still gets the same note as for any Read outside the place.
 
+- Group chat (beta): a guest the owner removed is told so. Its sidebar said
+  *offline* and kept redialling forever; now the host's group says "David
+  removed this device" (or that the host turned it off, or no longer accepts
+  it), stops retrying on its own, and offers Retry and **Forget this host**.
+
 ## [0.52.0] - 2026-11-14
 
 ### Added
