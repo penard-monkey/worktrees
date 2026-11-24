@@ -236,6 +236,11 @@ export function ShareDialog({ s, repo, slug, preset, addTo, request, onClose, on
   const [step, setStep] = useState<Step>("who");
   const [someoneNew, setSomeoneNew] = useState(live.length === 0 && !preset?.length);
   const [name, setName] = useState("");
+  // The host's own name, asked where it is typing names already, while it
+  // has none (v0.52.0's three-VM run: a guest's sidebar said "OWNER'S
+  // PLACES"). Optional: left empty, a guest calls the host by its own name.
+  const [me, setMe] = useState("");
+  const [meErr, setMeErr] = useState<string | null>(null);
   const [picked, setPicked] = useState<Set<string>>(() => new Set(preset ?? (live.length === 1 ? [live[0].id] : [])));
   const [invitee, setInvitee] = useState<Invitee | null>(null);
   const [paired, setPaired] = useState<{ principal: string; device: string; name: string } | null>(null);
@@ -253,7 +258,17 @@ export function ShareDialog({ s, repo, slug, preset, addTo, request, onClose, on
   // The guest the name means: the exact one first, so "Bret" beside an older
   // "bret" offers Bret's own devices (both were on the test VMs, 2026-11-14).
   const { clash, returning } = someoneNew ? nameTwin(s.guests, name, guestLive) : { clash: null, returning: null };
-  const invite = (who: Invitee) => {
+  const invite = async (who: Invitee) => {
+    if (s.owner === "owner" && me.trim()) {
+      try {
+        await invoke("owner_set_name", { name: me.trim() });
+      } catch (e) {
+        setMeErr(String(e));
+        return;
+      }
+      void readShares();
+    }
+    setMeErr(null);
     setInvitee(who);
     setStep("pair");
   };
@@ -264,7 +279,7 @@ export function ShareDialog({ s, repo, slug, preset, addTo, request, onClose, on
     <ShareModal title={addTo ? `Add someone to ${slug}` : `Share ${slug}`} steps={steps} step={stepAt} onClose={close} countdown={step === "pair" ? <PairCountdown w={w} /> : null}>
       {step === "who" && (
         <WhoStep s={s} live={live} picked={picked} setPicked={setPicked} someoneNew={someoneNew} setSomeoneNew={setSomeoneNew}
-          name={name} setName={setName} clash={clash} returning={returning} onInvite={invite} onClose={close}
+          name={name} setName={setName} me={me} setMe={setMe} meErr={meErr} clash={clash} returning={returning} onInvite={(who) => void invite(who)} onClose={close}
           share={!someoneNew ? <ShareStep s={s} repo={repo} slug={slug} picked={picked} addTo={addTo} request={request} onClose={close} onShared={onShared} /> : null} />
       )}
       {step === "pair" && invitee && (
@@ -312,9 +327,10 @@ function Foot({ children }: { children: React.ReactNode }) {
 
 /** Step 1, who: the people paired already (each with their devices and when,
  *  so two of one name are told apart, F7), or *Someone new*. */
-function WhoStep({ s, live, picked, setPicked, someoneNew, setSomeoneNew, name, setName, clash, returning, onInvite, onClose, share }: {
+function WhoStep({ s, live, picked, setPicked, someoneNew, setSomeoneNew, name, setName, me, setMe, meErr, clash, returning, onInvite, onClose, share }: {
   s: SharesState; live: Guest[]; picked: Set<string>; setPicked: (p: Set<string>) => void;
   someoneNew: boolean; setSomeoneNew: (on: boolean) => void; name: string; setName: (n: string) => void;
+  me: string; setMe: (n: string) => void; meErr: string | null;
   clash: Guest | null; returning: Guest | null; onInvite: (who: Invitee) => void; onClose: () => void; share: React.ReactNode;
 }) {
   const problem = notGranted("pair_begin") ?? (!name.trim() ? "Type their name first." : clash ? `A guest named ${clash.name} exists.` : null);
@@ -352,6 +368,15 @@ function WhoStep({ s, live, picked, setPicked, someoneNew, setSomeoneNew, name, 
         <input autoFocus value={name} maxLength={64} placeholder="Bret" aria-label="Their name" data-testid="share-new-name" onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter" && !problem) onInvite({ id: null, name: name.trim() }); }} />
       </label>
+      {s.owner === "owner" && (
+        <label className="ra-field" data-testid="share-owner-name">
+          <span className="ra-field-l">Your name, as {name.trim() || "they"} will see it</span>
+          <input value={me} maxLength={64} placeholder={`Optional: else they see this computer's name`} aria-label="Your name, as guests see it" data-testid="share-owner-name-input"
+            onChange={(e) => setMe(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && !problem) onInvite({ id: null, name: name.trim() }); }} />
+          {meErr && <span className="ra-note" role="alert">{meErr}</span>}
+        </label>
+      )}
       {clash ? (
         <div className="ra-ask" role="note" data-testid="share-name-taken">
           <span className="ra-dot warn" aria-hidden />
