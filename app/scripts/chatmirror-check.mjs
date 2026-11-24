@@ -141,9 +141,15 @@ const strConsts = new Map([...(api + slashSrc).matchAll(/pub const ([A-Z_]+): &s
 const withConsts = (s) => s.replace(/\{([A-Z][A-Z_]+)\}/g, (m, n) => strConsts.get(n) ?? m);
 const apiSaid = [...rustStrings(api), ...rustStrings(slashSrc)].map((s) => rendered(withConsts(s)));
 // typed_line_ok and typed_message are this one body, with and without line breaks.
-const typed = body(harness, "fn typed_ok(");
-if (!typed) { fail("harness.rs has no `fn typed_ok(` for this check to read"); done(); }
-const typedSaid = rustStrings(typed).map(rendered);
+// `typed_ok` is the leading-character rule and `typed_chars_ok` the character
+// rule it shares with `typed_answer_ok`: together they read as the one body.
+const typedHead = body(harness, "fn typed_ok(");
+const typedChars = body(harness, "fn typed_chars_ok(");
+const typedAnswer = body(harness, "pub fn typed_answer_ok(");
+const typedAnswerFor = body(harness, "pub fn typed_answer_for(");
+if (!typedHead || !typedChars || !typedAnswer || !typedAnswerFor) { fail("harness.rs lacks `typed_ok`, `typed_chars_ok`, `typed_answer_ok` or `typed_answer_for` for this check to read"); done(); }
+const typed = typedHead + typedChars;
+const typedSaid = rustStrings(typed + typedAnswer + typedAnswerFor).map(rendered);
 const hostSaid = new Set([...apiSaid, ...typedSaid]);
 
 // ── 1. the refusal strings ───────────────────────────────────────────────────
@@ -335,9 +341,35 @@ if (shapeOk) {
   const wrong = lines.filter(([text, want]) => client(text) !== want || (want && host(text) !== want));
   if (wrong.length) fail(`the bound or the leading rule differs: ${wrong.map(([t, w]) => `${JSON.stringify(t.length > 12 ? `${t.slice(0, 4)}…(${t.length})` : t)} should be ${w ?? "taken"}, is ${client(t) ?? "taken"}`).join("; ")}`);
   else ok(`the ${LINE_MAX}-byte bound counts UTF-8 bytes, and leading white space does not hide a ${[...LEAD].join(" ")}`);
+  // An ANSWER or a NOTE is typed into a field the prompt opened, not the
+  // composer: `harness::typed_answer_ok`, the same character rule and only `/`
+  // refused (the fields were measured on Claude 2.1.331, fixtures' README).
+  const answerShape = typedAnswer.includes("typed_chars_ok(text, LINE_MAX, false)?;") && typedAnswer.includes("starts_with('/')") && (typedAnswer.match(/return Err|Err\(/g) ?? []).length === 1;
+  if (!answerShape) fail("typed_answer_ok no longer reads as modelled: typed_chars_ok, then ONE refusal, a leading '/'");
+  const hostAnswer = (text) => {
+    const h = host(text);
+    if (h !== "lead") return h;
+    return [...text].find((ch) => !/\p{White_Space}/u.test(ch)) === "/" ? "lead" : null;
+  };
   for (const what of ["answer", "note"]) {
-    if (client("/x", what) !== "lead" || client("a\tb", what) !== "control") fail(`draftProblem(…, "${what}") does not apply the same rule`);
+    const bad = [];
+    for (let cp = 0; cp <= 0x10ffff && bad.length < 12; cp++) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      const ch = String.fromCodePoint(cp);
+      for (const text of [`${ch}x`, `x${ch}x`]) {
+        const h = hostAnswer(text), c = client(text, what);
+        if (h !== c) bad.push(`U+${cp.toString(16).toUpperCase().padStart(4, "0")} ${JSON.stringify(text)}: host ${h ?? "takes it"}, draftProblem ${c ?? "takes it"}`);
+      }
+    }
+    if (bad.length) fail(`draftProblem(…, "${what}") and typed_answer_ok disagree:\n       ${bad.join("\n       ")}`);
+    for (const t of ["#2. Also, let's use the prefix ot instead of go.", "!important", "@here", "- item", "  #x", "　!x"]) {
+      if (client(t, what) !== null) fail(`an ${what} may start like ${JSON.stringify(t)}: draftProblem says ${client(t, what)}`);
+    }
+    for (const t of ["/x", "  /x", "　/x"]) if (client(t, what) !== "lead") fail(`an ${what} still may not start with /: ${JSON.stringify(t)}`);
+    if (client("a\tb", what) !== "control" || client("x".repeat(LINE_MAX + 1), what) !== "length" || client("a\u202Eb", what) !== "invisible") fail(`draftProblem(…, "${what}") loosened the character rule`);
   }
+  for (const t of ["#x", "!x", "@x", "/x"]) if (client(t, "message") !== "lead") fail(`a MESSAGE may not start like ${JSON.stringify(t)}: the composer keeps its rule`);
+  if (answerShape) ok("an answer or a note may start with # ! @ and not with /; a message keeps all four; the character rule is shared");
 }
 
 // ── 3. attachments ───────────────────────────────────────────────────────────

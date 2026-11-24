@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+
+- **A chat answer can start with `#`, `!` or `@`.** Typing `#2. Also, let's use the prefix ot instead of go.` into a question's free-text row was refused ("An answer can't start with #"), because answers shared the composer's rule, where a leading `# ! @ /` runs something. An answer goes into a field the prompt itself opened, and on Claude 2.1.331 those symbols only insert text there (the free-text row, a preview question's notes, a permission prompt's amend field), so only a leading `/` is refused now. Messages and slash commands keep the composer's rule. Codex's question notes are not measured and keep refusing a leading `@ ! #`.
+
 ## [0.53.1] - 2026-11-23
 
 ### Fixed

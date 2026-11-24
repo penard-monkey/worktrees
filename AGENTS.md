@@ -70,8 +70,19 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   audit's DRIVE budget), the audit log gets the text's length and hash and
   never the text, and a device's send stamps `last_remote_send`. Its one
   sibling is `agent_answer_text` (brief of 2026-10-30, `feat/actionable-
-  prompts`): the SAME paste (`AgentIo::paste` = `tmux::paste_into`), the same
-  rule, `instruct` (AND `answer`, checked in the body: an amended "Yes"
+  prompts`): the SAME paste (`AgentIo::paste` = `tmux::paste_into`), its OWN
+  text rule (`harness::typed_answer_ok`, owner 2026-11-24, `fix/answer-
+  leading-symbols`): the composer's character rule (one line, `LINE_MAX`, no
+  control or invisible character) and ONE refused lead, `/`. `# ! @` open
+  nothing in a field the prompt opened — measured on Claude 2.1.331 in the
+  free-text row, a preview's notes and the Tab-to-amend field, where all four
+  symbols only insert text (`claude-screen/2.1.331/answer-leading-symbols/`) —
+  so an answer `#2. Also…` is an answer. The composer's rule (`typed_line_ok`)
+  is for the composer and is not loosened. Codex's field is NOT measured (its
+  trust prompt writes the user's config), so `typed_answer_for` keeps `@ ! #`
+  refused for any harness but Claude, saying so. The client's `draftProblem`
+  splits the same way (`chatmirror-check.mjs` holds it). `instruct` (AND
+  `answer`, checked in the body: an amended "Yes"
   approves, so `instruct` alone must not reach it), length and hash, stamp —
   and only into a field the
   prompt itself opened and shows empty, each step proved before Enter. **The

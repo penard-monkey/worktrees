@@ -45,7 +45,8 @@
 //! anything types into Claude: the user decided on 2026-10-23 that the phone's
 //! "send a line" reaches every harness the same way (iOS Q4; AGENTS.md).
 //! `agent_answer_text` is the same paste into the same pane under the same
-//! rule (`harness::typed_line_ok`), into a field the prompt itself opened.
+//! character rule, into a field the prompt itself opened; its leading-symbol
+//! rule is its own (`harness::typed_answer_for`), not the composer's.
 //!
 //! **A prompt taller than the pane** has no whole source on screen, and
 //! Claude writes a pending tool call to its transcript only once it is
@@ -882,11 +883,12 @@ pub(crate) fn answer_text_at(ctx: &Ctx, at: &Locus, choice: u32, fingerprint: St
     if !ctx.holds(worktrees_core::authz::Capability::Answer) {
         return Err(ERR_NEEDS_ANSWER.into());
     }
-    send_text_ok(&text)?;
+    harness::typed_answer_ok(&text)?;
     let io = &*ctx.agents.io;
     let lock = ctx.agents.lock(&at.lock_key());
     let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
     let (lane, m, detail) = find_prompt(&ctx.agents, at, &fingerprint)?;
+    harness::typed_answer_for(&lane.harness, &text)?;
     ctx.agents.forget_switch(&lane);
     let c = m.choices.iter().find(|c| c.n == choice).ok_or(ERR_NO_CHOICE)?;
     let how = c.text.ok_or_else(|| format!("choice {choice} takes no text: answer it with agent_answer"))?;
@@ -3125,6 +3127,24 @@ mod tests {
         let v = agent_answer_text(&device(&ctx), repo, "lane".into(), 3, fp, "teal please".into()).unwrap();
         assert_eq!(fake.keys(), vec![Key::Down, Key::Down, Key::Tab, Key::Enter]);
         assert_eq!((v["confirmed"].as_bool(), v["harness"].as_str()), (Some(true), Some("codex")));
+    }
+
+    /// An answer is not the composer's line: `#2. …`, `!x` and `@x` reach the
+    /// free-text row (measured on Claude 2.1.331: plain text there); `/x` and
+    /// a Codex field's leading symbols stay refused.
+    #[test]
+    fn an_answer_may_start_with_a_symbol() {
+        let typed = fx314!("question-typed.txt");
+        for text in ["#2. Also, let's use the prefix ot instead of go.", "!important", "@here", "- item"] {
+            let screen: &'static str = Box::leak(typed.replace("penguins", text).into_boxed_str());
+            let q = script(fx314!("question-type-something.txt"), vec![screen.into(), fx314!("composer-after-turn.e.txt").into()]);
+            let fake = Arc::new(Fake::with(vec![("claude", "repo-lane", q)]));
+            let (ctx, repo) = setup("symbols", fake.clone());
+            let fp = prompt_of(&ctx, &repo)["fingerprint"].as_str().unwrap().to_string();
+            let v = agent_answer_text(&ctx, repo, "lane".into(), 4, fp, text.into()).unwrap();
+            assert_eq!(*fake.pasted.lock().unwrap(), vec![text.to_string()], "{text:?}");
+            assert_eq!((v["answered"].as_bool(), fake.keys()), (Some(true), vec![Key::Enter]), "{text:?}");
+        }
     }
 
     /// Text goes only where the prompt has an EMPTY field for it, and only
