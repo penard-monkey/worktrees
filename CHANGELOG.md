@@ -28,6 +28,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   under "Nobody is paired with this computer yet": it says Bret was a guest before, and pairing re-admits the same Bret, so
   a thread shows their old posts and new ones as one person. A guest with a device still paired keeps the name taken.
 
+- **Group chat (beta): a shared session can take another guest.** *Sharing…*
+  had no way to add anyone, and a request for a shared place said "Sharing… on
+  its lane adds a guest" while offering only Dismiss. *Sharing…* now has *Add
+  someone…*, the same Who → Pair → Share steps as the first share, whose last
+  step keeps the "can read this whole session" warning and lets them in at once
+  (*Let <name> in*: you chose them, so they do not ask to join). A request for
+  a shared place offers *Let <name> in…*, which opens that dialog with them
+  ticked and closes the request once they are in.
+
 ## [0.52.0] - 2026-11-14
 
 ### Added
