@@ -7,6 +7,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ### Added
 
+- **A macOS menu bar that lists what the app can do.** Settings, New Worktree, New Terminal, Add Project, Find, the zoom items, the quick switcher, Back and Forward, the sidebars, Reading Mode, Release Notes and the rest are menu items now, with the shortcuts they always had; items of the main window are greyed while the Ideas window is in front. An item replays its shortcut into the window that owns it, so it does exactly what the key does. The Ideas items are there only while that beta is on. Linux has no bar, as before.
 - **Workspaces view: an "Everything Else" group for projects in no workspace.** Every registered project that belongs to no named workspace now shows in a built-in card at the bottom of the Workspaces view, with its places under it as in All projects. It is worked out from the list each time and never saved, so adding a project to a workspace takes it out and removing it from its last workspace brings it back, with nothing to migrate. It has no menu, cannot be renamed, recoloured, reordered or deleted, and is not a drop target; drag a project out of it onto a workspace to add it there, and its project menu is All projects' own (no "Remove from workspace"). It folds like any card, remembered under its own reserved id, so a workspace of yours named "Everything Else" is a different card. With no workspaces yet, the "No workspaces yet" hint stays and Everything Else holds every project; with no members it is hidden.
 
 ### Changed
@@ -15,6 +16,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ### Fixed
 
+- **⌘+, ⌘− and ⌘0 work in the Ideas window.** Only the main window had them. Each window zooms on its own (View → Zoom In, Zoom Out and Actual Size act on the one in front), and the Ideas window keeps its size across launches; until you zoom it, it opens at the app's size.
 - **A Read of an image under `.worktrees/` in a project's `(main)` shows the picture again.** The chat printed `preview not shown — outside this place` for every such thumbnail: the host refuses another place's tree in `(main)`, but the client did not know that part of the rule, so it never fell back to the picture Claude was shown. The client now knows the `(main)` rule (case-insensitively), and a Read thumbnail the host refuses as `outside this place` falls back to that picture too, whatever the reason (a link out, a case variant). A paired device still gets the same note as for any Read outside the place.
 
 ## [0.52.0] - 2026-11-14

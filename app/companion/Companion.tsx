@@ -17,6 +17,8 @@ import { EditorView } from "@codemirror/view";
 import { engineState, invoke, listen, onEngineState, type EngineState } from "../src/ipc";
 import { Markdown } from "../src/markdown";
 import { revealOnHost } from "../src/onhost";
+import { wireMenu } from "../src/menu";
+import { WindowZoom } from "./zoom";
 import { applySettings, loadSettings } from "../src/settings";
 import { useArmed } from "../src/useArmed";
 import "../src/tokens.css";
@@ -329,6 +331,9 @@ function ReadView({ text, follow }: { text: string; follow(id: string): void }) 
  *  change can fire before React commits it (it did, in Chromium). */
 type Open = { id: string; title: string; file: string; key: string; initial: string; focus: boolean };
 
+const zoom = new WindowZoom();
+const zoomReady = zoom.load();
+
 export function Companion() {
   const engine = useEngine();
   const up = engine.kind === "up";
@@ -376,7 +381,8 @@ export function Companion() {
   // line. gen 0 is a door with no engine (the mock): nothing to log to.
   useEffect(() => {
     if (!up) return;
-    loadSettings().then((st) => { applySettings(st); setPrefs({ terminal: st.terminal_cmd, uiRem: st.ui_rem }); }).catch(() => {});
+    // `app_zoom` too, for a window with no size of its own (zoom.ts).
+    Promise.all([loadSettings(), zoomReady]).then(([st]) => { applySettings(st); zoom.inherit(st.app_zoom); setPrefs({ terminal: st.terminal_cmd, uiRem: st.ui_rem }); }).catch(() => {});
     if (gen > 0) invoke("log_event", { level: "info", msg: connectLine(gen) }).catch(() => {});
   }, [up, gen]);
 
@@ -765,6 +771,16 @@ export function Companion() {
     setSplitAsk(sel);
   };
 
+
+  // This window's own size chords, and the menu bar's items for it.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { zoom.key(e); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+  const menuAct = useRef<(id: string) => void>(() => {});
+  menuAct.current = (id) => { if (id === "new-idea") void newIdea(); };
+  useEffect(() => wireMenu("companion", (id) => menuAct.current(id)), []);
 
   // A hidden or closing window is a save point.
   useEffect(() => {
