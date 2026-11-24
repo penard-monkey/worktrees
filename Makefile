@@ -143,7 +143,7 @@ uninstall:
 	@echo "removed: $(BINDIR)/worktrees"
 
 lint:
-	shellcheck -x bin/worktrees install.sh app/scripts/sidecar.sh app/scripts/staging.sh scripts/vmlab/vm-install.sh test/helpers/*.bash
+	shellcheck -x bin/worktrees install.sh app/scripts/sidecar.sh app/scripts/staging.sh scripts/vmlab/vm-install.sh scripts/vmlab/vm-install-release.sh scripts/vmlab/lin-session.sh scripts/vmlab/lin-launch-app.sh test/helpers/*.bash
 	bash -n bin/worktrees && bash -n install.sh && bash -n app/scripts/sidecar.sh && bash -n app/scripts/staging.sh
 	@# bash-4-ism gate on the shim, the installer, the sidecar script, which
 	@# `make install-app` runs, and staging.sh, which launchd runs with
