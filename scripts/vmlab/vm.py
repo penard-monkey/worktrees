@@ -17,6 +17,11 @@ PRELUDE = ('export PATH=$HOME/.local/bin:/opt/homebrew/bin:$PATH; '
            'export NVM_DIR=$HOME/.nvm; . $NVM_DIR/nvm.sh >/dev/null 2>&1 || true; ')
 
 APP_DIR = '$HOME/Library/Application Support/net.casadelvalle.worktrees'
+# The app's config dir on Linux (tauri's app_config_dir).
+APP_DIR_LINUX = '$HOME/.config/net.casadelvalle.worktrees'
+
+# macOS key codes the acts use, as xdotool key names for a Linux VM.
+XDO_KEYS = {36: "Return", 53: "Escape", 48: "Tab", 51: "BackSpace", 0: "a", 9: "v"}
 
 
 class VMError(RuntimeError):
@@ -24,8 +29,14 @@ class VMError(RuntimeError):
 
 
 class VM:
-    def __init__(self, role, name, ssh, ip, log):
+    def __init__(self, role, name, ssh, ip, log, os="macos"):
         self.role, self.name, self.ssh_alias, self.ip = role, name, ssh, ip
+        # "macos": osascript and cliclick, coordinates in points.
+        # "linux": xdotool inside the logged-in GNOME session (~/sess.sh
+        # copies its display env from gsd-xsettings), coordinates in pixels
+        # (a capture is 1:1 there).
+        self.os = os
+        self.app_dir = APP_DIR_LINUX if os == "linux" else APP_DIR
         self.log = log
         self.counts = {"click": 0, "key": 0, "type": 0}
         self._lock = threading.Lock()
@@ -59,8 +70,20 @@ class VM:
         raise VMError(f"{self.role}: ssh never answered in {deadline_s}s")
 
     # ── screen ────────────────────────────────────────────────────────────
+    def wake(self):
+        """Linux: the display awake. GNOME on this VM powers the display off
+        (Mutter PowerSaveMode 3) even with idle-delay 0, and `prlctl capture`
+        then returns the LAST frame it had: a frozen clock, a click that seems
+        to do nothing. Set it on before every capture and input."""
+        if self.os == "linux":
+            self.sh("~/sess.sh gdbus call --session --dest org.gnome.Mutter.DisplayConfig --object-path "
+                    "/org/gnome/Mutter/DisplayConfig --method org.freedesktop.DBus.Properties.Set "
+                    "org.gnome.Mutter.DisplayConfig PowerSaveMode '<0>' >/dev/null", timeout=20, quiet=True)
+            time.sleep(0.5)
+
     def capture(self, path):
         """A screenshot of the VM's screen (prlctl, so nothing runs inside)."""
+        self.wake()
         try:
             p = subprocess.run(["prlctl", "capture", self.name, "--file", str(path)],
                                capture_output=True, text=True, timeout=30)
@@ -73,6 +96,9 @@ class VM:
         with self._lock:
             self.counts["click"] += 1
         self.log(f"{self.role}: click {x},{y} {why}".rstrip())
+        if self.os == "linux":
+            self.wake()
+            return self.sh(f"~/sess.sh xdotool mousemove {int(x)} {int(y)} sleep 0.2 click 1", timeout=20)[0] == 0
         return self.sh(f"/opt/homebrew/bin/cliclick c:{int(x)},{int(y)}", timeout=20)[0] == 0
 
     def key(self, code, why="", command=False):
@@ -81,6 +107,9 @@ class VM:
         with self._lock:
             self.counts["key"] += 1
         self.log(f"{self.role}: key {'cmd-' if command else ''}{code} {why}".rstrip())
+        if self.os == "linux":
+            k = XDO_KEYS[int(code)]
+            return self.sh(f"~/sess.sh xdotool key {'ctrl+' if command else ''}{k}", timeout=20)[0] == 0
         using = " using command down" if command else ""
         return self.sh(f"osascript -e 'tell application \"System Events\" to key code {int(code)}{using}'",
                        timeout=20)[0] == 0
@@ -91,8 +120,12 @@ class VM:
         with self._lock:
             self.counts["type"] += 1
         self.log(f"{self.role}: type {len(text)} chars {why}".rstrip())
-        # The text reaches the VM on ssh's stdin and AppleScript reads it from a
-        # 0600 temp file, so no shell quoting ever touches it.
+        # The text reaches the VM on ssh's stdin and AppleScript (or xdotool)
+        # reads it from a 0600 temp file, so no shell quoting ever touches it.
+        if self.os == "linux":
+            rc, _ = self.sh('f=$(mktemp); chmod 600 "$f"; cat > "$f"; ~/sess.sh xdotool type --delay 15 --file "$f"; rm -f "$f"',
+                            stdin=text, timeout=60)
+            return rc == 0
         rc, _ = self.sh('f=$(mktemp); chmod 600 "$f"; cat > "$f"; '
                         'osascript -e "set t to (read POSIX file \\"$f\\" as «class utf8»)" '
                         '-e \'tell application "System Events" to keystroke t\'; rm -f "$f"',
@@ -116,7 +149,7 @@ class VM:
         dir, or a scripted person's own one."""
         import json
         a = shlex.quote(json.dumps(args or {}))
-        d = shlex.quote(config_dir) if config_dir else f'"{APP_DIR}"'
+        d = shlex.quote(config_dir) if config_dir else f'"{self.app_dir}"'
         rc, out = self.sh(f'worktrees remote call {shlex.quote(host)} {cmd} {a} '
                           f'--config-dir {d} --timeout 20', timeout=timeout)
         return _json_or_none(out) if rc == 0 else None

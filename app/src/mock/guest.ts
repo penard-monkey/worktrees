@@ -10,7 +10,9 @@
 // `window.__mock`: `guestShare(slug)` shares another place (a toast and a
 // badge), `guestTurn(text)` appends a turn to the live share, `guestEnd()`
 // ends its binding, `guestAllow()` lets Bret in on the invited share,
-// `guestPost(text)` posts as David, `guestCalls()` the commands asked.
+// `guestPost(text)` posts as David, `guestCalls()` the commands asked,
+// `guestDrop()`/`guestBack()` the host quitting and returning, and
+// `guestRevoke()` David removing this guest (`removed`, never offline).
 
 export const GUEST_HOST = {
   id: "h_guestdavidmacaaaaaaaaaaaaa",
@@ -193,8 +195,15 @@ export const guestHelpers = {
     w.__guestDown = true;
     w.__guestLost?.("the host closed the connection: going away");
   },
+  /** David removed this guest (Settings → Remote → Guests → Remove): the
+   *  host closes with `revoked`, and every redial's key is refused at TLS. */
+  guestRevoke() {
+    const w = window as unknown as { __guestLost?: (m: string) => void; __guestDown?: boolean | "revoked" };
+    w.__guestDown = "revoked";
+    w.__guestLost?.("the host closed the connection: revoked");
+  },
   guestBack() {
-    (window as unknown as { __guestDown?: boolean }).__guestDown = false;
+    (window as unknown as { __guestDown?: boolean | "revoked" }).__guestDown = false;
   },
   guestCalls() {
     const c = calls;
