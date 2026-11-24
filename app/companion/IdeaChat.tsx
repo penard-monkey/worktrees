@@ -7,13 +7,15 @@
 // comes from the `ideas:sessions` push (by session name); the list row
 // (`idea_conversations`) carries its record: title, start, the history copy
 // it started from. An ended conversation reads read-only, with Resume.
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { ChatPane } from "../src/ChatPane";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChatPane, type ComposerQuote } from "../src/ChatPane";
 import { ideaChatKey } from "../src/chat";
 import { invoke } from "../src/ipc";
 import { revealOnHost } from "../src/onhost";
+import { IdeaTerminalPane } from "../src/TerminalPane";
 import { useArmed } from "../src/useArmed";
 import { useEscape } from "../src/useEscape";
+import type { Quote } from "./ideaquote";
 
 /** `ideas:sessions`' payload (`worktrees_api::watch::IdeaSessions`). */
 export type IdeaSessionsEv = { live: string[]; busy: string[]; waiting: string[]; idea_of: Record<string, string> };
@@ -78,6 +80,11 @@ export function IdeaChat(props: {
   dir: string | null;
   sessions: IdeaSessionsEv | null;
   terminalCmd: string;
+  /** The engine connection's number: an attach belongs to its socket, so a
+   *  new one opens the terminal again. */
+  gen: number;
+  /** The editor's selection, as a message would quote it; null for none. */
+  quote: Quote | null;
   uiRem: number;
   onNotice(msg: string): void;
 }) {
@@ -88,6 +95,15 @@ export function IdeaChat(props: {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [expect, setExpect] = useState<Expect>(null);
+  // The terminal pane: shown or not, for whichever conversation is open, and
+  // `focus` moves to put the keyboard in it.
+  const [term, setTerm] = useState(false);
+  const [focus, setFocus] = useState(0);
+  const [share, setShare] = useState(0.5);
+  const body = useRef<HTMLDivElement>(null);
+  // What the person (or a send) last said of a selection: its quote is on or
+  // off. Any other selection starts as it says (`Quote.auto`).
+  const [chosen, setChosen] = useState<{ key: string; on: boolean } | null>(null);
   const arm = useArmed<"remove">();
   useEscape(() => setMenu(false), menu);
 
@@ -145,10 +161,23 @@ export function IdeaChat(props: {
     if (!cur || !title.trim() || title.trim() === cur.title) return;
     void act("rename it", () => invoke("idea_conversation_rename", { id: ideaId, conv: cur.id, title: title.trim() }));
   };
-  const terminal = () => {
+  const terminal = () => { setTerm(true); setFocus((n) => n + 1); };
+  const terminalApp = () => {
     if (!cur) return;
-    if (!props.terminalCmd) { props.onNotice(`Set a terminal command in Settings to open it there, or attach by hand: tmux attach -t '=${cur.session}'`); return; }
     invoke("open_terminal", { cmd: props.terminalCmd, session: cur.session }).catch((e) => props.onNotice(`Could not open it in a terminal: ${errText(e)}`));
+  };
+  const setShareTo = (y: number) => {
+    const r = body.current?.getBoundingClientRect();
+    if (r && r.height > 0) setShare(Math.min(0.85, Math.max(0.15, (r.bottom - y) / r.height)));
+  };
+  const q = props.quote;
+  const quote: ComposerQuote | null = q && {
+    label: q.lines,
+    text: q.text,
+    on: chosen?.key === q.key ? chosen.on : q.auto,
+    setOn: (on) => setChosen({ key: q.key, on }),
+    // Once is enough: the next message would carry it again unasked.
+    sent: () => setChosen({ key: q.key, on: false }),
   };
   const startedFrom = () => {
     if (!cur || !props.dir) return;
@@ -176,7 +205,8 @@ export function IdeaChat(props: {
           </button>
         )}
         <div className="ix-tools">
-          {cur && state !== "ended" && <button className="ix-btn" data-testid="idea-conv-terminal" onClick={terminal} title="Attach to this conversation in your terminal app">Open in terminal</button>}
+          {cur && state !== "ended" && <button className={`ix-btn${term ? " on" : ""}`} data-testid="idea-conv-terminal" aria-pressed={term}
+            onClick={() => (term ? setTerm(false) : terminal())} title="Show this conversation's terminal under the chat">Terminal</button>}
           {cur && state !== "ended" && <button className="ix-btn" data-testid="idea-conv-close" disabled={busy} onClick={() => void close()}>Close</button>}
           {cur && state === "ended" && <button className="ix-btn" data-testid="idea-conv-resume" disabled={busy} onClick={() => void resume()}>Resume</button>}
         </div>
@@ -210,18 +240,41 @@ export function IdeaChat(props: {
         </div>
       )}
       {cur ? (
-        <div className="ix-chat-body">
+        <div className="ix-chat-body ix-chat-split" ref={body}>
+          <div className="ix-chat-view">
           <ChatPane key={cur.id} repo="" slug="" path={ideaChatKey({ id: ideaId, conv: cur.id })} root={props.dir ?? undefined}
             idea={{ id: ideaId, conv: cur.id }} provider="claude" session={cur.session}
             activity={state === "busy" ? "busy" : state === "waiting" ? "waiting" : ""}
             doneAt={0} paneDraft={null} uiRem={props.uiRem}
-            onTerminal={terminal} onOpenPath={() => {}} reloadToken={0} onError={props.onNotice}
+            quote={quote} onTerminal={terminal} onOpenPath={() => {}} reloadToken={0} onError={props.onNotice}
             readOnly={state === "ended" ? (
               <div className="ix-chat-ended" data-testid="idea-conv-ended">
                 <span>This conversation has ended. Started {startedWords(cur.started)}.</span>
                 <button className="ix-btn ix-btn-primary" disabled={busy} onClick={() => void resume()}>Resume</button>
               </div>
             ) : undefined} />
+          </div>
+          {term && state !== "ended" && (
+            <div className="ix-term" data-testid="idea-term" style={{ height: `${share * 100}%` }}>
+              <div className="ix-term-bar" role="separator" aria-orientation="horizontal" aria-label="Terminal height" tabIndex={0}
+                aria-valuenow={Math.round(share * 100)} aria-valuemin={15} aria-valuemax={85} data-testid="idea-term-bar"
+                onPointerDown={(e) => { e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); }}
+                onPointerMove={(e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) setShareTo(e.clientY); }}
+                onKeyDown={(e) => {
+                  const by = e.key === "ArrowUp" ? 0.05 : e.key === "ArrowDown" ? -0.05 : 0;
+                  if (!by) return;
+                  e.preventDefault();
+                  setShare((s) => Math.min(0.85, Math.max(0.15, s + by)));
+                }} />
+              <div className="ix-term-head">
+                <span>Terminal</span>
+                {props.terminalCmd.trim() && <button className="ix-btn ix-btn-quiet ix-btn-small" data-testid="idea-conv-terminal-app" onClick={terminalApp}
+                  title="Attach to this conversation in your terminal app">Open in terminal app</button>}
+                <button className="ix-btn ix-btn-quiet ix-btn-small" data-testid="idea-term-hide" onClick={() => setTerm(false)}>Hide</button>
+              </div>
+              <IdeaTerminalPane key={`${cur.session}:${props.gen}`} session={cur.session} idea={{ id: ideaId, conv: cur.id }} focusToken={focus} />
+            </div>
+          )}
         </div>
       ) : (
         <div className="ix-none">

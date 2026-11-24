@@ -470,6 +470,15 @@ impl St<'_> {
         }
     }
 
+    /// Whether session `name` carries place `slug`'s name and is not its own.
+    fn lives_elsewhere(&mut self, name: &str, project: &worktrees_core::Project, slug: &str) -> bool {
+        if self.panes.is_none() {
+            self.panes = Some(self.world.panes());
+        }
+        let panes = self.panes.as_ref().and_then(Option::as_ref);
+        panes.is_some_and(|p| p.elsewhere(name, &project.place_dir(slug), project.place_exclude(slug)))
+    }
+
     /// The projects session `name` has panes in, each by its registry key.
     /// A session with a pane in a project outside the scope is out of scope
     /// WHOLE: attaching shows every pane, so one split cd'd into an in-scope
@@ -823,7 +832,9 @@ impl St<'_> {
     /// it cwd'd inside the place (`PaneList::session_in`), which also covers
     /// the provider sidecars and an adopted foreign-named session. Failing
     /// that, by NAME: the canonical `<prefix>-<slug>` of a place, or one of its
-    /// sidecars, which still holds when every pane has `cd`'d away. A session
+    /// sidecars, which still holds when every pane has `cd`'d away — but not
+    /// for one created in another place (`PaneList::elsewhere`), because two
+    /// projects can render one name. A session
     /// with neither — the user's own tmux, a stranger's — is no place's, and
     /// the console cannot attach it through here either (§8 gap 3). One
     /// `list-panes` and no git in the common case; the name rule costs a
@@ -845,7 +856,8 @@ impl St<'_> {
         let keys: Vec<String> = self.roots().iter().filter(|k| in_scope(k)).cloned().collect();
         for key in keys {
             let Ok(project) = worktrees_core::Project::discover(Path::new(&key)) else { continue };
-            if project.place_index().iter().any(|p| names_of(&project, &p.slug).iter().any(|n| n == name)) {
+            let mine = project.place_index().into_iter().find(|p| names_of(&project, &p.slug).iter().any(|n| n == name));
+            if mine.is_some_and(|p| !self.lives_elsewhere(name, &project, &p.slug)) {
                 return Ok(key);
             }
         }
@@ -859,7 +871,7 @@ impl St<'_> {
         let missing = || Refusal::not_found(format!("no tmux session named {name} in {slug}"));
         self.session_owners(name)?;
         if let Ok(project) = worktrees_core::Project::discover(Path::new(key)) {
-            if names_of(&project, slug).iter().any(|n| n == name) {
+            if names_of(&project, slug).iter().any(|n| n == name) && !self.lives_elsewhere(name, &project, slug) {
                 return Ok(());
             }
         }
@@ -1383,6 +1395,40 @@ mod tests {
         let open = |name: &str| try_row("term_open", &con, &all, json!({ "session": name, "cols": 80, "rows": 24 }), &w);
         assert!(open("api").is_ok() && open("api-fix").is_ok());
         assert!(open("mine").is_err());
+    }
+
+    /// Two projects can render one session name (here: `b` took `a`'s prefix),
+    /// and the name rule is what answers once every pane has `cd`'d away. A
+    /// device whose scope is `b` must not reach `a`'s lane by it.
+    #[test]
+    fn a_session_made_in_another_project_is_not_a_places_by_its_name() {
+        struct W(Vec<String>, PaneList);
+        impl World for W {
+            fn roots(&self) -> Vec<String> {
+                self.0.clone()
+            }
+            fn panes(&self) -> Option<PaneList> {
+                Some(self.1.clone())
+            }
+        }
+        let t = two("samename");
+        let prefix = worktrees_core::Project::discover(&t.a).unwrap().prefix;
+        std::fs::write(t.b.join(".worktree-prefix"), &prefix).unwrap();
+        let name = format!("{prefix}-feat");
+        let made_in = |root: &Path| {
+            let pane = worktrees_core::tmux::Pane {
+                session: name.clone(),
+                path: "/".into(),
+                cmd: "claude".into(),
+                start: Some(s(&root.join(".worktrees/feat"))),
+                ..Default::default()
+            };
+            W(vec![s(&t.a), s(&t.b)], PaneList::from_panes(vec![pane]))
+        };
+        let (cx, g) = phone(&[Read, Stream], &[&t.b]);
+        let open = |w: &W| try_row("term_open", &cx, &g, json!({ "session": name, "cols": 80, "rows": 24 }), w);
+        assert_eq!(open(&made_in(&t.a)).unwrap_err().wire(), json!(ERR_NOT_FOUND));
+        assert!(open(&made_in(&t.b)).is_ok(), "b's own lane, its pane cd'd away");
     }
 
     /// A session is out of scope WHOLE when any of its panes is in a project

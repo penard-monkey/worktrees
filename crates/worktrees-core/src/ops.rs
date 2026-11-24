@@ -62,9 +62,6 @@ fn live_session(p: &Project, slug: &str, wt: &str, panes: Option<&tmux::PaneList
     let ai_word = crate::project::adopt_ai_word();
     match panes {
         Some(pl) => p.live_session_in(slug, wt, pl, &ai_word),
-        // The canonical name by its own `has-session` first, as it always was:
-        // a place whose session has the name pays no `list-panes` (and no `ps`).
-        None if tmux::session_exists(&p.session_name(slug)) => Some(p.session_name(slug)),
         None => p.live_session_in(slug, wt, &tmux::PaneList::fetch()?, &ai_word),
     }
 }
@@ -372,7 +369,10 @@ fn lock_agent_switch(main_root: &str) -> Result<File, String> {
 /// because the sessions closed are sidecars (never adopted) or the canonical
 /// one when `session_in` is a sidecar (when nothing is adopted).
 pub fn session_to_reuse(p: &Project, wt: &str, session_in: &str, ai_word: &str) -> Option<String> {
-    if tmux::session_exists(session_in) {
+    let slug = if wt == p.main_root { "(main)".to_string() } else { basename(wt) };
+    if tmux::session_exists(session_in)
+        && !tmux::PaneList::fetch_unnamed().is_some_and(|pl| pl.elsewhere(session_in, wt, p.place_exclude(&slug)))
+    {
         return Some(session_in.to_string());
     }
     if crate::provider::is_sidecar(session_in) {
@@ -383,6 +383,36 @@ pub fn session_to_reuse(p: &Project, wt: &str, session_in: &str, ai_word: &str) 
     // adopt (and attach to) a worktree's session instead of creating main's.
     let exclude = if wt == p.main_root { Some(p.wt_root.as_str()) } else { None };
     tmux::worktree_session_excluding(wt, ai_word, exclude).filter(|s| tmux::session_exists(s))
+}
+
+/// Why a session named `name` cannot be created for place `slug` at `wt`: the
+/// name is taken by a session that lives elsewhere (`PaneList::elsewhere`), and
+/// the place has none of its own to reuse. Another repo renders the same name,
+/// and tmux has one namespace, so the launch is refused rather than handed
+/// someone else's session. No path and no project is named: this text reaches
+/// an agent through MCP, whatever cross-project reach says.
+fn name_taken(p: &Project, slug: &str, wt: &str, name: &str, ai_word: &str) -> Option<String> {
+    if !tmux::session_exists(name) || session_to_reuse(p, wt, name, ai_word).is_some() {
+        return None;
+    }
+    Some(format!(
+        "tmux session '{name}' is already in use outside '{slug}': another project names its sessions the same way. \
+         Nothing was started. Give this project its own prefix — put one word in {}/.worktree-prefix — or use another branch name",
+        p.main_root
+    ))
+}
+
+/// The live provider sidecars of place `slug` that are its own, with each
+/// one's provider. One `list-panes`.
+fn own_sidecars(p: &Project, slug: &str) -> Vec<(&'static crate::provider::Provider, String)> {
+    let Some(panes) = tmux::PaneList::fetch_unnamed() else { return Vec::new() };
+    let canonical = p.session_name(slug);
+    crate::provider::PROVIDERS
+        .iter()
+        .rev()
+        .map(|pr| (pr, pr.sidecar_name(&canonical)))
+        .filter(|(_, s)| p.owns_session(slug, s, &panes))
+        .collect()
 }
 
 // ── (re)open a worktree's tmux session, then attach ──────────────────────────
@@ -408,6 +438,11 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         }
     } else { None };
     let place_slug = if wt == p.main_root { "(main)".to_string() } else { basename(wt) };
+    // Before anything is closed, counted or stamped for it.
+    if let Some(why) = name_taken(p, &place_slug, wt, session_in, &ai_word) {
+        ui.error(&why);
+        return 1;
+    }
     // A launch carrying the opener is retried WITH the brief: where the harness
     // has run before, a plain `open --force` would start it blank.
     let brief_retry = ai.opener.is_some().then(|| Path::new(wt).join(BRIEF_PATH));
@@ -513,6 +548,7 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         }
         for name in other {
             if name == session_in || !tmux::session_exists(&name) { continue; }
+            if tmux::PaneList::fetch_unnamed().is_some_and(|pl| pl.elsewhere(&name, wt, exclude)) { continue; }
             tmux::kill_session(&name);
             if tmux::session_exists(&name) {
                 ui.error(&format!("could not close the other agent session '{name}'; provider switch cancelled"));
@@ -1176,6 +1212,16 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         }
     }
 
+    // Whose name is it? Asked before anything exists: a worktree whose agent
+    // cannot be started is not what `new` was asked for.
+    if do_tmux {
+        let word = crate::profile::ai_word_of(&crate::config::resolve_ai_cmd(ai_flag.as_deref()));
+        if let Some(why) = name_taken(p, &slug, &wt, &agent_session_name(&p.session_name(&slug), &word), &word) {
+            ui.error(&why);
+            return 1;
+        }
+    }
+
     // §1.1 — either the tool fully provisions a project it recognizes, or it
     // refuses to create there. A config that does not PARSE is knowable before any
     // side effect (unlike a materialization failure, which needs the worktree to
@@ -1603,6 +1649,9 @@ fn rebrief_refusal(p: &Project, slug: &str, wt: &str, canonical: &str, ai_cmd: &
         ));
     };
     let word = adapter.provider().match_word;
+    if let Some(why) = name_taken(p, slug, wt, &agent_session_name(canonical, word), word) {
+        return Some(why);
+    }
     let live = session_to_reuse(p, wt, &agent_session_name(canonical, word), word)?;
     Some(format!(
         "tmux session '{live}' is already running in '{slug}', and --brief starts a NEW session on the brief — \
@@ -1809,7 +1858,8 @@ pub fn cmd_close(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             let session = agent_session_name(&canonical, selected.match_word);
             // Claude's canonical path retains adoption and confirmation handling.
             if !selected.canonical_default || session != canonical {
-                if tmux::session_exists(&session) {
+                let ours = tmux::PaneList::fetch_unnamed().is_some_and(|pl| p.owns_session(&slug, &session, &pl));
+                if ours {
                     if expect.as_deref().is_some_and(|e| e != session) {
                         ui.error(&format!("{} session changed since confirmation; nothing was closed.", selected.label));
                         rc = worse_rc(rc, 1);
@@ -1829,12 +1879,9 @@ pub fn cmd_close(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             Err(code) => rc = worse_rc(rc, code),
             Ok(()) if provider.is_none() => {
                 let slug = if n == "main" || n == "(main)" { "(main)".to_string() } else { slugify(n) };
-                for provider in crate::provider::PROVIDERS.iter().rev() {
-                    let session = provider.sidecar_name(&p.session_name(&slug));
-                    if tmux::session_exists(&session) {
-                        tmux::kill_session(&session);
-                        ui.info(&format!("closed {} tmux {session}", provider.label));
-                    }
+                for (provider, session) in own_sidecars(p, &slug) {
+                    tmux::kill_session(&session);
+                    ui.info(&format!("closed {} tmux {session}", provider.label));
                 }
             }
             Ok(()) => {}
@@ -1880,6 +1927,7 @@ pub fn live_places_in(p: &Project, places: &[(String, String)], panes: &tmux::Pa
         let canonical = p.session_name(slug);
         let exclude = (slug == "(main)").then_some(p.wt_root_dir());
         let agents = panes.agents_in(dir, exclude);
+        let panes = &*panes.for_place(&canonical, dir, exclude);
         let mut names: Vec<String> = p.live_session_in(slug, dir, panes, ai_word).into_iter().collect();
         for sidecar in crate::provider::PROVIDERS.iter().map(|pr| pr.sidecar_name(&canonical)) {
             if panes.has_session(&sidecar) && !names.contains(&sidecar) {
@@ -1958,7 +2006,7 @@ fn close_one(p: &Project, ui: &mut dyn Ui, name: &str, yes: bool, expect: Option
     let Some(session) = live_session(p, &slug, &dir, None) else {
         // No AI session, but the dock may still hold scratch shells for this
         // place (canonical-named) — sweep them so `close` leaves nothing behind.
-        tmux::kill_shell_sidecars(&canonical);
+        tmux::kill_shell_sidecars(&canonical, &dir, p.place_exclude(&slug));
         ui.info(&format!("no live session for '{slug}' ({canonical}) — nothing to close."));
         return Ok(());
     };
@@ -1987,8 +2035,8 @@ fn close_one(p: &Project, ui: &mut dyn Ui, name: &str, yes: bool, expect: Option
     // before its prompt for exactly this reason; `close` was the odd one out and
     // killed first, printing "closed adopted tmux X" afterwards.
     //
-    // A CANONICAL-name close still asks nothing: that name is one only this tool
-    // writes, so there is no doubt about whose session it is.
+    // A CANONICAL-name close still asks nothing: `live_session` has already put
+    // aside a session of that name that lives elsewhere (another repo's).
     //
     // `-y` ALONE still skips this entirely — `worktrees close -y feat-x` is a
     // person (or a script) saying "don't ask" in the same breath as the command,
@@ -2017,7 +2065,7 @@ fn close_one(p: &Project, ui: &mut dyn Ui, name: &str, yes: bool, expect: Option
         }
     }
     tmux::kill_session(&session);
-    tmux::kill_shell_sidecars(&canonical); // the dock's scratch shells die with the place
+    tmux::kill_shell_sidecars(&canonical, &dir, p.place_exclude(&slug)); // the dock's scratch shells die with the place
     match (session == canonical, slug.as_str()) {
         (true, "(main)") => ui.info(&format!("closed tmux {session} — checkout untouched.")),
         (true, _) => {
@@ -2130,11 +2178,11 @@ fn remove_one(p: &Project, ui: &mut dyn Ui, name: &str, del_branch: bool, force:
         tmux::kill_session(session);
         ui.info(&format!("killed tmux {session}"));
     }
-    for provider in crate::provider::PROVIDERS.iter().rev() {
-        let session = provider.sidecar_name(&p.session_name(&slug));
-        if tmux::session_exists(&session) { tmux::kill_session(&session); ui.info(&format!("killed tmux {session}")); }
+    for (_, session) in own_sidecars(p, &slug) {
+        tmux::kill_session(&session);
+        ui.info(&format!("killed tmux {session}"));
     }
-    tmux::kill_shell_sidecars(&session); // dock shells die with the worktree (past the refusal guards)
+    tmux::kill_shell_sidecars(&session, &path, None); // dock shells die with the worktree (past the refusal guards)
     if reg {
         if git::git_status(&p.main_root, &["worktree", "remove", "--force", &path]) {
             ui.info(&format!("removed worktree {slug}"));
@@ -2170,13 +2218,12 @@ pub(crate) fn remove_tree(p: &Project, ui: &mut dyn Ui, wt: &str) -> Result<Vec<
     if let Some(s) = live_session(p, &slug, wt, None) {
         sessions.push(s);
     }
-    for provider in crate::provider::PROVIDERS.iter().rev() {
-        let s = provider.sidecar_name(&canonical);
-        if tmux::session_exists(&s) && !sessions.contains(&s) {
+    for (_, s) in own_sidecars(p, &slug) {
+        if !sessions.contains(&s) {
             sessions.push(s);
         }
     }
-    for s in tmux::session_names() {
+    for s in tmux::PaneList::fetch_unnamed().unwrap_or_default().for_place(&canonical, wt, None).session_list() {
         if tmux::shell_sidecar_index(&canonical, &s).is_some() && !sessions.contains(&s) {
             sessions.push(s);
         }
@@ -2960,8 +3007,10 @@ fn doctor_config(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         let mut v = stray_findings(p);
         let reg = crate::registry::read_lenient();
         v.extend(nested_findings(&p.main_root, &reg));
-        v.extend(prefix_collision_findings(&p.main_root, &p.prefix, &reg, |root| {
-            Project::discover(Path::new(root)).ok().filter(|o| o.main_root == root).map(|o| o.prefix)
+        let other = |root: &str| Project::discover(Path::new(root)).ok().filter(|o| o.main_root == root);
+        v.extend(prefix_collision_findings(&p.main_root, &p.prefix, &reg, |root| other(root).map(|o| o.prefix)));
+        v.extend(name_collision_findings(&p.main_root, &p.prefix, &session_names_of(p), &reg, |root| {
+            other(root).map(|o| (o.prefix.clone(), session_names_of(&o)))
         }));
         v
     };
@@ -3121,6 +3170,45 @@ fn prefix_collision_findings(
             )
         })
         .collect()
+}
+
+/// Every place of `p` with the session name it renders.
+fn session_names_of(p: &Project) -> Vec<(String, String)> {
+    p.place_index().into_iter().map(|r| (p.session_name(&r.slug), r.slug)).collect()
+}
+
+/// One warning per place whose session NAME a place of another registered
+/// project renders too, when the prefixes merely overlap: `app` + `x-feat` and
+/// `app-x` + `feat`. Only an actual clash is said. Overlapping prefixes alone
+/// are ordinary (`worktrees` and `worktrees-ios`), and a warning nobody can
+/// act on would sit in every `doctor`. `mine` and `of` pair names with slugs.
+fn name_collision_findings(
+    main_root: &str,
+    prefix: &str,
+    mine: &[(String, String)],
+    reg: &crate::registry::Registry,
+    of: impl Fn(&str) -> Option<(String, Vec<(String, String)>)>,
+) -> Vec<Finding> {
+    if reg.by_root(main_root).is_none() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for e in reg.projects.iter().filter(|e| e.root != main_root) {
+        // An equal prefix is `prefix_collision_findings`' one warning.
+        let Some((_, theirs)) = of(&e.root).filter(|(p, _)| p != prefix) else { continue };
+        for (name, slug) in mine.iter().filter(|(n, _)| theirs.iter().any(|(t, _)| t == n)) {
+            let who = if e.private { "another registered project".to_string() } else { format!("registered project '{}'", e.name) };
+            out.push(Finding::warn(
+                Code::PrefixCollision,
+                format!(
+                    "place '{slug}' and a place of {who} both name their tmux session `{name}`, so only one of them can be \
+                     open at a time. Give one project its own prefix (`.worktree-prefix`, or `[project] prefix` in \
+                     .worktrees.toml), or use another branch name."
+                ),
+            ));
+        }
+    }
+    out
 }
 
 /// One warning per registry entry nested inside, or containing, this
@@ -4120,6 +4208,26 @@ mod tests {
         assert!(!f[0].message.contains("inner") && f[0].message.contains("another registered project"), "{}", f[0].message);
         assert!(super::nested_findings("/w/other", &reg).is_empty());
         assert!(super::nested_findings("/w/unregistered", &reg).is_empty());
+    }
+
+    #[test]
+    fn two_places_that_render_one_session_name_are_flagged() {
+        use crate::registry::{Entry, Registry};
+        let e = |root: &str, name: &str| Entry { root: root.into(), name: name.into(), ..Default::default() };
+        let mut reg = Registry { projects: vec![e("/w/app", "app"), e("/w/app-x", "app-x")], ..Default::default() };
+        let pair = |n: &str, s: &str| (n.to_string(), s.to_string());
+        let mine = [pair("app-(main)", "(main)"), pair("app-x-feat", "x-feat")];
+        let theirs = |feat: &str| Some(("app-x".to_string(), vec![pair("app-x-(main)", "(main)"), pair(&format!("app-x-{feat}"), feat)]));
+        let f = super::name_collision_findings("/w/app", "app", &mine, &reg, |_| theirs("feat"));
+        assert_eq!(f.len(), 1);
+        assert!(f[0].message.contains("'x-feat'") && f[0].message.contains("`app-x-feat`") && f[0].message.contains("'app-x'"), "{}", f[0].message);
+        assert!(!f[0].message.contains("/w/"), "no root: {}", f[0].message);
+        // Overlapping prefixes with no clash say nothing.
+        assert!(super::name_collision_findings("/w/app", "app", &mine, &reg, |_| theirs("other")).is_empty());
+        reg.projects[1].private = true;
+        let f = super::name_collision_findings("/w/app", "app", &mine, &reg, |_| theirs("feat"));
+        assert!(!f[0].message.contains("'app-x'") && f[0].message.contains("another registered project"), "{}", f[0].message);
+        assert!(super::name_collision_findings("/w/none", "app", &mine, &reg, |_| theirs("feat")).is_empty());
     }
 
     #[test]

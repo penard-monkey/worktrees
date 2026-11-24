@@ -1617,19 +1617,28 @@ export async function stopTurn(t: Target, agent: string): Promise<void> {
 
 let nextPending = 1;
 
+/** `text` with a quote before it: a blank line between, so the message is not
+ *  read as more of the quote. */
+export function withQuote(quote: string | null | undefined, text: string): string {
+  return quote ? `${quote}\n\n${text}` : text;
+}
+
 /** Send the draft, and its attachments: each file is uploaded first, in
  *  order, and only once every one is kept is the line sent, naming them
  *  (`attachLine`). A refused upload sends nothing. The draft and the files
- *  clear only on a confirmed delivery. */
-export async function sendDraft(t: Target, agent: string, rules: SendRules = ONE_LINE): Promise<void> {
+ *  clear only on a confirmed delivery, which is what it answers. `quote` goes
+ *  before the draft (an idea conversation's selection): the draft must pass
+ *  the rule alone, and the two must pass it together. */
+export async function sendDraft(t: Target, agent: string, rules: SendRules = ONE_LINE, quote?: string | null): Promise<boolean> {
   const v = viewOf(t.path);
   const draft = v.draft;
   const n = v.attachments.length;
-  if (v.sending || v.attachments.some((a) => a.state === "preparing") || (!draft.trim() && !n) || attachProblem(draft, n, rules)) return;
+  if (v.sending || v.attachments.some((a) => a.state === "preparing") || (!draft.trim() && !n) || attachProblem(draft, n, rules)) return false;
+  if (quote && attachProblem(withQuote(quote, draft), n, rules)) return false;
   put(t.path, { sending: true, sentLine: null, sendWords: null, stopWords: null, attachWords: null });
   const paths = n ? await uploadAll(t) : [];
-  if (!paths) return;
-  const text = attachLine(draft, paths);
+  if (!paths) return false;
+  const text = withQuote(quote, attachLine(draft, paths));
   const sent = new Set(viewOf(t.path).attachments.map((a) => a.id));
   try {
     // Claude stamps the transcript before agent_send's confirmation returns.
@@ -1667,10 +1676,12 @@ export async function sendDraft(t: Target, agent: string, rules: SendRules = ONE
     void loadTurns(t).then(() => {
       if (sentId !== null && viewOf(t.path).pending.some((p) => p.id === sentId)) return loadTurns(t);
     });
+    return r.delivered;
   } catch (e) {
     const w = sendWords(String(e), agent);
     put(t.path, { sending: false, sentLine: null, sendWords: w });
     if (w.prompt) void loadPrompt(t);
+    return false;
   }
 }
 

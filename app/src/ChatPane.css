@@ -408,6 +408,16 @@
 }
 .chat-chip-x:hover:not(:disabled) { background: var(--bg-input); color: var(--txt-hi); }
 .chat-chip-x:disabled { color: var(--txt-mute); cursor: default; }
+/* A quote that goes with the next message: all of it, scrolling past five
+   lines, over the field that will carry it. */
+.chat-quote {
+  margin: 0 0 var(--s2); padding: 2px 2px 4px var(--s2); border: 1px solid var(--line); border-left: 3px solid var(--accent);
+  border-radius: var(--r-md); background: var(--bg-elev); color: var(--txt-hi); font-size: var(--fs-meta);
+}
+.chat-quote-head { display: flex; align-items: center; gap: 6px; }
+.chat-quote-label { flex: 1 1 auto; min-width: 0; font-weight: var(--fw-med); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-quote-text { margin: 0; max-height: 7em; overflow: auto; font: inherit; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-quote-offer { display: block; margin: 0 0 var(--s2); font-size: var(--fs-meta); }
 /* The files a sent message named, under its text, inside the bubble. */
 .chat-sent-files { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px; }
 .chat-bubble-pending .chat-sent-files { margin-top: 4px; }

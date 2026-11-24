@@ -108,7 +108,8 @@ fn add_agent_status(v: &mut serde_json::Value, project: &Project, slug: &str, pa
     // `wait`'s derivation (`activity::place_answer`), so the two can never
     // disagree — an unclaimed program is `unknown` here exactly when `wait`
     // keeps waiting on it.
-    let answer = activity::place_answer(readings.into_iter().map(|(_, x)| x), panes.as_ref(), &project.session_name(slug));
+    let here = panes.as_ref().map(|p| project.place_panes(slug, p));
+    let answer = activity::place_answer(readings.into_iter().map(|(_, x)| x), here.as_deref(), &project.session_name(slug));
     v["agent_state"] = agents.first().map_or_else(|| serde_json::json!(answer.state), |a| a["state"].clone());
     v["agents"] = serde_json::json!(agents);
     v["activity"] = serde_json::to_value(answer).unwrap_or_default();
@@ -2352,13 +2353,14 @@ impl Server {
             return Ok(text_err(&e));
         }
         let path = project.place_dir(&slug);
-        let Some(panes) = tmux::PaneList::fetch() else {
+        let Some(all) = tmux::PaneList::fetch() else {
             return Ok(text_err("tmux is not available, so no agent session can be reached"));
         };
+        let panes = &*project.place_panes(&slug, &all);
         let canonical = project.session_name(&slug);
         let exclude = (slug == "(main)").then(|| project.wt_root_dir().to_string());
-        let probes = agent::live_probes_in(Some(&panes));
-        let scan = harness::Scan { probes: &probes, panes: Some(&panes) };
+        let probes = agent::live_probes_in(Some(&all));
+        let scan = harness::Scan { probes: &probes, panes: Some(panes) };
         let typed = attributed(&from, text);
         // Every harness running here is asked in turn. One that takes typed
         // input answers for the place; one with its own bus (Claude) only
@@ -2367,7 +2369,7 @@ impl Server {
         for a in harness::ALL {
             let Some(reading) = a.activity(&scan, &canonical, &path) else { continue };
             let req = harness::SendRequest {
-                panes: &panes,
+                panes,
                 canonical: &canonical,
                 path: &path,
                 exclude: exclude.as_deref(),

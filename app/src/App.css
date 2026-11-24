@@ -151,6 +151,11 @@ html[data-places-side="right"] .rail-group .rail-icon.active::before { left: aut
 .rail-icon:disabled { color: var(--txt-mute); opacity: 0.4; cursor: default; }
 .rail-icon:disabled:hover { background: transparent; color: var(--txt-mute); }
 
+/* Keep awake, held: the accent and a filled cup. Not `.active`, whose bar marks
+   where you are. */
+.rail-icon.keep-awake.lit { color: var(--accent); }
+.rail-icon.keep-awake.lit .cup { fill: currentColor; fill-opacity: 0.35; }
+
 /* right rail — the dock's Files/Terminal picker. Mirrors the left rail down to
    the active bar, which flips to the outer (window) edge. */
 .rail-right { border-right: 0; border-left: 1px solid var(--line); }

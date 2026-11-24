@@ -170,6 +170,17 @@ pub fn idea_interrupt(ctx: &Ctx, id: String, conv: String) -> Result<Value, Stri
     agents::interrupt_at(ctx, &locus(ctx, &id, &conv)?)
 }
 
+/// `idea_term_open`: attach a terminal to the conversation's own session, as
+/// `term_open` attaches one to a place's. The session is the record's, never
+/// the client's string; `term_open` refuses one that is not running. Answers
+/// the session and the attach's id, which the `term_*` rows then take.
+pub fn idea_term_open(ctx: &Ctx, id: String, conv: String, cols: u16, rows: u16, on_bytes: std::sync::Arc<dyn crate::ByteSink>) -> Result<(String, u32), String> {
+    let c = sessions::find_at(ctx.ideas_dir(), &id, &conv)?;
+    let session = sessions::session_name(&c.id);
+    let term = crate::term::term_open(session.clone(), cols, rows, on_bytes, &ctx.terminals)?;
+    Ok((session, term))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

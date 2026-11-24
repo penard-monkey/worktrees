@@ -270,21 +270,51 @@ impl HostStore {
 
     /// Keep a new pairing: its key first, then its record. A record is never
     /// written without the key it needs.
-    pub fn add(&self, rec: &HostRecord, key: &DeviceKey) -> Result<(), String> {
+    ///
+    /// **A pairing to a host already kept REPLACES it.** Every record with
+    /// `rec.pin` — the same host, paired again (after a revoke, a guest
+    /// invited back) — goes, with its key file: the new record takes the
+    /// first one's place, and the choice if one was chosen. Kept beside the
+    /// new one, the old pairing showed as a second, dead host and went on
+    /// dialling, and the host raised a "revoked" alert at every attempt
+    /// (v0.52.0, the three-VM run). The answer is the records replaced.
+    ///
+    /// A record with that pin kept by [`add_record`] is refused, with nothing
+    /// written: its keys are the caller's, and replacing it would leave them
+    /// with no record to find them by.
+    ///
+    /// [`add_record`]: HostStore::add_record
+    pub fn add(&self, rec: &HostRecord, key: &DeviceKey) -> Result<Vec<HostRecord>, String> {
         rec.check()?;
         self.locked(|f| {
-            if f.hosts.len() >= MAX_HOSTS {
-                return Err(format!("this device already keeps {MAX_HOSTS} hosts; forget one first"));
-            }
             if f.hosts.iter().any(|h| h.rec.id == rec.id) {
                 return Err(format!("a host with id {} is already kept", rec.id));
+            }
+            if let Some(h) = f.hosts.iter().find(|h| h.rec.pin == rec.pin && h.key == KeyHome::External) {
+                return Err(format!("{} ({}) is this host, kept with keys the app that paired it holds; forget it first", h.rec.name, h.rec.id));
+            }
+            let replaced: Vec<Entry> = f.hosts.iter().filter(|h| h.rec.pin == rec.pin).cloned().collect();
+            if f.hosts.len() - replaced.len() >= MAX_HOSTS {
+                return Err(format!("this device already keeps {MAX_HOSTS} hosts; forget one first"));
+            }
+            // Every old key file must be one this store may delete before
+            // anything is written, so a refusal leaves both pairings whole.
+            for h in &replaced {
+                self.key_file_ok(&h.rec).map_err(|e| format!("{e}; nothing was kept, and {} is kept as it was", h.rec.name))?;
             }
             let keys = self.dir.join(KEYS_DIR);
             worktrees_core::fsx::make_dir(&keys).map_err(|e| format!("{}: {e}", keys.display()))?;
             fs::set_permissions(&keys, fs::Permissions::from_mode(0o700)).map_err(|e| format!("{}: {e}", keys.display()))?;
             key.save(&self.key_path(&rec.id))?;
-            f.hosts.push(Entry { rec: rec.clone(), key: KeyHome::File });
-            Ok(())
+            for h in &replaced {
+                if let Err(e) = self.remove_key_file(&h.rec) {
+                    let _ = self.remove_key_file(rec);
+                    return Err(format!("{e}; nothing was kept, and {} is kept as it was", h.rec.name));
+                }
+            }
+            let gone: Vec<HostRecord> = replaced.into_iter().map(|e| e.rec).collect();
+            replace(f, Entry { rec: rec.clone(), key: KeyHome::File }, &gone);
+            Ok(gone)
         })
     }
 
@@ -294,33 +324,35 @@ impl HostStore {
     /// same lock, in the same file and format as [`add`].
     ///
     /// An upsert by `rec.id`: a new host is added, and a host this call kept
-    /// before is replaced in place. A host [`add`] kept, with its key file
-    /// here, is refused: replacing it would leave that file behind.
+    /// before is replaced in place. And, as in [`add`], **a pairing to a host
+    /// already kept replaces it**: every other record-only record with
+    /// `rec.pin` goes, the new one takes the first one's place and the
+    /// choice. The answer is the records replaced (never `rec.id`'s own), so
+    /// the caller deletes THEIR keys, as it does after [`forget`].
+    ///
+    /// A host [`add`] kept, with its key file here, is refused — by id or by
+    /// pin, nothing written: replacing it would leave that file behind.
     ///
     /// The caller keeps the keys first and the record second, as [`add`]
     /// does, so a record is never kept without its keys; and it deletes the
-    /// keys itself, after [`forget`].
+    /// keys itself, after [`forget`] or a replacement.
     ///
     /// [`add`]: HostStore::add
     /// [`forget`]: HostStore::forget
-    pub fn add_record(&self, rec: &HostRecord) -> Result<(), String> {
+    pub fn add_record(&self, rec: &HostRecord) -> Result<Vec<HostRecord>, String> {
         rec.check()?;
         self.locked(|f| {
-            let entry = Entry { rec: rec.clone(), key: KeyHome::External };
-            match f.hosts.iter().position(|h| h.rec.id == rec.id) {
-                Some(i) if f.hosts[i].key == KeyHome::File => {
-                    Err(format!("{} ({}) is kept with a key file on this device; forget it first", f.hosts[i].rec.name, rec.id))
-                }
-                Some(i) => {
-                    f.hosts[i] = entry;
-                    Ok(())
-                }
-                None if f.hosts.len() >= MAX_HOSTS => Err(format!("this device already keeps {MAX_HOSTS} hosts; forget one first")),
-                None => {
-                    f.hosts.push(entry);
-                    Ok(())
-                }
+            if let Some(h) = f.hosts.iter().find(|h| (h.rec.id == rec.id || h.rec.pin == rec.pin) && h.key == KeyHome::File) {
+                return Err(format!("{} ({}) is kept with a key file on this device; forget it first", h.rec.name, h.rec.id));
             }
+            let same = |h: &Entry| h.rec.id == rec.id || h.rec.pin == rec.pin;
+            let kept = f.hosts.iter().filter(|h| same(h)).count();
+            if kept == 0 && f.hosts.len() >= MAX_HOSTS {
+                return Err(format!("this device already keeps {MAX_HOSTS} hosts; forget one first"));
+            }
+            let gone: Vec<HostRecord> = f.hosts.iter().filter(|h| same(h)).map(|h| h.rec.clone()).collect();
+            replace(f, Entry { rec: rec.clone(), key: KeyHome::External }, &gone);
+            Ok(gone.into_iter().filter(|g| g.id != rec.id).collect())
         })
     }
 
@@ -348,12 +380,26 @@ impl HostStore {
         })
     }
 
+    /// Would [`remove_key_file`] delete `rec`'s key file, or find none? The
+    /// same look, through the same no-follow directory handle, unlinking
+    /// nothing.
+    ///
+    /// [`remove_key_file`]: HostStore::remove_key_file
+    fn key_file_ok(&self, rec: &HostRecord) -> Result<(), String> {
+        self.key_file(rec, false)
+    }
+
+    fn remove_key_file(&self, rec: &HostRecord) -> Result<(), String> {
+        self.key_file(rec, true)
+    }
+
     /// Unlink `remote-keys/<id>.key` if it is this store's: a regular file in
     /// the keys directory itself. The directory is opened without following a
     /// link and the name is looked at and unlinked through that handle, so a
     /// link standing where either should be is never followed — swapped in
-    /// after the look, a link is what gets unlinked, never its target.
-    fn remove_key_file(&self, rec: &HostRecord) -> Result<(), String> {
+    /// after the look, a link is what gets unlinked, never its target. With
+    /// `unlink` false, only the look.
+    fn key_file(&self, rec: &HostRecord, unlink: bool) -> Result<(), String> {
         let keys = self.dir.join(KEYS_DIR);
         let path = self.key_path(&rec.id);
         let dir = match OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(&keys) {
@@ -375,6 +421,9 @@ impl HostStore {
         }
         if st.st_mode & libc::S_IFMT != libc::S_IFREG {
             return Err(format!("{} is not a key file this store wrote", path.display()));
+        }
+        if !unlink {
+            return Ok(());
         }
         // SAFETY: as above. Flags 0 unlinks a non-directory and never follows
         // the name.
@@ -464,6 +513,29 @@ impl HostStore {
     }
 }
 
+/// Put `new` where the first of `gone` was (or at the end), drop the rest of
+/// `gone`, and move the choice to `new` if it was one of them.
+fn replace(f: &mut File1, new: Entry, gone: &[HostRecord]) {
+    let was = |h: &Entry| gone.iter().any(|g| g.id == h.rec.id);
+    // A guest's host is never the window's engine (`choose`).
+    if f.chosen.as_deref().is_some_and(|c| gone.iter().any(|g| g.id == c)) {
+        f.chosen = (!new.rec.is_guest()).then(|| new.rec.id.clone());
+    }
+    let at = f.hosts.iter().position(was).unwrap_or(f.hosts.len());
+    let mut new = Some(new);
+    let mut out = Vec::with_capacity(f.hosts.len() + 1);
+    for (i, h) in std::mem::take(&mut f.hosts).into_iter().enumerate() {
+        if i == at {
+            out.extend(new.take());
+        }
+        if !was(&h) {
+            out.push(h);
+        }
+    }
+    out.extend(new);
+    f.hosts = out;
+}
+
 fn find<'a>(hosts: &'a [Entry], sel: &str) -> Result<&'a Entry, String> {
     if let Some(h) = hosts.iter().find(|h| h.rec.id == sel) {
         return Ok(h);
@@ -517,12 +589,20 @@ pub(crate) mod tests {
         d
     }
 
+    /// A pin of its own for each fixture host: a store keeps one record per
+    /// pin, so two fixtures sharing one would replace each other.
+    pub fn random_pin() -> String {
+        let mut b = [0u8; 32];
+        getrandom::fill(&mut b).unwrap();
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
     pub fn record(name: &str) -> HostRecord {
         HostRecord {
             id: new_host_id(),
             name: name.into(),
             addr: "192.168.1.5:7461".into(),
-            pin: "ab".repeat(32),
+            pin: random_pin(),
             discovery_id: Some(pairuri::base32(&[3; 16])),
             device_id: "d_abc".into(),
             principal_id: "owner".into(),
@@ -627,7 +707,7 @@ pub(crate) mod tests {
             ("a public address", "192.168.1.5:7461", "8.8.8.8:7461"),
             ("a zone", "192.168.1.5:7461", "[fe80::1%4]:7461"),
             ("a name", "192.168.1.5:7461", "mac.local:7461"),
-            ("an upper-case pin", &"ab".repeat(32), &"AB".repeat(32)),
+            ("an upper-case pin", &a.pin, &a.pin.to_uppercase()),
             ("a name with an override", "Mac mini", "Mac\u{202E}mini"),
         ] {
             fs::write(d.join(HOSTS_FILE), good.replace(from, to)).unwrap();
@@ -774,5 +854,90 @@ pub(crate) mod tests {
         assert_eq!(fs::read(victim.join(&name)).unwrap(), b"someone else's");
         let _ = fs::remove_dir_all(&d);
         let _ = fs::remove_dir_all(&victim);
+    }
+
+
+    /// The v0.52.0 three-VM run: a guest removed and invited again paired
+    /// the SAME host (one pin) under a fresh id, and the old record stayed —
+    /// a second, dead group in the sidebar that kept dialling and raised a
+    /// "revoked" alert on the host at every attempt. A pairing to a pin this
+    /// store keeps REPLACES every record with that pin, in the first one's
+    /// place, deletes their key files, and carries the choice over; another
+    /// host is untouched.
+    #[test]
+    fn pairing_a_kept_host_again_replaces_its_record_and_key() {
+        let d = dir("repair");
+        let st = HostStore::new(&d);
+        let (old, other) = (record("David's Mac"), record("Studio"));
+        st.add(&old, &DeviceKey::generate().unwrap()).unwrap();
+        st.add(&other, &DeviceKey::generate().unwrap()).unwrap();
+        st.choose(Some(&old.id)).unwrap();
+        let again = HostRecord { device_id: "d_new".into(), addr: "192.168.1.6:7461".into(), pin: old.pin.clone(), ..record("David's Mac") };
+        let knew = DeviceKey::generate().unwrap();
+        let replaced = st.add(&again, &knew).unwrap();
+        assert_eq!(replaced, vec![old.clone()], "the old pairing is named");
+        assert_eq!(st.list().unwrap(), Hosts { chosen: Some(again.id.clone()), hosts: vec![again.clone(), other.clone()] }, "one record per pin, in its place, still chosen");
+        assert!(!st.key_path(&old.id).exists(), "the old key file is gone");
+        assert_eq!(st.key_for(&again).unwrap().pin(), knew.pin());
+        assert!(st.key_path(&other.id).exists(), "another host's key is left");
+
+        // Paired again as a GUEST, the host is no longer the window's engine.
+        let guest = HostRecord { principal_id: "g_aaaaaaaaaaaaaaaaaaaaaaaaaa".into(), pin: again.pin.clone(), ..record("David's Mac") };
+        assert_eq!(st.add(&guest, &DeviceKey::generate().unwrap()).unwrap(), vec![again.clone()]);
+        assert_eq!(st.list().unwrap(), Hosts { chosen: None, hosts: vec![guest.clone(), other.clone()] }, "a guest's host is never chosen");
+        let _ = fs::remove_dir_all(&d);
+
+        // A store the bug already left with two records for one pin, each
+        // with its key file, is cleaned at the next pairing.
+        let d = dir("repair-twice");
+        let st = HostStore::new(&d);
+        let a = record("David's Mac");
+        let b = HostRecord { pin: a.pin.clone(), ..record("macos.shared") };
+        let mut text = serde_json::to_vec_pretty(&OldFile1 { v: 1, chosen: None, hosts: vec![a.clone(), b.clone()] }).unwrap();
+        text.push(b'\n');
+        fs::create_dir_all(d.join(KEYS_DIR)).unwrap();
+        fs::write(d.join(HOSTS_FILE), text).unwrap();
+        for r in [&a, &b] {
+            DeviceKey::generate().unwrap().save(&st.key_path(&r.id)).unwrap();
+        }
+        let c = HostRecord { pin: a.pin.clone(), ..record("David's Mac") };
+        assert_eq!(st.add(&c, &DeviceKey::generate().unwrap()).unwrap(), vec![a.clone(), b.clone()]);
+        assert_eq!(st.list().unwrap().hosts, vec![c]);
+        assert!(!st.key_path(&a.id).exists() && !st.key_path(&b.id).exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The same rule for a host whose keys the caller holds: a record-only
+    /// pairing to a kept pin replaces the record-only ones and names them, so
+    /// the caller deletes their keys. Across the two kinds it is refused with
+    /// nothing written: `add_record` over a key file would leave the file,
+    /// `add` over a record-only host would leave the caller's keys with no
+    /// record to find them by.
+    #[test]
+    fn a_record_only_pairing_replaces_its_kind_and_refuses_the_other() {
+        let d = dir("repair-record");
+        let st = HostStore::new(&d);
+        let old = record("David's Mac");
+        st.add_record(&old).unwrap();
+        let again = HostRecord { pin: old.pin.clone(), ..record("David's Mac") };
+        assert_eq!(st.add_record(&again).unwrap(), vec![old.clone()], "named for the caller to delete its keys");
+        assert_eq!(st.list().unwrap().hosts, vec![again.clone()]);
+        assert_eq!(st.add_record(&again).unwrap(), vec![], "an upsert by id replaces nothing else");
+
+        let before = fs::read(d.join(HOSTS_FILE)).unwrap();
+        let e = st.add(&HostRecord { pin: old.pin.clone(), ..record("David's Mac") }, &DeviceKey::generate().unwrap()).unwrap_err();
+        assert!(e.contains("forget it first"), "{e}");
+        assert_eq!(fs::read(d.join(HOSTS_FILE)).unwrap(), before, "unchanged");
+        assert!(fs::read_dir(d.join(KEYS_DIR)).map_or(true, |mut r| r.next().is_none()), "and no key left behind");
+
+        let d2 = dir("repair-cross");
+        let st2 = HostStore::new(&d2);
+        st2.add(&old, &DeviceKey::generate().unwrap()).unwrap();
+        let before = fs::read(d2.join(HOSTS_FILE)).unwrap();
+        let e = st2.add_record(&HostRecord { pin: old.pin.clone(), ..record("David's Mac") }).unwrap_err();
+        assert!(e.contains("key file") && e.contains("forget it first"), "{e}");
+        assert_eq!(fs::read(d2.join(HOSTS_FILE)).unwrap(), before, "unchanged");
+        let _ = fs::remove_dir_all(&d);
+        let _ = fs::remove_dir_all(&d2);
     }
 }

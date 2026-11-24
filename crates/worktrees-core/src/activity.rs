@@ -467,7 +467,8 @@ pub fn place_activity(project: &Project, slug: &str, path: &str) -> Activity {
     let probes = agent::live_probes_in(panes.as_ref());
     let scan = crate::harness::Scan { probes: &probes, panes: panes.as_ref() };
     let readings = crate::harness::place_activities(project, slug, path, &scan);
-    place_answer(readings.into_iter().map(|(_, x)| x), panes.as_ref(), &project.session_name(slug))
+    let here = panes.as_ref().map(|p| project.place_panes(slug, p));
+    place_answer(readings.into_iter().map(|(_, x)| x), here.as_deref(), &project.session_name(slug))
 }
 
 #[cfg(test)]

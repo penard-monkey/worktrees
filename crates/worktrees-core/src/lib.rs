@@ -84,7 +84,6 @@ pub mod synchub;
 pub mod sysclock;
 pub mod tmux;
 pub mod turns;
-pub mod tmux_server;
 pub mod trust;
 pub mod ideas;
 pub mod ideasessions;

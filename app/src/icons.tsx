@@ -102,6 +102,17 @@ export const Lightbulb = (p: IconProps) => (
   </Svg>
 );
 
+/** Keep awake — the rail's cup (Lucide `coffee`). The cup is a path of its own
+ *  so a held one can fill it: on and off must differ by more than a hue. */
+export const Coffee = (p: IconProps) => (
+  <Svg {...p}>
+    <path className="cup" d="M16 8a1 1 0 0 1 1 1v8a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1h14a4 4 0 1 1 0 8h-1" />
+    <path d="M10 2v2" />
+    <path d="M14 2v2" />
+    <path d="M6 2v2" />
+  </Svg>
+);
+
 // ── chrome ──
 export const FolderPlus = (p: IconProps) => (
   <Svg {...p}>

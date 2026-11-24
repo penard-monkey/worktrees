@@ -558,6 +558,14 @@ hotfix is decided and proceeding separately from nesting (§11, decision 8).
 
 ### Phase 1a — routing and identity
 
+> **Not built (2026-11-23).** #464 carried this and was closed: main had moved
+> under it, and it refused a moved repository, which worktrees now adopts. The
+> collision that made routing urgent — two repositories rendering one session
+> name — was fixed on its own, by asking where a session was created
+> (`PaneList::elsewhere`), so what is left of this phase is crash isolation.
+> #461's unused `tmux_server.rs` was removed with it; `git show facaac2` has it,
+> and PR #464 has the rest.
+
 Introduce a core-owned `TmuxServer` descriptor, required by every session-scoped
 operation. Its normal endpoint is `tmux -L wt-<name>-<hash> …`: a readable
 frozen local name plus a project-identity hash. Derive the key from the canonical git common-directory identity (fixed stable hash algorithm,

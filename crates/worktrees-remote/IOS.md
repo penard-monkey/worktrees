@@ -131,7 +131,11 @@ the file from Swift: nothing but `HostStore` writes it.
   `rec.id` is this device's name for the pairing, fixed for its life and
   chosen when the host answers. The app ties its two key tags to it; how is
   the app's choice. `add_record` is an upsert by `rec.id`, and the most hosts
-  a device keeps is `hosts::MAX_HOSTS`.
+  a device keeps is `hosts::MAX_HOSTS`. A pairing to a host already kept
+  (the same `pin`: paired again after a revoke, a guest invited back)
+  REPLACES the old record, and `add_record` answers the records it replaced:
+  delete THEIR two keys, as after a forget. A store that kept the old one
+  beside the new showed a dead second host that went on dialling.
 - **Connect.** `reach::open(&store, &rec, &keys, &env, wait, &mut log)`
   tries the kept address. If nothing answers there, or another key does, it
   looks on the LAN and keeps a new address only once a pinned open to it has

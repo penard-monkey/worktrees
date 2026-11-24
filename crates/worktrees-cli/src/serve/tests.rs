@@ -3340,6 +3340,61 @@ mod devices {
         assert!(r.get("ok").is_some(), "{r}");
     }
 
+    /// Keep awake through the real chain. The hold is the HOST's, so turning it
+    /// is `admin` with a host-wide scope, a phone's step-up included, and each
+    /// turn is one audit record naming the device; reading it is any device's,
+    /// and a read is never recorded.
+    #[test]
+    fn keep_awake_is_turned_with_admin_over_everything_and_recorded() {
+        use worktrees_api::keepawake::{Held, KeepAwake, Mechanism};
+        struct Awake;
+        struct Hold;
+        impl Held for Hold {}
+        impl Mechanism for Awake {
+            fn id(&self) -> &'static str {
+                "fake"
+            }
+            fn hold(&self) -> Result<Box<dyn Held>, String> {
+                Ok(Box::new(Hold))
+            }
+        }
+        let mut e = engine("keep-awake", vec![]);
+        let root = s(&e.dir.join("a"));
+        e.ctx = e.ctx.clone().with_keep_awake(KeepAwake::with(Some(Arc::new(Awake))));
+        let held = |e: &Engine| e.ctx.keep_awake.state().held;
+
+        // Reads anyone with `read` may make; turning it, no one without `admin`.
+        let reader = enroll(&e.reg, "Reader", 1, &[Read, Write, Instruct], Projects::only([root.clone()]));
+        let mut r = e.connect(caller(&reader));
+        assert_eq!(e.rpc(&mut r, "get_keep_awake", json!({}))["ok"]["on"], json!(false));
+        assert_eq!(e.rpc(&mut r, "set_keep_awake", json!({"on": true}))["err"], json!("denied"));
+        // `admin` over one project is not over the host.
+        let one = enroll(&e.reg, "One project", 2, &[Read, Admin], Projects::only([root]));
+        let mut o = e.connect(caller(&one));
+        assert!(e.rpc(&mut o, "set_keep_awake", json!({"on": true}))["err"].is_string());
+        assert!(!held(&e), "a refused caller turned it on");
+
+        let (phone, k) = iphone(&e.reg, &[Read, Admin]);
+        let ex = [6u8; 32];
+        let mut c = e.connect_with(caller(&phone), Some(ex));
+        assert_eq!(e.rpc(&mut c, "set_keep_awake", json!({"on": true}))["err"], json!("step-up required"));
+        assert!(!held(&e));
+        prove(&e, &mut c, &k, ex);
+        let on = e.rpc(&mut c, "set_keep_awake", json!({"on": true}));
+        assert_eq!((on["ok"]["held"].clone(), held(&e)), (json!(true), true), "{on}");
+        assert_eq!(e.rpc(&mut r, "get_keep_awake", json!({}))["ok"]["held"], json!(true));
+        // A missing `on` is an error, never an OFF.
+        assert!(e.rpc(&mut c, "set_keep_awake", json!({}))["err"].is_string());
+        assert!(held(&e));
+
+        let text = std::fs::read_to_string(e.dir.join("cfg").join(super::super::audit::FILE)).unwrap();
+        let recs: Vec<Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert!(recs.iter().all(|r| r["cmd"] != json!("get_keep_awake")), "{recs:#?}");
+        let done: Vec<_> = recs.iter().filter(|r| r["cmd"] == json!("set_keep_awake") && r["kind"] == json!("call") && r["outcome"] == json!("ok")).collect();
+        assert_eq!(done.len(), 1, "{recs:#?}");
+        assert_eq!(done[0]["device"].as_str(), Some(phone.id.as_str()));
+    }
+
     /// iOS MVP S7/S8 through the real chain: `agent_answer` and `agent_send`
     /// are drive-class (`answer`, `instruct`), so a phone is asked for a
     /// step-up on its connection and nothing reaches the pane until one

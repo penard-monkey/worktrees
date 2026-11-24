@@ -66,6 +66,7 @@ pub mod hostenv;
 pub mod hostpolicy;
 pub mod harness_restart;
 pub mod harness_updates;
+pub mod keepawake;
 pub mod log;
 pub mod macprivacy;
 pub mod meta;
@@ -184,6 +185,8 @@ pub struct Ctx {
     /// that runs the engine in-process moves it with [`Ctx::with_ideas_dir`],
     /// never with `set_var`.
     ideas_dir: Arc<PathBuf>,
+    /// The hold on this host's idle sleep (`keepawake`). One per engine.
+    pub keep_awake: Arc<keepawake::KeepAwake>,
 }
 
 impl Ctx {
@@ -196,6 +199,7 @@ impl Ctx {
             shells: Arc::new(term::Shells::default()),
             viewer: Arc::new(viewer::Viewer::default()),
             agents: Arc::new(agents::Agents::default()),
+            keep_awake: Arc::new(keepawake::KeepAwake::default()),
             docnames: Arc::new(files::DocNameIndex::default()),
             scope: Arc::new(worktrees_core::authz::Projects::All),
             fetch: Arc::new(worktrees_core::fetchpolicy::Fetcher::Console),
@@ -271,6 +275,12 @@ impl Ctx {
     /// script the panes the agent rows read instead of touching tmux.
     pub fn with_agents(self, agents: agents::Agents) -> Ctx {
         Ctx { agents: Arc::new(agents), ..self }
+    }
+
+    /// This `Ctx` with its sleep hold replaced — the tests, which must not
+    /// keep the machine they run on awake.
+    pub fn with_keep_awake(self, keep_awake: keepawake::KeepAwake) -> Ctx {
+        Ctx { keep_awake: Arc::new(keep_awake), ..self }
     }
 
     /// The caller is the host's console (the engine's own work included),

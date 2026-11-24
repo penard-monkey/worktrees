@@ -1101,6 +1101,8 @@ pub fn place_activities(
     scan: &Scan,
 ) -> Vec<(&'static dyn Adapter, Activity)> {
     let canonical = project.session_name(slug);
+    let panes = scan.panes.map(|p| project.place_panes(slug, p));
+    let scan = &Scan { probes: scan.probes, panes: panes.as_deref() };
     ALL.iter().filter_map(|a| a.activity(scan, &canonical, path).map(|x| (*a, x))).collect()
 }
 

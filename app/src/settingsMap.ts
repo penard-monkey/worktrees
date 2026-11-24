@@ -99,6 +99,7 @@ export const HOST_KEYS = [
   "limits", // limits_settings, any [limits] entry
   "policy_preset", // policy_preset_status, a preset other than Balanced, or modified
   "fetch_interval", // get_fetch_interval ≠ 0
+  "keep_awake", // get_keep_awake .on
   "term_history", // get_term_history_opts, either switch off
   "planning_default", // planning_status .default set
   "profiles", // profiles_info, any profile
@@ -126,6 +127,7 @@ export const HOST_GETTERS: Record<HostKey, string> = {
   limits: "limits_settings",
   policy_preset: "policy_preset_status",
   fetch_interval: "get_fetch_interval",
+  keep_awake: "get_keep_awake",
   term_history: "get_term_history_opts",
   planning_default: "planning_status",
   profiles: "profiles_info",
@@ -203,6 +205,7 @@ export const SECTIONS: readonly SectionDef[] = [
   { id: "terminal-command", page: "general", tier: "advanced", label: "Terminal command", keywords: ["terminal app", "external terminal", "open in terminal", "iterm", "ghostty"], keys: ["terminal_cmd"] },
   { id: "pull-requests", page: "general", tier: "beginner", label: "Pull requests", keywords: ["prs", "pr status", "github", "gh"], keys: ["pull_requests"] },
   { id: "auto-fetch", page: "general", tier: "advanced", label: "Git", keywords: ["fetch", "git fetch", "background fetch", "refresh remotes", "interval"], host: ["fetch_interval"], scope: "computer", write: "set_fetch_interval" },
+  { id: "keep-awake", page: "general", tier: "beginner", label: "Keep awake", keywords: ["caffeinate", "caffeine", "sleep", "prevent sleep", "insomnia", "stay awake", "power"], host: ["keep_awake"], scope: "computer", write: "set_keep_awake" },
   { id: "projects-parent", page: "general", tier: "advanced", label: "New projects", keywords: ["clone", "clone folder", "project folder", "new project location", "directory"], keys: ["projects_parent"] },
   // One checkbox per beta feature (beta.ts BETA_FEATURES; `keys` lists every
   // feature's key, beta-check holds them equal). Beginner since 2026-11-14

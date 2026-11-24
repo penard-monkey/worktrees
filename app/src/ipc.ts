@@ -499,7 +499,7 @@ export const REMOTE_SETTINGS: Readonly<Record<string, string>> = {
 export const ADMIN_ROWS: readonly string[] = [
   "add_project", "probe_dir", "create_project", "clone_project", "clone_cancel", "init_repo",
   "create_initial_commit", "remove_project", "set_planning_default", "set_project_planning",
-  "set_quota_settings", "set_limits", "set_fetch_interval", "mcp_status", "mcp_uninstall", "codex_mcp_status",
+  "set_quota_settings", "set_limits", "set_fetch_interval", "set_keep_awake", "mcp_status", "mcp_uninstall", "codex_mcp_status",
   "codex_mcp_uninstall", "codex_mcp_migration_plan", "pi_mcp_status", "pi_mcp_uninstall", "kimi_mcp_status",
   "sync_hub_list", "sync_hubs", "sync_hub_choose", "sync_hub_forget", "sync_apply", "diagnostics", "log_tail", "set_term_history_opts", "term_history_info",
   "term_history_clear", "ui_events_clear", "profiles_info", "delete_profile", "skill_inspect",
@@ -523,7 +523,7 @@ export const CONSOLE_ROWS: readonly string[] = [
   "idea_relate", "idea_merge", "idea_combine", "idea_split", "idea_related", "idea_versions", "idea_restore",
   "idea_conversations", "idea_conversation_start", "idea_conversation_resume", "idea_conversation_close",
   "idea_conversation_remove", "idea_conversation_rename", "idea_turns", "idea_turn_text", "idea_tool_call",
-  "idea_prompt", "idea_answer", "idea_answer_text", "idea_answer_many", "idea_send", "idea_interrupt",
+  "idea_prompt", "idea_answer", "idea_answer_text", "idea_answer_many", "idea_send", "idea_interrupt", "idea_term_open",
   // named workspaces (idea board phase 2): desktop only
   "workspaces_list", "workspace_create", "workspace_rename", "workspace_remove", "workspace_set_projects",
   "workspace_reorder", "workspace_set_color",

@@ -549,7 +549,8 @@ pub fn shell_open(
     // idempotent, and only reached when this place has no shell yet. (Runs
     // under the registry lock — a tmux round-trip, but only on first open.)
     if worktrees_core::tmux::have_tmux() {
-        worktrees_core::tmux::kill_shell_sidecars(&session);
+        let under = format!("{cwd}/.worktrees");
+        worktrees_core::tmux::kill_shell_sidecars(&session, &cwd, (slug == "(main)").then_some(under.as_str()));
     }
 
     let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };

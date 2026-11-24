@@ -91,14 +91,28 @@ type MockHostPolicy = {
   fetch_interval_min: number;
   term_persist_scrollback: boolean;
   term_per_tab_history: boolean;
+  keep_awake: boolean;
 };
 const mockHostPolicy: MockHostPolicy = (() => {
   const d: MockHostPolicy = {
     codex_permissions: "auto-review", pi_project_trust: "never",
-    fetch_interval_min: 0, term_persist_scrollback: true, term_per_tab_history: true,
+    fetch_interval_min: 0, term_persist_scrollback: true, term_per_tab_history: true, keep_awake: false,
   };
   try { return { ...d, ...JSON.parse(sessionStorage.getItem(MOCK_HOST_POLICY_KEY) ?? "{}") }; } catch { return d; }
 })();
+// `?keepawake=none`: a host with no way to hold sleep off (no button);
+// `?keepawake=lost`: on, and the hold is not in effect.
+const keepAwakeParam = new URLSearchParams(location.search).get("keepawake");
+let mockKeepAwakeLost = keepAwakeParam === "lost";
+/** `keepawake::State`. */
+function mockKeepAwake() {
+  const supported = keepAwakeParam !== "none";
+  const on = supported && (mockHostPolicy.keep_awake || mockKeepAwakeLost);
+  return {
+    supported, on, held: on && !mockKeepAwakeLost, mechanism: supported ? "iokit" : null, os: supported ? "macos" : "linux",
+    error: mockKeepAwakeLost ? "the hold ended on its own; it is tried again within a minute" : null,
+  };
+}
 const mockHostPolicySets: { cmd: string; mode: string }[] = [];
 // `?env=codex,pi,guidance`: the engine was started with WORKTREES_CODEX_
 // PERMISSIONS=full / WORKTREES_PI_PROJECT_TRUST=ask / WORKTREES_AGENT_GUIDANCE
@@ -3151,6 +3165,16 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     }
     case "get_fetch_interval":
       return mockHostPolicy.fetch_interval_min;
+    case "get_keep_awake":
+      return mockKeepAwake();
+    case "set_keep_awake": {
+      if (typeof args.on !== "boolean") throw "invalid args `on`: invalid type: expected a boolean";
+      if (!mockKeepAwake().supported) throw "this computer has nothing Worktrees can hold sleep off with (Linux needs systemd and systemd-inhibit)";
+      setHostPolicy("set_keep_awake", { keep_awake: args.on });
+      mockKeepAwakeLost = false;
+      emitEvent("keep_awake:changed", mockKeepAwake());
+      return mockKeepAwake();
+    }
     case "detect_editors": {
       // `?editors=none|one|many` (default many) — the picker's three shapes:
       // no list at all (free text only), a single app, and apps + CLIs.
@@ -3535,7 +3559,13 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "privacy_denial":
       return fsDenied.get(args.path as string) ?? null;
 
+    case "idea_term_open":
     case "term_open": {
+      if (cmd === "idea_term_open") {
+        const c = convOf(args.id as string, args.conv as string);
+        if (!c.live) throw `no tmux session named ${convSession(c)}`;
+        args.session = convSession(c);
+      }
       // best-effort: render a canned banner into the xterm via the Channel
       // The middle lines are paths in the shapes agents print, so the
       // ⌘-click links (`resolve_term_paths` below) are drivable here: three
@@ -5923,7 +5953,7 @@ Phase 3: Frontend pane and mock harness
     }
     case "shares_all":
       consoleOnly(cmd);
-      return { shares: clone(mockShares), hidden_projects: [...mockHidden], owner: mockOwnerName };
+      return { shares: clone(mockShares), hidden_projects: [...mockHidden], owner: mockOwnerShown() };
     case "share_requests_list":
       consoleOnly(cmd);
       return mockRequests.filter((r) => !r.dismissed).map((r) => ({ id: r.id, principal: r.principal, name: mockGuests.find((g) => g.id === r.principal)?.name ?? null, project: r.project, slug: r.slug, note: r.note, at: r.at }));
@@ -6515,6 +6545,8 @@ type MockBinding = { harness: string; session: string; transcript: string; bound
 type MockShare = { id: string; project: string; slug: string; created_at: number; guests: { principal: string; state: string; since: number }[]; binding: MockBinding | null; ended: MockBinding[] };
 type MockThreadEntry = { seq: number; at: number; kind: string; id?: string; principal?: string; device?: string; text?: string; first?: number; last?: number };
 let mockOwnerName = "owner";
+/** As serve answers it: the record's placeholder "owner" is no name (null). */
+const mockOwnerShown = () => (mockOwnerName === "owner" ? null : mockOwnerName);
 const mockGuests: MockGuest[] = mockQuery.get("guests") === "0" ? [] : [{ id: "g_bret00001", name: "Bret", created_at: epochNow() - 2 * DAY }];
 let mockShares: MockShare[] = [];
 let mockRequests: { id: string; principal: string; project: string | null; slug: string; note: string | null; at: number; dismissed?: boolean }[] = [];
@@ -6550,7 +6582,7 @@ function mockShare(id: unknown): MockShare {
   return sh;
 }
 function threadView(e: MockThreadEntry) {
-  const name = e.principal === "owner" ? mockOwnerName : e.principal ? mockGuests.find((g) => g.id === e.principal)?.name ?? null : undefined;
+  const name = e.principal === "owner" ? mockOwnerShown() : e.principal ? mockGuests.find((g) => g.id === e.principal)?.name ?? null : undefined;
   const dev = e.device ? mockDevices.find((d) => d.id === e.device)?.name ?? null : undefined;
   return { ...e, ...(name !== undefined ? { name } : {}), ...(dev !== undefined ? { device_name: dev } : {}) };
 }

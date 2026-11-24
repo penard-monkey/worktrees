@@ -26,6 +26,7 @@ import { DocsPane } from "./DocsPane";
 import { PlanPane } from "./PlanPane";
 import { FilesPane, FileView, type DockAt } from "./FilesPane";
 import { FeedbackRailButton } from "./FeedbackSection";
+import { KeepAwakeRailButton } from "./KeepAwake";
 import { RELEASES_URL, SettingsSheet } from "./SettingsSheet";
 import { type McpStatus } from "./McpPanel";
 import { dismissPatch, offersTitle, pendingOffers, type Offer } from "./offers";
@@ -9671,6 +9672,9 @@ function App() {
         {ideasOn && <button className={"rail-icon" + (ideaWaiting ? " rail-waiting" : "")} data-waiting={ideaWaiting || undefined}
           title={ideaWaiting ? "Ideas — a conversation is waiting on you (⌘⇧I)" : "Ideas — open the Ideas window (⌘⇧I)"} data-testid="ideas-rail" onClick={openIdeas}><Icons.Lightbulb size={17} /></button>}
         <button className="rail-icon" title="add project" data-testid="add-menu-rail" onClick={openAddMenu}><Icons.FolderPlus size={17} /></button>
+        {/* The host's idle sleep (KeepAwake.tsx); nothing where the host has no
+            way to hold it. */}
+        <KeepAwakeRailButton onFail={fail} />
         {/* Renders nothing unless the widget initialized, so a build with no
             Orfis configuration leaves the rail exactly as it was. */}
         <FeedbackRailButton />
