@@ -1183,6 +1183,39 @@ pub fn typed_line_ok(text: &str) -> Result<(), String> {
     typed_ok(text, LINE_MAX, false)
 }
 
+/// The rule for ANSWER text (`agent_answer_text`, the multi-select box fill):
+/// [`typed_line_ok`]'s character rule (not empty, at most [`LINE_MAX`] bytes,
+/// one line, no control or invisible format character) with ONE leading
+/// character refused, `/`. An answer is not typed at the composer: it goes
+/// into a field the prompt itself opened, where `!` is not a shell, `#` is not
+/// memory and `@` is not (measured, see the fixtures' README) a file picker.
+/// The composer keeps its own, wider rule; do not merge the two.
+pub fn typed_answer_ok(text: &str) -> Result<(), String> {
+    typed_chars_ok(text, LINE_MAX, false)?;
+    if text.trim_start().starts_with('/') {
+        return Err("text may not start with '/' — a slash command is not an answer".into());
+    }
+    Ok(())
+}
+
+/// [`typed_answer_ok`] for the harness whose prompt the answer goes into.
+/// Only Claude's three fields are MEASURED (2.1.331: the free-text row, a
+/// preview question's notes, a permission prompt's amend field — `@ ! # /` all
+/// insert text, no menu and no mode change). A field of any other harness
+/// (Codex's question notes) is not, so there a leading `@ ! #` stays refused
+/// with the composer's reason: its field may open a file picker or run a shell.
+pub fn typed_answer_for(harness: &str, text: &str) -> Result<(), String> {
+    typed_answer_ok(text)?;
+    if harness != crate::provider::CLAUDE.id {
+        if let Some(c) = text.trim_start().chars().next().filter(|c| matches!(c, '@' | '!' | '#')) {
+            return Err(format!(
+                "text may not start with '{c}' in an answer to {harness}'s prompt — that field is not measured, and may open a file picker or run something"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The most a message may hold where line breaks are proved: measured whole,
 /// byte for byte in the record, on Claude 2.1.318 and Codex 0.162.1. Anything
 /// longer belongs in a file.
@@ -1252,6 +1285,16 @@ pub fn send_caps() -> serde_json::Value {
 }
 
 fn typed_ok(text: &str, max: usize, line_breaks: bool) -> Result<(), String> {
+    typed_chars_ok(text, max, line_breaks)?;
+    if let Some(c) = text.trim_start().chars().next().filter(|c| matches!(c, '/' | '@' | '!' | '#')) {
+        return Err(format!("text may not start with '{c}' — at an agent's prompt that runs something, it is not a message"));
+    }
+    Ok(())
+}
+
+/// The character rule shared by every typed text: empty, length, control and
+/// invisible characters. No leading-character rule: that is the caller's.
+fn typed_chars_ok(text: &str, max: usize, line_breaks: bool) -> Result<(), String> {
     if text.trim().is_empty() {
         return Err("text is empty".into());
     }
@@ -1275,9 +1318,6 @@ fn typed_ok(text: &str, max: usize, line_breaks: bool) -> Result<(), String> {
              Unicode format or separator character): what the agent read would differ from what was shown",
             c as u32
         ));
-    }
-    if let Some(c) = text.trim_start().chars().next().filter(|c| matches!(c, '/' | '@' | '!' | '#')) {
-        return Err(format!("text may not start with '{c}' — at an agent's prompt that runs something, it is not a message"));
     }
     Ok(())
 }
@@ -1397,6 +1437,32 @@ mod tests {
         for fine in ["plain", "naïve café", "مرحبا بالعالم", "日本語のテキスト", "a → b", "emoji 🙂 ok", "x".repeat(LINE_MAX).as_str()] {
             assert_eq!(typed_line_ok(fine), Ok(()), "{fine:?}");
         }
+    }
+
+    /// An answer goes into a field the prompt opened, not the composer: only a
+    /// leading `/` is refused; the character rule is the composer's.
+    #[test]
+    fn an_answer_may_start_with_a_symbol_but_not_a_slash() {
+        for fine in ["#2. Also, let's use the prefix ot instead of go.", "!important", "@here", "- item", "* item", "2. two", "  #indented"] {
+            assert_eq!(typed_answer_ok(fine), Ok(()), "{fine:?}");
+            assert_eq!(typed_answer_for("claude", fine), Ok(()), "{fine:?} for claude");
+            assert!(typed_line_ok(fine).is_ok() == !fine.trim_start().starts_with(['#', '!', '@']), "the composer's rule is untouched: {fine:?}");
+        }
+        for lead in ["/clear", "  /logout", "/"] {
+            assert!(typed_answer_ok(lead).unwrap_err().contains("may not start with '/'"), "{lead:?}");
+        }
+        for (bad, why) in [("two\nlines", "ONE line"), ("a\tb", "control character"), ("bidi \u{202E}x", "invisible"), ("  ", "empty")] {
+            assert!(typed_answer_ok(bad).unwrap_err().contains(why), "{bad:?}");
+        }
+        assert!(typed_answer_ok(&"x".repeat(LINE_MAX + 1)).unwrap_err().contains("4096"));
+        assert_eq!(typed_answer_ok(&"x".repeat(LINE_MAX)), Ok(()));
+        // Only Claude's fields are measured; another harness keeps `@ ! #` refused.
+        for lead in ["#2. x", "!x", "@x"] {
+            let e = typed_answer_for("codex", lead).unwrap_err();
+            assert!(e.contains("not measured"), "{lead:?}: {e}");
+        }
+        assert_eq!(typed_answer_for("codex", "- item"), Ok(()));
+        assert!(typed_answer_for("codex", "/x").unwrap_err().contains("'/'"));
     }
 
     #[test]
