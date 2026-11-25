@@ -443,7 +443,7 @@ export type ToolCall = { name: string; call_id?: string; summary?: string; faile
 export type Item =
   | { k: "sep"; key: string; at: number }
   | { k: "earlier"; key: string }
-  | { k: "user"; key: string; text: string; at: number | null; midTurn?: boolean; cut?: true; turnId?: string; engine?: string }
+  | { k: "user"; key: string; text: string; at: number | null; midTurn?: boolean; cut?: true; turnId?: string; engine?: Turn["engine"] }
   | { k: "notice"; key: string; notice: Notice; at: number | null }
   | { k: "reply"; key: string; text: string; tools: string[]; calls: ToolCall[]; truncated: boolean; at: number | null; label: boolean; turnId?: string }
   | { k: "asked"; key: string; step: AskedStep; label: boolean }

@@ -73,20 +73,14 @@ eq("the engine's own names", ["Chat 3", "Chat three", "Chat 3b", "Release order"
 eq("from the first line, whole", W.titleFrom("\n  Which   ships first?\nand why"), "Which ships first?");
 eq("cut at a word", W.titleFrom("What order should we ship the Jellyfin role and the config repository in, please?"), "What order should we ship the Jellyfin…");
 eq("forty characters is whole", W.titleFrom("x".repeat(40)).length, 40);
-eq("the engine's own words are a quiet line, and only this chat's", [W.engineLine("Read chats/c1/start.md and begin.", "c1"), W.engineLine("Read chats/c2/start.md and begin.", "c1"), W.engineLine("Read chats/c1/start.md and begin. Please.", "c1")], ["The chat was started.", null, null]);
-eq("a fold's opener names its file by its whole path", W.engineLine("Read /Users/d/.local/share/worktrees/workspaces/01M/chats/c1/fold.md and do what it says.", "c1"), "The chat was asked to fold into memory.");
-const FOLD = "Read /Users/d/Library/App Support/worktrees/workspaces/01M/chats/c1/fold.md and do what it says. This is fold 01JDWSFOLD0000000000000001.";
-eq("…and its attempt's id", W.engineLine(FOLD, "c1"), "The chat was asked to fold into memory.");
-eq("a person's words about one are theirs", ["Read /w/chats/c1/fold.md and do what it says. Then stop.", `Why did it say “${FOLD}”?`, FOLD.replace("c1", "c2")].map((t) => W.engineLine(t, "c1")), [null, null, null]);
+const OPENER = "Read /Users/d/.local/share/worktrees/workspaces/01M/chats/c1/fold.md and do what it says. This is fold 01JDWSFOLD0000000000000001.";
+eq("a turn the engine sent is a quiet line, whatever its words", [{ user: OPENER, engine: "fold" }, { user: "Anything", engine: "start" }, { user: OPENER }, { user: "Hello" }].map(W.quietLine), ["The chat was asked to fold into memory.", "The chat was started.", null, null]);
 eq("the folder-trust question", [W.asksTrust(["Accessing workspace:", "/x/workspaces/01M", "Yes, I trust this folder"]), W.asksTrust(["Edit file", "memory/MEMORY.md"]), W.asksTrust(undefined)], [true, false, false]);
 eq("a blank message names nothing", W.titleFrom(" \n "), null);
 const t = (user, notice) => ({ user, ...(notice ? { notice } : {}) });
-eq("…and names no chat", W.firstMessage([t("Read /w/chats/c1/fold.md and do what it says.")], "c1"), null);
-eq("the person's first: not the opener, not Claude's notice, not a turn of its own", W.firstMessage([t(null), t("Read chats/c1/start.md and begin."), t("x", { kind: "task" }), t("Hello"), t("Later")], "c1"), "Hello");
-eq("an opener of this engine or of another names no chat: nothing that starts by reading this chat's own folder", [FOLD, "Read /w/chats/c1/fold.md and do what it says", "Read /w/chats/c1/fold.md, then do it (attempt 4).", "Read chats/c1/next.md and begin."].map((x) => W.firstMessage([{ user: x }], "c1")), [null, null, null, null]);
-eq("…while a person who asks to read another file does", W.firstMessage([{ user: FOLD }, { user: "Read /w/plan.md and tell me what is missing." }], "c1"), "Read /w/plan.md and tell me what is missing.");
-eq("an engine's mark, when it gives one, is the word", [W.firstMessage([{ user: "Anything at all", engine: "fold" }, { user: "Hello" }], "c1"), W.quietLine({ user: "Anything at all", engine: "fold" }, "c1"), W.quietLine({ user: "Anything", engine: "start" }, "c1"), W.quietLine({ user: "Hello" }, "c1")], ["Hello", "The chat was asked to fold into memory.", "The chat was started.", null]);
-eq("nothing said yet", W.firstMessage([t("Read chats/c1/start.md and begin.")], "c1"), null);
+eq("the person's first: not the engine's, not Claude's notice, not a turn of its own", W.firstMessage([t(null), { user: "Read chats/c1/start.md and begin.", engine: "start" }, t("x", { kind: "task" }), { user: OPENER, engine: "fold" }, t("Hello"), t("Later")]), "Hello");
+eq("the same words from a person are theirs", W.firstMessage([{ user: OPENER, engine: "fold" }, t(OPENER)]), OPENER);
+eq("nothing said yet", W.firstMessage([{ user: "Read chats/c1/start.md and begin.", engine: "start" }]), null);
 
 // ── the desk rows: two kinds, the same acts, and no place's row in either ──
 const chatTs = read("../src/chat.ts");

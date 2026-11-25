@@ -53,6 +53,16 @@ async function unsent(page, tag) {
   ok(!/chats\/|fold\.md/.test(await page.locator("[data-testid=ws-chats], [data-testid=nav]").first().innerText().catch(() => "")) && !(await call(page, "workspace_chats", { id: ws })).chats.some((c) => /^Read /.test(c.title)), `${tag} …in the list too`);
   const list = await page.locator("[data-testid=chat-list]").innerText();
   ok(/The chat was asked to fold into memory\./.test(list) && !/fold\.md|\/Users\//.test(list) && await page.locator("[data-testid=chat-user]").count() === 0, `${tag} the opener is a quiet line: no bubble, no path, no id`);
+  // The engine's word is its mark: the same words from a person are their message.
+  await page.click("[data-testid=ws-chat-resume]");
+  await until(page, () => document.querySelector("[data-testid=ws-chat-col]").dataset.state === "running", null, 6000);
+  const conv = await page.evaluate(() => document.querySelector("[data-testid=ws-chat-col]").dataset.chat);
+  const box = page.locator("[data-testid=ws-chat-col] textarea").first();
+  await box.fill(`Read chats/${conv}/start.md and begin.`);
+  await box.press("Enter");
+  ok(await until(page, () => document.querySelectorAll("[data-testid=ws-chat-col] [data-testid=chat-user]").length === 1 && /start\.md and begin/.test(document.querySelector("[data-testid=ws-chat-col] [data-testid=chat-user]").textContent), null, 8000), `${tag} the same words from a person are their message, in a bubble`);
+  ok(await until(page, () => document.querySelector("[data-testid=ws-chat-col]").dataset.state === "running", null, 8000) && /^Chat \d+$/.test(await named()), `${tag} …which the engine will not take for a name (${await named()})`);
+  ok(!/Could not name/.test(await page.locator("body").innerText()), `${tag} …and nobody is told of that`);
 }
 
 async function land(page, tag, name) {
