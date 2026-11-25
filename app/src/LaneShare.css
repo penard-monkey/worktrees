@@ -21,7 +21,7 @@
 .ls-guest-meta { margin-left: var(--s1); }
 .ls-new { color: var(--txt-hi); }
 .ls-reach { border: 1px solid var(--line); border-radius: var(--r-md); padding: var(--s2) var(--s3); display: flex; flex-direction: column; gap: var(--s2); background: var(--bg-panel); }
-.ls-reach select { background: var(--bg-input); color: var(--txt-hi); border: 1px solid var(--line-strong); border-radius: var(--r-md); padding: 5px 8px; font: inherit; }
+.ls-reach select { background: var(--bg-field); color: var(--txt-hi); border: 1px solid var(--line-field); border-radius: var(--r-md); padding: 5px 8px; font: inherit; }
 .ls-share-body:empty { display: none; }
 .ls-guests { list-style: none; margin: var(--s2) 0 0; padding: 0; display: flex; flex-direction: column; gap: var(--s1); }
 .ls-guests li { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); color: var(--txt-hi); }
