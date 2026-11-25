@@ -57,7 +57,7 @@ pub const START: &str = "start.md";
 pub const CONTEXT: &str = "context.md";
 /// What a fold's Claude is told, in the chat's own folder.
 pub const FOLD: &str = "fold.md";
-/// The whole reply of a fold that found nothing to keep.
+/// The line a fold's reply holds, on its own, when it changed nothing.
 pub const NOTHING: &str = "No memory changes.";
 /// A fold's states in the record ([`Fold::state`]).
 pub const FOLDING: &str = "folding";
@@ -681,8 +681,9 @@ pub fn fold_text(folder: &Path, c: &Chat) -> String {
          3. Write nowhere else. Do not commit: the app does. Start no new work and ask no question.\n\
          4. Then say in two lines what you changed.\n\
          \n\
-         If nothing in this chat is worth keeping, change no file at all, the note included, and reply with\n\
-         exactly `{NOTHING}`\n",
+         If there is nothing to write, because nothing in this chat is worth keeping or because the note and\n\
+         the index already say all of it, change no file at all. Your reply must then END with this line, on\n\
+         its own: `{NOTHING}` The app waits for a new note or for that line, and nothing else ends a fold.\n",
         memory = memory.display(),
         note = note.display(),
     )
@@ -702,13 +703,13 @@ pub fn write_fold_at(root: &Path, ws: &str, c: &Chat) -> Result<String, String> 
 }
 
 /// Whether the newest turn of a fold's transcript is the fold's, and its
-/// reply says there was nothing to keep. `turn` is the newest: its prompt
+/// reply says, on a line of its own, that it changed nothing. `turn` is the newest: its prompt
 /// must be this fold's opener, written no earlier than the fold (`asked_ms`),
 /// or an earlier fold's answer would end this one.
 pub fn said_nothing(turn: &crate::turns::Turn, opener: &str, asked_ms: u64) -> bool {
     turn.user.as_deref().map(str::trim) == Some(opener)
         && turn.at.is_some_and(|at| at >= (asked_ms / 1000) as i64)
-        && turn.reply.lines().map(str::trim).filter(|l| !l.is_empty()).last() == Some(NOTHING)
+        && turn.reply.lines().any(|l| l.trim().trim_matches(['`', '*', '_']) == NOTHING)
 }
 
 /// The other chats of `ws` that have a note, oldest first, for `context.md`.

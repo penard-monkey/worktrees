@@ -983,12 +983,13 @@ mod tests {
             ("something else", "2027-01-15T08:00:05Z", "No memory changes."),
             (opener.as_str(), "2027-01-15T08:00:05Z", "Should I keep the part about disks?"),
             (opener.as_str(), "2027-01-15T08:00:05Z", "No memory changes. But look at this."),
+            (opener.as_str(), "2027-01-15T08:00:05Z", "I would not say: No memory changes."),
         ] {
             set(u, at, r);
             d.tick(3);
             assert!(d.tick(3).0.is_empty(), "{u} {at} {r}");
         }
-        set(&opener, "2027-01-15T08:00:05Z", "I looked.\n\nNo memory changes.");
+        set(&opener, "2027-01-15T08:00:05Z", "I looked.\n\n`No memory changes.`");
         let (n, _) = d.tick(3);
         assert_eq!((n[0].event, n[0].commit.clone()), ("nothing", None));
         let f = d.rec(&conv).fold.unwrap();
