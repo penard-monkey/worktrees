@@ -1014,12 +1014,14 @@ fn template(name: &str) -> String {
 }
 
 /// Make workspace `id`'s memory, or finish making it. One already made is left
-/// exactly as it is.
+/// exactly as it is; one whose folder is gone is put back as its history has
+/// it.
 pub fn init_at(root: &Path, id: &str, name: &str) -> Result<Status, String> {
     wsfolder::refuse_real(root)?;
     let held = wslock::take(root, id)?;
     let top = wsfolder::make_at(root, id)?;
     let top = Dir::open(&top).map_err(|e| format!("{}: {e}", top.display()))?;
+    let absent = top.stat(DIR).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
     let mem = top.make(DIR).map_err(|e| format!("{DIR}: {e}"))?;
     let place = match place(root, id)? {
         Some(p) => p,
@@ -1032,16 +1034,23 @@ pub fn init_at(root: &Path, id: &str, name: &str) -> Result<Status, String> {
         }
     };
     let repo = Repo::open(place)?;
-    if !repo.has_commits() {
+    let first = !repo.has_commits();
+    if first || absent {
         repo.prepare()?;
-        let mem = &repo.place.mem;
         for d in ["notes", "topics", FILES] {
-            mem.make(d).map_err(|e| format!("{d}: {e}"))?;
+            repo.place.mem.make(d).map_err(|e| format!("{d}: {e}"))?;
         }
+    }
+    if first {
+        let mem = &repo.place.mem;
         if mem.stat(INDEX).is_err() {
             fsx::write_atomic_in(mem, INDEX, template(name).as_bytes(), None).map_err(|e| format!("{INDEX}: {e}"))?;
         }
         commit_held(&repo, Some(MADE))?;
+    } else if absent {
+        // The folder went and its history did not.
+        repo.bytes(&["read-tree", "HEAD"])?;
+        repo.bytes(&["checkout-index", "--all", "--quiet"])?;
     }
     drop(held);
     status_at(root, id)
@@ -2908,6 +2917,29 @@ mod tests {
         s.put("topics/t.md", "x");
         assert!(ids_at(&s.root).is_empty());
         assert_eq!(commit_if_dirty_at(&s.root, &s.id, None).unwrap(), None);
+    }
+
+    /// The folder went and its history did not: the files are put back as the
+    /// history has them, and nothing is committed as removed. One that is only
+    /// emptied is as somebody left it.
+    #[test]
+    fn a_memory_whose_folder_went_is_put_back_from_its_history() {
+        let s = Scratch::made("went");
+        s.put("topics/t.md", "a\r\n");
+        s.put(".gitattributes", "*.md text eol=lf\n");
+        s.commit("t");
+        let n = s.log().len();
+        for gone in [s.mem(), s.root.join(&s.id)] {
+            fs::remove_dir_all(&gone).unwrap();
+            assert!(!status_at(&s.root, &s.id).unwrap().made && commit_if_dirty_at(&s.root, &s.id, None).unwrap().is_none());
+            assert_eq!(init_at(&s.root, &s.id, "Another").unwrap(), Status { made: true, dirty: vec![] });
+            assert_eq!((s.text("topics/t.md").as_str(), s.text(INDEX).starts_with("# Memory: Personal"), s.log().len()), ("a\r\n", true, n));
+            assert!(s.mem().join("notes").is_dir() && s.mem().join(FILES).is_dir());
+        }
+        for f in [INDEX, "topics/t.md"] {
+            fs::remove_file(s.mem().join(f)).unwrap();
+        }
+        assert_eq!(init_at(&s.root, &s.id, "Another").unwrap().dirty, vec![INDEX, "topics/t.md"]);
     }
 
     /// What is undone is read once for a head, and again for another: a commit,
