@@ -30,7 +30,7 @@
 .thread-fail { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1); margin-top: var(--s1); font-size: var(--fs-meta); color: var(--txt-hi); }
 .thread-error { flex: none; padding: var(--s1) var(--s3); font-size: var(--fs-meta); color: var(--txt-hi); background: color-mix(in srgb, var(--danger) 14%, var(--bg-panel)); }
 .thread-compose { flex: none; display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--s2); padding: var(--s2) var(--s3); border-top: 1px solid var(--line); }
-.thread-field { flex: 1; min-width: 0; resize: none; font: inherit; font-size: var(--fs-body); color: var(--txt-hi); background: var(--bg-input); border: 1px solid var(--line); border-radius: var(--r-sm, 4px); padding: var(--s1) var(--s2); }
+.thread-field { flex: 1; min-width: 0; resize: none; font: inherit; font-size: var(--fs-body); color: var(--txt-hi); background: var(--bg-field); border: 1px solid var(--line-field); border-radius: var(--r-sm, 4px); padding: var(--s1) var(--s2); }
 .thread-field:focus { outline: none; border-color: var(--line-strong); }
 .thread-problem { flex-basis: 100%; font-size: var(--fs-meta); color: var(--txt-hi); }
 
@@ -38,7 +38,7 @@
 .usethese { flex: none; border-top: 1px solid var(--line); padding: var(--s2) var(--s3); display: flex; flex-direction: column; gap: var(--s2); font-size: var(--fs-meta); }
 .usethese-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); }
 .usethese-row .grow { flex: 1; min-width: 0; color: var(--txt-dim); }
-.usethese-note { flex: 1; min-width: 0; font: inherit; font-size: var(--fs-body); color: var(--txt-hi); background: var(--bg-input); border: 1px solid var(--line); border-radius: var(--r-sm, 4px); padding: var(--s1) var(--s2); }
+.usethese-note { flex: 1; min-width: 0; font: inherit; font-size: var(--fs-body); color: var(--txt-hi); background: var(--bg-field); border: 1px solid var(--line-field); border-radius: var(--r-sm, 4px); padding: var(--s1) var(--s2); }
 .usethese-preview { margin: 0; max-height: 14em; overflow: auto; font-family: var(--font-mono); font-size: var(--fs-micro); white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg-input); border: 1px solid var(--line); border-radius: var(--r-sm, 4px); padding: var(--s2); color: var(--txt); }
 .usethese-label { font-weight: var(--fw-med); color: var(--txt-hi); }
 .usethese-words { color: var(--txt-hi); }

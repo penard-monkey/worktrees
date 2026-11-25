@@ -14,6 +14,7 @@ import type { McpStatus } from "../McpPanel";
 import type { CodexMcpStatus } from "../CodexMcpPanel";
 import type { PiMcpStatus } from "../PiMcpPanel";
 import type { KimiMcpStatus, KimiStatus } from "../KimiPanel";
+import type { CodexTrustStatus } from "../CodexTrustPanel";
 import type { UserSkill } from "../AgentSetup";
 import type { GuidanceStatus } from "../GuidancePanel";
 import type { CrossProjectStatus } from "../CrossProjectPanel";
@@ -111,6 +112,7 @@ export type HostSnap = {
   preset?: PresetStatus;
   pi?: PiStatus;
   kimi?: KimiStatus;
+  codex?: CodexTrustStatus;
   profiles?: { count: number; hasDefault: boolean };
 };
 

@@ -1250,6 +1250,7 @@ mod tests {
             "kimi_mcp = \"mutations\"\n",
             "[trust]\nkimi = [\"/repo\"]\n",
             "[trust]\npi = [\"/repo\"]\n",
+            "[trust]\ncodex = [\"/repo\"]\n",
             "[model]\npi = \"x/y\"\n",
             // Cross-project reach is the user's to grant (cross-project §5).
             "cross_project = \"full\"\n",

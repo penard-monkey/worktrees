@@ -90,7 +90,7 @@
 .ra-projects { max-height: 11rem; overflow-y: auto; }
 .ra-days { width: 5em; }
 .ra-days, .ra-date, .ra-name-input, .ra-link input {
-  background: var(--bg-input); color: var(--txt-hi); border: 1px solid var(--line);
+  background: var(--bg-field); color: var(--txt-hi); border: 1px solid var(--line-field);
   border-radius: var(--r-sm); padding: 2px var(--s2); font-size: var(--fs-label); font-family: inherit;
 }
 .ra-scope .seg { align-self: flex-start; }

@@ -24,9 +24,10 @@ export type ImageSrc =
 
 const SCHEME = /^[a-z][a-z0-9+.-]*:/i;
 
-/** `src` as an agent wrote it, for the place at `root` (its absolute path).
- *  `isMain` is the project's `(main)`, where `.worktrees/` is not the place's. */
-export function chatImageSrc(src: string, alt: string, root: string, isMain = false): ImageSrc {
+/** `src` as an agent wrote it, for the place at `root` (its absolute path), or
+ *  null in a guest's view, which is never told it: an absolute path is then the
+ *  host's alone to judge (`shared_image`). `isMain` is the project's `(main)`, where `.worktrees/` is not the place's. */
+export function chatImageSrc(src: string, alt: string, root: string | null, isMain = false): ImageSrc {
   const what = alt ? `${alt} (${src})` : src;
   const raw = src.trim();
   if (/^https?:/i.test(raw) || raw.startsWith("//")) return { kind: "note", text: `[remote image not loaded: ${what}]` };
@@ -34,8 +35,8 @@ export function chatImageSrc(src: string, alt: string, root: string, isMain = fa
   let path = raw;
   try { path = decodeURIComponent(raw); } catch { /* an unescaped % is part of the name */ }
   if (path.includes("\0") || path.includes("\\")) return { kind: "note", text: `[image not shown: not a path in this place: ${what}]` };
-  const base = root.replace(/\/+$/, "");
-  const parts = path.startsWith("/")
+  const base = root?.replace(/\/+$/, "");
+  const parts = base !== undefined && path.startsWith("/")
     ? (path === base || path.startsWith(base + "/") ? path.slice(base.length + 1).split("/") : null)
     : path.split("/");
   if (!parts || parts.some((p) => p === "..") ) return { kind: "note", text: `[image not shown: outside this place: ${path}]` };

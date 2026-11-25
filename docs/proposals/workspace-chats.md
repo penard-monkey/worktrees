@@ -56,15 +56,18 @@ that folder, and its chats run there.**
 
 ```
  ~/.local/share/worktrees/workspaces/<workspace id>/     the workspace's folder (cwd of every chat)
-   chats.json                         the chats (the record)
    chats/<conv>/start.md              what a chat opens on (fixed template)
    chats/<conv>/context.md            projects, places, plan, ideas: a snapshot the engine writes
    chats/<conv>/fold.md               the fold's instructions (fixed template)
-   memory/                            a git repository; the engine commits it
+   memory/                            the memory; its history is the engine's (below)
      MEMORY.md                        the index: always read, kept short
      notes/2026-11-24-storage-layout.md    one note per folded chat
      topics/nas-layout.md             anything that grew past a few lines
      files/rack.png                   images and other attachments
+ ~/.local/share/worktrees/workspaces/.engine/<workspace id>/   the engine's own half, never in a chat's cwd
+   chats.json                         the chats (the record)
+   memory.git                         the memory's git dir; the engine commits it
+   (locks)                            every lock the chats and the memory take
 
  tmux: worktrees~ws~<conv>            one session per live chat; never a place
  --add-dir <root>                     each of the workspace's projects, to read
@@ -102,7 +105,7 @@ directories.**
 | Harness | Claude only, at first. The idea launcher this is modelled on runs Claude only and needs `--session-id` (**checked**, `ideasessions.rs` `launch_line`, `session_id_floor`). |
 | Working directory | The workspace's folder, `<data dir>/worktrees/workspaces/<workspace id>/`. The id is the workspace's ULID, so a rename moves nothing. An override variable moves the parent, as `WORKTREES_IDEAS_DIR` moves the ideas folder, and never `XDG_DATA_HOME` (AGENTS.md). |
 | tmux session | `worktrees~ws~<conv ULID>`. `~` cannot appear in a place's session (**checked**, `ideasessions.rs` header). The four readers that skip `~idea~` today (**checked**, `tmux.rs:600`, `:636`, `:689`, `watch.rs:262`) ask one shared predicate that covers both markers. |
-| Record | `chats.json` in the workspace's folder: the idea record's shape (id, harness, session id, title, started) plus `fold`. |
+| Record | `chats.json` in the engine's half, `.engine/<workspace id>/`, never in the chat's cwd (a file the chat can write is never what the engine trusts): the idea record's shape (id, harness, session id, title, started) plus `fold`. |
 | Limits | Counts toward `[limits] max_live_agents` and passes the quota gate, as an idea session does (**checked**, `launch_at`). |
 | Not a project | The folder must be outside every registered project, the rule `check_root` holds for the ideas folder (**checked**, `ideasessions.rs:351`). `add_project` refuses a path under it, so the memory repository can never be registered. |
 
@@ -483,10 +486,10 @@ existing bodies, one event, and no database.**
 
 | File | Written by |
 |---|---|
-| `<ws folder>/chats.json` | The engine, atomically |
+| `.engine/<workspace id>/chats.json` | The engine, atomically |
 | `<ws folder>/chats/<conv>/start.md`, `context.md`, `fold.md` | The engine |
 | `<ws folder>/memory/**` | The agent and the person; `MEMORY.md` first by the app |
-| `<ws folder>/memory/.git` | git, called only by the engine |
+| `.engine/<workspace id>/memory.git` | git, called only by the engine (the memory's git dir, outside the folder a chat works in) |
 | `workspaces.json` | Unchanged. The folder is found by the workspace's id, so no new reference is stored |
 
 ### 5.2 The object

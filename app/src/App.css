@@ -235,8 +235,8 @@ html[data-places-side="right"] .rail-group .rail-icon.active::before { left: aut
 
 .search {
   margin: 0 var(--s3) var(--s2); padding: var(--s2) var(--s3);
-  background: var(--bg-input); color: var(--txt);
-  border: 1px solid var(--line); border-radius: var(--r-md); font-size: var(--fs-label);
+  background: var(--bg-field); color: var(--txt);
+  border: 1px solid var(--line-field); border-radius: var(--r-md); font-size: var(--fs-label);
   outline: none;
 }
 .search:focus { border-color: var(--line-strong); }
@@ -627,7 +627,7 @@ html[data-places-side="right"] .rail-group .rail-icon.active::before { left: aut
 /* ── new-worktree form ── */
 .newform { display: flex; flex-direction: column; gap: var(--s2); margin: var(--s1) var(--s3) var(--s2); }
 .newform input {
-  background: var(--bg-input); color: var(--txt); border: 1px solid var(--line);
+  background: var(--bg-field); color: var(--txt); border: 1px solid var(--line-field);
   border-radius: var(--r-sm); padding: var(--s2); font-size: var(--fs-label); outline: none;
 }
 .newform input:focus { border-color: var(--line-strong); }
@@ -1895,7 +1895,7 @@ body.dragging .menu-catch { pointer-events: none; }
 /* double-click the label → this box, sized to sit inside the tab chrome */
 .termtab-rename {
   width: 9ch; min-width: 0; margin: 1px var(--s1); padding: 1px var(--s1);
-  background: var(--bg-input); border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+  background: var(--bg-field); border: 1px solid var(--line-field); border-radius: var(--r-sm);
   color: var(--txt-hi); font: inherit; outline: none;
 }
 .termtab-x {
@@ -2062,8 +2062,8 @@ body.dragging .menu-catch { pointer-events: none; }
   border-radius: 0; box-shadow: none; background: var(--bg-panel);
 }
 .find-q {
-  width: 20ch; min-width: 5ch; flex: 0 1 auto; background: var(--bg-input); color: var(--txt-hi);
-  border: 1px solid var(--line); border-radius: var(--r-sm);
+  width: 20ch; min-width: 5ch; flex: 0 1 auto; background: var(--bg-field); color: var(--txt-hi);
+  border: 1px solid var(--line-field); border-radius: var(--r-sm);
   padding: 2px var(--s2); font-family: inherit; font-size: var(--fs-label);
 }
 .find-q::placeholder { color: var(--txt-mute); }
@@ -2469,7 +2469,7 @@ body.dragging .menu-catch { pointer-events: none; }
 }
 .switchto {
   flex: 0 1 200px; min-width: 0;
-  background: var(--bg-input); color: var(--txt); border: 1px solid var(--line);
+  background: var(--bg-field); color: var(--txt); border: 1px solid var(--line-field);
   border-radius: var(--r-sm); padding: 3px var(--s2); font-size: var(--fs-meta); outline: none;
 }
 .switchto:focus { border-color: var(--line-strong); }
@@ -2975,7 +2975,7 @@ body.dragging .menu-catch { pointer-events: none; }
 .setting .val { color: var(--txt-dim); font-weight: var(--fw-body); float: right; }
 .setting input[type="range"] { width: 100%; accent-color: var(--accent); }
 .setting input[type="text"], .setting input[type="number"], .setting select {
-  background: var(--bg-input); border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--bg-field); border: 1px solid var(--line-field); border-radius: var(--r-sm);
   padding: var(--s2); font-size: var(--fs-label); color: var(--txt); outline: none;
 }
 .setting input:focus, .setting select:focus { border-color: var(--line-strong); }
@@ -3059,7 +3059,7 @@ body.dragging .menu-catch { pointer-events: none; }
    is instructions for a model rather than prose. */
 .setting textarea {
   width: 100%;
-  background: var(--bg-input); border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--bg-field); border: 1px solid var(--line-field); border-radius: var(--r-sm);
   padding: var(--s2); font-size: var(--fs-label); color: var(--txt); outline: none;
   font-family: var(--font-mono);
   resize: vertical;
@@ -3100,7 +3100,7 @@ body.dragging .menu-catch { pointer-events: none; }
   width: 7.5em; min-width: 0; font-family: inherit; font-size: var(--fs-meta);
   padding: var(--s1) var(--s2) var(--s1) calc(var(--s2) + 12px + var(--s1));
   background: var(--bg-field); color: var(--txt-hi);
-  border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+  border: 1px solid var(--line-field); border-radius: var(--r-sm);
   transition: width var(--dur) var(--ease);
 }
 .settings-search.wide .settings-search-input { width: 18em; }
@@ -3343,7 +3343,7 @@ body.dragging .menu-catch { pointer-events: none; }
 }
 .docs-q {
   flex: 1; min-width: 0; padding: 3px var(--s2);
-  background: var(--bg-input); border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--bg-field); border: 1px solid var(--line-field); border-radius: var(--r-sm);
   color: var(--txt-hi); font: inherit; outline: none;
 }
 .docs-q:focus { border-color: var(--line-strong); }
@@ -4248,3 +4248,52 @@ body.dragging .ws-h { cursor: grabbing; }
 .ws-ov-state.to-clone::before, .ws-ov-state.to-create::before { background: var(--warn); }
 .ws-ov-detail { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ws-ov-brief { margin: 0 var(--s3) var(--s2); padding: var(--s2); white-space: pre-wrap; font-size: var(--fs-meta); background: var(--bg-panel); border: 1px solid var(--line); border-radius: 6px; color: var(--txt-hi); }
+
+/* ── Editable fields: one answer to "can I type here?" ─────────────────────
+   Fill: --bg-field (lighter than the panel in the light themes). Edge:
+   --line-field, >= 3:1 against the surface. Focus: the accent edge plus an OUTLINE ring (a select's box-shadow does not paint in WebKit)
+   (it was --line-strong, 1.5:1, an edge change nobody could see; :focus, not
+   :focus-visible, which WebKit does not set on a select a script focuses). A
+   DISABLED field drops the fill and the contrast and shows not-allowed, so the
+   two states cannot be mistaken (fieldlook-browser.mjs measures both). */
+.setting input[type="text"]:focus,
+.setting input[type="number"]:focus,
+.setting select:focus,
+.setting textarea:focus,
+.search:focus,
+.newform input:focus,
+.switchto:focus,
+.docs-q:focus,
+.np-input:focus,
+.find-q:focus,
+.termtab-rename:focus,
+.settings-search-input:focus {
+  border-color: var(--accent); outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: 0;
+}
+.setting input[type="text"]::placeholder,
+.setting input[type="number"]::placeholder,
+.setting select::placeholder,
+.setting textarea::placeholder,
+.search::placeholder,
+.newform input::placeholder,
+.switchto::placeholder,
+.docs-q::placeholder,
+.np-input::placeholder,
+.find-q::placeholder,
+.termtab-rename::placeholder,
+.settings-search-input::placeholder { color: var(--txt-dim); opacity: 1; }
+.setting input[type="text"]:disabled,
+.setting input[type="number"]:disabled,
+.setting select:disabled,
+.setting textarea:disabled,
+.search:disabled,
+.newform input:disabled,
+.switchto:disabled,
+.docs-q:disabled,
+.np-input:disabled,
+.find-q:disabled,
+.termtab-rename:disabled,
+.settings-search-input:disabled {
+  background: transparent; border-color: var(--line); color: var(--txt-mute);
+  cursor: not-allowed; opacity: 0.7;
+}

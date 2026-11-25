@@ -128,6 +128,7 @@ no guest, §2.1.)
 | Ask to join | A guest | New row `share_join`. Grants nothing until the owner allows. |
 | Hear that something changed | A guest's connected sockets, and the console | New event `shares:changed`, emitted on share, Share again, allow, remove, end, and a request (§6) |
 | Read the shared transcript and tool-call inputs | An allowed guest | New rows `shared_turns`, `shared_tool_call`. After the binding ends, the ended session only, frozen. |
+| See a picture the shared session shows | An allowed guest | New row `shared_image` (2026-11-24): `turn` of the bound transcript must draw `path` in the agent's text or as a Read; then `read_place_image`'s rule under the share's own place, plus: a plain-`read` path class, and after the binding ends, nothing changed on disk since. A person's message and a Read outside the place show none. |
 | Read and post in the thread | An allowed guest, and the owner | New rows `thread_read`, `thread_post` |
 | Share, Share again, allow, remove, stop sharing, hide a project's names | The owner | New **console-only** rows |
 | Use messages with the agent | The owner | Existing `agent_attach` and `agent_send`, as the console (§5) |

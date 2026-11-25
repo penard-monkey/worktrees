@@ -513,7 +513,7 @@ export const CONSOLE_ROWS: readonly string[] = [
   "set_cross_project", "set_project_private", "apply_policy_preset", "update_cli", "mcp_install", "codex_mcp_install",
   "pi_mcp_install", "kimi_mcp_set", "codex_mcp_migrate", "agent_link_skills", "set_codex_permissions",
   "set_agent_guidance", "set_agent_guidance_skill", "agent_guidance_merge", "set_pi_trust", "set_pi_allowed", "pi_host_edit",
-  "set_kimi_allowed", "sync_batch_preview", "sync_batch_apply", "ui_events_append", "save_profile", "set_project_profile", "set_default_profile",
+  "set_kimi_allowed", "set_codex_allowed", "sync_batch_preview", "sync_batch_apply", "ui_events_append", "save_profile", "set_project_profile", "set_default_profile",
   "skill_install_local", "skill_install_git", "device_set_scope", "device_disable", "device_enable",
   "device_set_expiry", "device_set_stepup", "devices_revoke_all_others", "pair_begin", "pair_decide",
   "pair_cancel", "pair_status", "identity_rotate", "set_slot_capacity", "remote_enable", "remote_disable",

@@ -47,6 +47,7 @@ export const GUEST_COMMANDS = [
   "thread_post",
   "shared_turns",
   "shared_tool_call",
+  "shared_image",
 ] as const;
 export type GuestCommand = (typeof GUEST_COMMANDS)[number];
 

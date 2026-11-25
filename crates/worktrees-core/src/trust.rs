@@ -1,6 +1,6 @@
 //! Whether a harness may load a repo's OWN executable resources — pi's
-//! project trust (pi-harness §8, decided 2026-09-29), and the `[trust]` table
-//! the opencode gate will share.
+//! project trust (pi-harness §8, decided 2026-09-29), kimi's and Codex's folder
+//! trust, and the `[trust]` table the opencode gate will share.
 //!
 //! pi loads `.pi/extensions` (TypeScript, in pi's process), `.pi/skills`,
 //! `.pi/settings.json` and `.agents/skills` from any ancestor once a project
@@ -243,6 +243,68 @@ pub fn kimi_launch_trust(wt: &str) -> KimiLaunchTrust {
     kimi_launch_trust_for(allowed, kimi_mcp_shadowed(wt))
 }
 
+/// How a Codex launch in a place is trusted, and why — one answer for the
+/// launch, `codextrust::check`, `doctor --codex` and Settings → Policy.
+///
+/// Codex asks "Trust this folder?" in every repo it has not been told about,
+/// and the answer is SAVED to `~/.codex/config.toml`. Worktrees never writes
+/// that file. A repo in `[trust] codex` instead gets ONE `-c` on the launch
+/// (Codex's per-run override, measured on 0.172.0): that run starts trusted and
+/// nothing is saved, so a plain `codex` outside worktrees is unaffected and a
+/// revoke takes effect at the next launch.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CodexLaunchTrust {
+    /// The `-c` value to launch with (`projects={"<root>"={trust_level="trusted"}}`,
+    /// unquoted), or none.
+    pub config: Option<String>,
+    /// `allowance` · `unspellable` · `own` (Codex's own `projects` decides).
+    pub source: &'static str,
+    pub allowed: bool,
+    /// The repo root the override names, canonical, when there is one.
+    pub repo_root: Option<String>,
+    /// Why an allowed repo gets no override, in words (`unspellable`).
+    pub reason: Option<String>,
+}
+
+/// The `-c` value that trusts `root` for one Codex run, or why it cannot be
+/// said safely.
+///
+/// MEASURED on codex-cli 0.172.0: the dotted form
+/// `projects."<root>".trust_level="trusted"` does NOT work for any path (the
+/// quotes are not honoured in a `-c` key, with or without a `.` in the path),
+/// while an inline table does, with spaces and dots in the path, and merges with
+/// the user's own `projects` entries. The value is a TOML string, so a quote,
+/// a backslash or a control character in the path is where saying it safely
+/// ends: refuse the launch rather than guess at an escape no run has proved.
+pub fn codex_trust_override(root: &str) -> Result<String, String> {
+    if root.is_empty() || root.chars().any(|c| c == '"' || c == '\\' || c.is_control()) {
+        return Err(format!(
+            "{root:?} has a quote, a backslash or a control character in its path, which Codex's per-run `-c` trust override cannot spell safely, so {}. \
+             Rename the folder, or open Codex there once and choose Trust",
+            crate::codextrust::PROMPT_PHRASE
+        ));
+    }
+    Ok(format!("projects={{\"{root}\"={{trust_level=\"trusted\"}}}}"))
+}
+
+/// The decision, without the reads.
+pub fn codex_launch_trust_for(repo_root: Option<&str>, allowed: bool) -> CodexLaunchTrust {
+    let root = repo_root.map(str::to_string);
+    if !allowed {
+        return CodexLaunchTrust { config: None, source: "own", allowed, repo_root: root, reason: None };
+    }
+    match codex_trust_override(repo_root.unwrap_or("")) {
+        Ok(config) => CodexLaunchTrust { config: Some(config), source: "allowance", allowed, repo_root: root, reason: None },
+        Err(why) => CodexLaunchTrust { config: None, source: "unspellable", allowed, repo_root: root, reason: Some(why) },
+    }
+}
+
+pub fn codex_launch_trust(wt: &str) -> CodexLaunchTrust {
+    let root = repo_root(wt);
+    let allowed = root.as_deref().is_some_and(|r| is_allowed("codex", r));
+    codex_launch_trust_for(root.as_deref(), allowed)
+}
+
 /// Whether a repo-supplied `worktrees` MCP server would answer a TRUSTED kimi
 /// lane instead of ours. kimi layers `<git root>/.mcp.json` (for a place, the
 /// place itself) under `<cwd>/.kimi-code/mcp.json`, the later winning by name.
@@ -463,7 +525,7 @@ pub fn set_allowed_at(path: &Path, harness: &str, repo_root: &str, allow: bool) 
     })
 }
 
-/// `worktrees trust pi [<repo>] [--revoke]` — and bare `worktrees trust` lists.
+/// `worktrees trust pi|kimi|codex [<repo>] [--revoke]` — and bare `worktrees trust` lists.
 pub fn cmd_trust(p: &crate::Project, ui: &mut dyn crate::Ui, args: &[String]) -> i32 {
     let mut revoke = false;
     let mut pos: Vec<&str> = Vec::new();
@@ -491,13 +553,19 @@ pub fn cmd_trust(p: &crate::Project, ui: &mut dyn crate::Ui, args: &[String]) ->
         for r in list {
             ui.info(&format!("kimi allowed: {r}"));
         }
+        let list = allowed("codex");
+        ui.info("Codex folder trust for repos not listed: Codex's own (~/.codex/config.toml; its prompt, once per repo)");
+        for r in list {
+            ui.info(&format!("codex allowed: {r}"));
+        }
         return 0;
     };
-    if harness != crate::provider::PI.id && harness != crate::provider::KIMI.id {
-        ui.error(&format!("trust applies to pi and kimi only (got '{harness}')"));
+    if harness != crate::provider::PI.id && harness != crate::provider::KIMI.id && harness != crate::provider::CODEX.id {
+        ui.error(&format!("trust applies to pi, kimi and codex only (got '{harness}')"));
         return 1;
     }
     let kimi = harness == crate::provider::KIMI.id;
+    let codex = harness == crate::provider::CODEX.id;
     if pos.len() > 2 {
         ui.error("trust takes at most one repo");
         return 1;
@@ -516,6 +584,8 @@ pub fn cmd_trust(p: &crate::Project, ui: &mut dyn crate::Ui, args: &[String]) ->
             let state = match (revoke, changed) {
                 (false, true) if kimi => "now allowed: kimi lanes in this repo launch trusted (KIMI_CODE_TRUST_WORKSPACE=1, for that launch only) and load each place's .kimi-code/ and .mcp.json — repo code runs with no prompt (a place whose own files define a `worktrees` MCP server that is not ours is still asked).",
                 (true, true) if kimi => "no longer allowed: its next kimi launch asks again (kimi's own prompt).",
+                (false, true) if codex => "now allowed: Codex lanes in this repo launch trusted (a per-run `-c` on that launch only; ~/.codex/config.toml is never written) and read the repo's AGENTS.md and .codex/ config — repo code runs with no folder prompt.",
+                (true, true) if codex => "no longer allowed: its next Codex launch is Codex's own again (its folder-trust prompt, unless ~/.codex/config.toml already trusts the repo).",
                 (false, true) => "now allowed: pi lanes in this repo launch with --approve and load its .pi/ and .agents/skills, and start its .pi/mcp.json servers — repo code runs with no prompt (a branch whose .pi/mcp.json defines `worktrees` is still refused).",
                 (false, false) => "already allowed.",
                 (true, true) => "no longer allowed: its next pi launch skips the repo's own resources.",
@@ -579,6 +649,48 @@ mod tests {
         assert_eq!((ok.env, ok.source), (Some(("KIMI_CODE_TRUST_WORKSPACE", "1")), "allowance"));
         let sh = kimi_launch_trust_for(true, true);
         assert_eq!((sh.env, sh.source), (None, "shadowed"), "protect-ours beats the allowance");
+    }
+
+    /// MEASURED, codex-cli 0.172.0 (see `codex_trust_override`): only the inline
+    /// table starts a lane trusted; the value must parse as TOML back to the
+    /// root, spaces and dots included; what cannot be said safely is refused.
+    #[test]
+    fn a_codex_override_is_an_inline_table_that_parses_back_and_refuses_what_it_cannot_spell() {
+        let root = "/private/tmp/my repo.v2";
+        let v = codex_trust_override(root).unwrap();
+        assert_eq!(v, r#"projects={"/private/tmp/my repo.v2"={trust_level="trusted"}}"#);
+        let t: toml::Value = toml::from_str(&format!("x = 1\n{v}")).unwrap();
+        assert_eq!(t["projects"][root]["trust_level"].as_str(), Some("trusted"));
+        for bad in ["", "/a\"b", "/a\\b", "/a\nb", "/a\u{7f}b"] {
+            assert!(codex_trust_override(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    /// The `-c` rides only for a repo in the allowance (`own` otherwise: Codex's
+    /// own `projects` decides), and an allowed repo whose path cannot be spelled
+    /// gets none — with the reason, never a guess.
+    #[test]
+    fn a_codex_launch_is_trusted_only_for_an_allowed_repo() {
+        let own = codex_launch_trust_for(Some("/r"), false);
+        assert_eq!((own.config, own.source), (None, "own"));
+        let ok = codex_launch_trust_for(Some("/r"), true);
+        assert_eq!((ok.config.as_deref(), ok.source), (Some(r#"projects={"/r"={trust_level="trusted"}}"#), "allowance"));
+        let bad = codex_launch_trust_for(Some("/r\"x"), true);
+        assert_eq!((bad.config.as_deref(), bad.source), (None, "unspellable"));
+        assert!(bad.reason.unwrap().contains("cannot spell"));
+        let gone = codex_launch_trust_for(None, true);
+        assert_eq!(gone.source, "unspellable", "an allowance with no repo to name trusts nothing");
+    }
+
+    #[test]
+    fn the_codex_allowance_is_its_own_list() {
+        let t = "[trust]\nkimi = [\"/k\"]\ncodex = [\"/c\"]\n";
+        assert_eq!(allowed_in(t, "codex"), vec!["/c".to_string()]);
+        let two = with_allowed(t, "codex", &["/c".into(), "/d".into()]).unwrap();
+        assert_eq!(allowed_in(&two, "codex"), vec!["/c".to_string(), "/d".to_string()]);
+        assert_eq!(allowed_in(&two, "kimi"), vec!["/k".to_string()], "kimi keeps its list");
+        assert_eq!(set_allowed_at(&std::env::temp_dir().join(format!("wtcxtrust-{}/config.toml", std::process::id())), "codex", "/c", true), Ok(true));
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("wtcxtrust-{}", std::process::id())));
     }
 
     #[test]

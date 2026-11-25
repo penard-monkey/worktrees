@@ -329,11 +329,15 @@ export type Attachment = { id: number; name: string; size: number; file: Blob; s
 
 export const bytes = (text: string) => new TextEncoder().encode(text).length;
 
-/** Why `agent_send` (or `agent_answer_text`, which shares the rule) would
- *  refuse `text`, in words, or null. The same rule as `harness::typed_line_ok`
- *  (MCP `send` shares it), checked before the line leaves so a refusal is
- *  explained where it is typed. A pasted draft is never changed to make it
- *  pass. `what` names the thing typed: a message, an answer, a note. */
+/** Why `agent_send` would refuse a message, or `agent_answer_text` an answer or
+ *  a note, in words, or null. A message is `harness::typed_line_ok`'s (MCP
+ *  `send` shares it): the composer, where a leading `/ @ ! #` runs something.
+ *  An answer or a note goes into a field the prompt itself opened, where
+ *  `# ! @` are text (measured on Claude 2.1.331), so it is
+ *  `harness::typed_answer_ok`'s: the same character rule, and only `/`
+ *  refused. Checked before the line leaves so a refusal is explained where it
+ *  is typed. A pasted draft is never changed to make it pass. `what` names the
+ *  thing typed: a message, an answer, a note. */
 export function draftProblem(text: string, what: "message" | "answer" | "note" = "message", rules: SendRules = ONE_LINE): string | null {
   if (!text.trim()) return null;
   const one = `${what === "answer" ? "an" : "a"} ${what}`;
@@ -343,10 +347,9 @@ export function draftProblem(text: string, what: "message" | "answer" | "note" =
   if (/[\p{Cf}\p{Zl}\p{Zp}]/u.test(text)) return "Remove the invisible formatting characters: the agent would read something other than what you see.";
   if (bytes(text) > rules.maxBytes) return `Too long: ${bytes(text).toLocaleString()} of ${rules.maxBytes.toLocaleString()} bytes.`;
   const lead = text.trimStart()[0];
-  if ("/@!#".includes(lead)) {
-    return lead === "/"
-      ? `Slash commands run in the terminal: ${one} can’t start with /.`
-      : `${one[0].toUpperCase()}${one.slice(1)} can’t start with ${lead}: at the agent’s prompt that runs something, it is not ${one}.`;
+  if (lead === "/") return `Slash commands run in the terminal: ${one} can’t start with /.`;
+  if (what === "message" && "@!#".includes(lead)) {
+    return `${one[0].toUpperCase()}${one.slice(1)} can’t start with ${lead}: at the agent’s prompt that runs something, it is not ${one}.`;
   }
   return null;
 }

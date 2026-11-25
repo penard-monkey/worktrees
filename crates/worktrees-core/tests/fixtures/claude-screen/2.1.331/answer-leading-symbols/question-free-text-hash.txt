@@ -1,0 +1,16 @@
+ ☐ Joke topic
+
+Which topic should I write a joke about?
+
+  1. Programming
+     A joke about code, bugs, and the life of a developer.
+  2. Cats
+     A joke about our feline friends and their mysterious ways.
+  3. Coffee
+     A joke about everyone's favorite caffeinated morning ritual.
+❯ 4. #2. Also
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · ctrl+g to edit in Vim · Esc to cancel
+─────────────────────────────────────────────────────────────────────────────────────────────────── ans-lane ─

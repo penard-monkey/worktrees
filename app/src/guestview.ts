@@ -67,6 +67,18 @@ export function mergeOlder(held: SharedTurn[], page: SharedTurn[]): SharedTurn[]
   return [...[...page].reverse().filter((t) => t.seq < until), ...held];
 }
 
+/** Each turn with a key that stays its own: its seq, and which of the turns
+ *  sharing that seq it is. Never its place in the list, which "Earlier turns"
+ *  shifts: every row, and every picture in it, would be made again. Pure. */
+export function turnKeys(turns: SharedTurn[]): [string, SharedTurn][] {
+  const n = new Map<number, number>();
+  return turns.map((t) => {
+    const i = n.get(t.seq) ?? 0;
+    n.set(t.seq, i + 1);
+    return [`${t.seq}|${i}`, t];
+  });
+}
+
 /** The name a guest calls the host's owner by: the name the host answers
  *  (`shares_list`, then `guest_places`), else the host's own name as this
  *  machine paired it. A host that never set one answers `null`; one from

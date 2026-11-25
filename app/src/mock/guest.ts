@@ -6,11 +6,14 @@
 // refused as serve's resolver refuses it — `denied` — so a guest view that
 // asked for anything else would show the refusal, not an answer.
 //
+// `?guestimage=old` is a host from before `shared_image`; `?imgslow=<ms>` delays
+// each picture.
 // `?guest=offline` makes the connection fail (guestboot.ts). Helpers on
 // `window.__mock`: `guestShare(slug)` shares another place (a toast and a
 // badge), `guestTurn(text)` appends a turn to the live share, `guestEnd()`
 // ends its binding, `guestAllow()` lets Bret in on the invited share,
 // `guestPost(text)` posts as David, `guestCalls()` the commands asked,
+// `guestImages()` the `shared_image` calls and the most in flight at once,
 // `guestDrop()`/`guestBack()` the host quitting and returning, and
 // `guestRevoke()` David removing this guest (`removed`, never offline).
 
@@ -28,7 +31,7 @@ const BRET = GUEST_HOST.principal_id;
 const OWNER = "David";
 
 /** dispatch.rs's `GUEST_ROWS`. */
-const ROWS = new Set(["shares_list", "share_join", "guest_places", "share_request", "thread_read", "thread_post", "shared_turns", "shared_tool_call"]);
+const ROWS = new Set(["shares_list", "share_join", "guest_places", "share_request", "thread_read", "thread_post", "shared_turns", "shared_tool_call", "shared_image"]);
 
 type Binding = { harness: string; state: "active" | "ended"; bound_at: number; ended_at: number | null };
 type Share = {
@@ -75,6 +78,18 @@ transcripts.s_livechataaaaaaaaaaaaaaaaaa[44].steps = [
   { kind: "text", at: T0 + 44 * 120 + 5, text: "Which layout do you want?" },
   { kind: "question", at: T0 + 44 * 120 + 6, questions: [{ header: "Layout", question: "Side by side or stacked?", multi: false, options: [{ label: "Side" }, { label: "Stacked" }] }] },
 ];
+// Pictures (`serve/shareimage.rs`): a reply that shows four and names two it
+// may not, and Reads inside the place and outside it.
+const LANE = "/Users/david/work/worktrees/.worktrees/feat-chat-redesign";
+transcripts.s_livechataaaaaaaaaaaaaaaaaa[43] = {
+  ...transcripts.s_livechataaaaaaaaaaaaaaaaaa[43], user: "Show me the mockups. ![mine](shots/mine.png)", tools: ["Read", "Read"],
+  steps: [
+    { kind: "text", at: T0 + 43 * 120 + 5, text: "I made two mockups.\n\n**Home**: every project\n![Home view](.worktrees-attachments/agent/wide-home.svg)\n\n**Place**: the treemap\n![Place view](shots/wide%20place.svg)\n\n![Gone](shots/missing.png)\n\n![Logo](https://example.com/logo.png)" },
+    { kind: "tool", at: T0 + 43 * 120 + 6, name: "Read", call_id: "call_r1", summary: `${LANE}/shots/wide-read.svg`, detail: true },
+    { kind: "tool", at: T0 + 43 * 120 + 7, name: "Read", call_id: "call_r2", summary: "/private/tmp/render.png", detail: true },
+  ],
+};
+const images = { calls: [] as string[], now: 0, most: 0 };
 const threads: Record<string, Entry[]> = {
   s_livechataaaaaaaaaaaaaaaaaa: [
     { seq: 1, at: T0 + 10, kind: "joined", principal: BRET, name: "Bret" },
@@ -97,11 +112,34 @@ const admitted = (id: unknown) => {
   if (s.state !== "allowed") throw "not let in yet: the owner has not allowed you on this share";
   return s;
 };
+const SVG = btoa('<svg xmlns="http://www.w3.org/2000/svg" width="640" height="320" viewBox="0 0 640 320"><rect width="640" height="320" fill="#3b82f6"/><circle cx="320" cy="160" r="90" fill="#fde68a"/></svg>');
+/** `shared_image`: what the turn draws, then the place's rule, as the host's. */
+async function sharedImage(args: Record<string, unknown>) {
+  const s = admitted(args.share);
+  const path = String(args.path);
+  const t = (transcripts[s.id] ?? []).find((x) => x.seq === Number(args.turn));
+  const draws = (t?.steps as { kind: string; text?: string; name?: string; summary?: string }[] | undefined)?.some((st) =>
+    st.kind === "text" ? [...(st.text ?? "").matchAll(/!\[[^\]]*\]\(([^)\s]+)\)/g)].some((m) => decodeURIComponent(m[1]) === path) : st.kind === "tool" && st.name === "Read" && st.summary === path);
+  images.calls.push(path);
+  images.most = Math.max(images.most, ++images.now);
+  try {
+    await sleep(Number(new URLSearchParams(location.search).get("imgslow") ?? 0));
+    if (!draws) throw `not shown in this shared session: ${path}`;
+    if (path.startsWith("/") && !path.startsWith(`${LANE}/`)) throw `outside this place: ${path}`;
+    if (path.includes("missing")) throw `not found: ${path}`;
+    const etag = "1-1";
+    const b = { size: 300, truncated: false, mtime: 1, mime: "image/svg+xml", etag };
+    return args.etag === etag ? { ...b, b64: "", unchanged: true } : { ...b, b64: SVG, unchanged: false };
+  } finally {
+    images.now -= 1;
+  }
+}
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export function guestInvoke(cmd: string, args: Record<string, unknown>, emitEvent: (event: string, payload: unknown) => void): unknown {
   emit = emitEvent;
   calls.push(cmd);
+  if (cmd === "shared_image" && new URLSearchParams(location.search).get("guestimage") === "old") throw `unknown command: ${cmd}`;
   if (!ROWS.has(cmd)) throw "denied";
   switch (cmd) {
     case "shares_list":
@@ -153,6 +191,8 @@ export function guestInvoke(cmd: string, args: Record<string, unknown>, emitEven
       const turns = all.slice(lo, hi).reverse();
       return { harness: b.harness, state: b.state, turns, total, next_before: lo, more: lo > 0, page_full: false, page_bytes: 2097152, turn_text_max: 100000, share: s.id, binding: args.binding ?? null };
     }
+    case "shared_image":
+      return sharedImage(args);
     case "shared_tool_call": {
       admitted(args.share);
       const id = String(args.call_id);
@@ -204,6 +244,12 @@ export const guestHelpers = {
   },
   guestBack() {
     (window as unknown as { __guestDown?: boolean | "revoked" }).__guestDown = false;
+  },
+  guestImages() {
+    const r = { calls: images.calls, most: images.most };
+    images.calls = [];
+    images.most = 0;
+    return r;
   },
   guestCalls() {
     const c = calls;

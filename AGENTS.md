@@ -70,8 +70,19 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   audit's DRIVE budget), the audit log gets the text's length and hash and
   never the text, and a device's send stamps `last_remote_send`. Its one
   sibling is `agent_answer_text` (brief of 2026-10-30, `feat/actionable-
-  prompts`): the SAME paste (`AgentIo::paste` = `tmux::paste_into`), the same
-  rule, `instruct` (AND `answer`, checked in the body: an amended "Yes"
+  prompts`): the SAME paste (`AgentIo::paste` = `tmux::paste_into`), its OWN
+  text rule (`harness::typed_answer_ok`, owner 2026-11-24, `fix/answer-
+  leading-symbols`): the composer's character rule (one line, `LINE_MAX`, no
+  control or invisible character) and ONE refused lead, `/`. `# ! @` open
+  nothing in a field the prompt opened — measured on Claude 2.1.331 in the
+  free-text row, a preview's notes and the Tab-to-amend field, where all four
+  symbols only insert text (`claude-screen/2.1.331/answer-leading-symbols/`) —
+  so an answer `#2. Also…` is an answer. The composer's rule (`typed_line_ok`)
+  is for the composer and is not loosened. Codex's field is NOT measured (its
+  trust prompt writes the user's config), so `typed_answer_for` keeps `@ ! #`
+  refused for any harness but Claude, saying so. The client's `draftProblem`
+  splits the same way (`chatmirror-check.mjs` holds it). `instruct` (AND
+  `answer`, checked in the body: an amended "Yes"
   approves, so `instruct` alone must not reach it), length and hash, stamp —
   and only into a field the
   prompt itself opened and shows empty, each step proved before Enter. **The
@@ -1388,6 +1399,27 @@ that each cost a measurement, all on 0.157.1:
 **A test that PUSHES pins its cwd and its origin.** A bats test once ran
 `agent-setup fix` from the suite's cwd, this checkout, and pushed a real branch
 to the real remote: `cd "$REPO"`, and refuse unless origin is `$ORIGIN`.
+
+**Codex lanes are trusted by an allowance, one `-c` per launch, and
+`~/.codex/config.toml` is never written** (`feat/codex-folder-trust`, the
+owner's ask of 2026-11-24). A repo in `[trust] codex` (`trust::codex_launch_trust`,
+`worktrees trust codex`, Settings → Policy → Codex folder trust; empty = off for
+every repo, `trust` is in `USER_ONLY_KEYS` so a repo cannot grant it, and the
+setter `set_codex_allowed` is `HostConsole`, like pi's and kimi's: a paired device
+holding every capability is refused, and no MCP tool names or takes a trust/allow
+argument) launches with `-c 'projects={"<repo root>"={trust_level="trusted"}}'`
+from `Codex::place_flags`, resume included. **Measured on codex-cli 0.172.0: only
+the INLINE TABLE works.** The dotted form `projects."<path>".trust_level=…` still
+stops at the modal for any path, with or without a `.` in it (the key's quotes
+are not honoured), while the inline table starts straight in for a place under
+`.worktrees/` (the main repo's root is the key), takes spaces and dots in the
+path, and MERGES with the user's own `projects`. A path with `"`, `\` or a
+control character is refused (`codex_trust_override`), never escaped on a guess,
+and never answered by writing the config. `codextrust::check` counts the
+allowance as trusted only where Codex's own config would stop at its prompt, and
+never over a config Codex cannot read. A `--force` launch of an unallowed repo
+still starts Codex AT the prompt, and `ops`'s launch-anyway note says so; do not
+type Enter into that pane to answer it (a lane did, 2026-11-23).
 
 **kimi has one too, and four of its habits are traps.** `docs/kimi-manual-checks.md`
 pins the 2.2.0 wire log and screens. (1) Interactive kimi takes NO prompt word —

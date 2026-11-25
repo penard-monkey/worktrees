@@ -36,6 +36,7 @@ mod remote;
 mod resolve;
 mod scope;
 mod servefile;
+mod shareimage;
 mod shares;
 mod sharethread;
 mod stepup;
