@@ -4,7 +4,7 @@ title: Workspace chats and a workspace's memory
 
 # Workspace chats and a workspace's memory
 
-**Proposal, revision 2, 2026-11-24. Nothing built.** A design lane's answer to
+**Proposal, revision 3, 2026-11-24. Being built.** A design lane's answer to
 the owner's ask of 2026-11-23:
 
 > "Workspaces need chats that aren't tied to a project. These would be
@@ -36,6 +36,18 @@ codemirror into the main app rather than just outside", and "we may want to
 add a lane for all our documents now" (§4.5); the fold reaches the agent by
 the fixed opener; and the typed-line door for workspace chats is approved, on
 `idea_send`'s body.
+
+**Revision 3**, after four independent designs of the surface and a critique
+(`workspace-view-critique.md`), and the owner's answers the same day:
+
+- **The surfaces are `workspace-view-design.md` now.** Where §4 here and that
+  design differ, the design wins. Decided by the owner: the chat is in the
+  middle with the documents on the dock side; a workspace opens on an Overview
+  (what needs you, the memory, then chats, work, ideas and projects); Float
+  MOVES a document to its window; the Ideas window and the lightbulb stay as
+  they are for now.
+- **Two holes the critique found are closed** (§3.1 step 5, §5.5), and the
+  engine changes the screens need are in §9.
 
 ## 0. The answer, on one page
 
@@ -291,17 +303,25 @@ Undo.
 1. Refused while the agent is working or waiting on a prompt: "it is working:
    stop it or wait".
 2. The engine commits a dirty tree, so the fold's commit holds only the fold.
-3. It writes `chats/<conv>/fold.md`, a fixed template: write or rewrite
-   `memory/notes/<date>-<slug>.md` with four headings (Asked, Decided, Done,
-   Open); update `memory/MEMORY.md`, one line and a link per durable fact;
+3. It writes `chats/<conv>/fold.md`, a fixed template: write or rewrite the
+   chat's note with four headings (Asked, Decided, Done, Open). **The engine
+   names the note's exact path**, `memory/notes/<date>-<conv>.md`, in
+   `fold.md` and in `chats.json`; the agent does not pick it. Then update `memory/MEMORY.md`, one line and a link per durable fact;
    move anything long to `topics/`; then say in two lines what you changed.
 4. It ends the session if it is live and launches the same conversation as a
    resume **with a fixed opener**: `Read chats/<conv>/fold.md and do what it
    says.`
-5. When the note exists and the agent has been idle for one poll tick, the
-   poll commits ("fold: <title>"), records the commit in `chats.json`, and
-   ends the session. With no note after five minutes the fold is marked
-   failed, the session stays open, and the chat row says so.
+5. When the note at that path is **newer than the fold's start** and the
+   agent has been idle for one poll tick, the poll commits ("fold: <title>"),
+   records the commit, its files and line counts in `chats.json`, and ends
+   the session. "The note exists" is not the test: on a second fold of one
+   chat it exists before Claude has read a word, and a session that has just
+   launched reads idle, so the fold would be committed empty in one tick.
+   With no new note after five minutes the fold is marked failed, the session
+   stays open, and the chat row says so. The five minutes do not run while
+   the agent waits on a prompt.
+6. **One fold at a time in a workspace.** A second Close while one folds is
+   refused in words, so a fold's commit is one chat's work.
 
 Why a relaunch and not a typed line (decided 2026-11-24: the fixed opener):
 an opener reaches only a session the launch creates (AGENTS.md, the re-brief
@@ -509,11 +529,17 @@ No memory tools: memory is files in the chat's cwd.
 ### 5.5 Events
 
 `workspaces:sessions`, console only, change-gated: the chats' sessions that
-are live, busy and waiting, and each one's workspace. The twin of
-`ideas:sessions` (**checked**, `watch.rs:123`), from the same poll. A memory
-change is seen by the poll's stat of the folder's `HEAD` and index mtime,
-pushed as `workspaces:memory` with the workspace id. (guess: the cheapest
-signal; phase 1 picks.)
+are live, busy and waiting, each one's workspace, and each chat's **fold
+state** (folding, waiting on a prompt, failed and why), also right after a
+restart. The twin of `ideas:sessions` (**checked**, `watch.rs:123`), from the
+same poll.
+
+`workspaces:memory`, console only: the workspace id **and what changed, as
+paths with their mtimes, and what was removed**: `{id, changed: [{path,
+mtime_ms}], removed: [path]}`, the shape the built document pane's watch
+already takes for ideas (`app/src/doc/ideasave.ts`, `Changed`). A workspace
+id alone is not enough: an open file could not tell its own save from an
+agent's write, and every conflict screen rests on that.
 
 ### 5.6 A paired device, a group-chat guest, the audit record
 
@@ -545,6 +571,30 @@ When it would earn its place: search across memory, notes and transcripts, or
 "which chats touched this file". Then build it as a **derived index** in the
 cache dir, rebuilt from the files at any time, and never the record. That is
 a later proposal.
+
+## 9. Revision 3: what the screens need from the engine
+
+From the critique's §8, each kept because a screen in
+`workspace-view-design.md` needs it. Where a line here and an earlier section
+differ, this wins.
+
+| # | Change | Replaces |
+|---|---|---|
+| 1 | `chats.json` records each chat's last activity, its note's path, and its fold's result: commit, files, lines, reverted | §5.1 |
+| 2 | **A commit per editing session, not per save.** The pane autosaves 800 ms after a pause, so a commit per save would bury the folds. The engine commits a dirty tree after a quiet minute, and before any fold, chat start or revert | §2.5's "when the person saves" |
+| 3 | **Undo** commits a dirty tree first, then reverts; on a conflict it aborts the revert and answers with the files. A revert can itself be reverted (Redo); it is the same row | §3.2 |
+| 4 | Close without folding, and Stop the fold (`workspace_chat_close` while folding), commit what is left under their own message | §3 |
+| 5 | A row to put a file under `memory/files/` (a dropped image, 4 MB at most). Rename and remove are left to Finder and the agent for now | §5.3 |
+| 6 | `context.md`, and the chat rows' answers, list which projects the chat does NOT read (private, not registered) | §1.2 |
+| 7 | Memory must open with the Ideas flag off; the built document is gated on Ideas alone today | §4.1 |
+| 8 | Lists (the Chats tab, History) are answered from `chats.json` and one `git log`, never one git call per chat | §5.3 |
+| 9 | A floated memory file needs a hand-off by (workspace, path); today's accepts an idea's id only (`app/src/plans.ts`, `showRequest`) | §4.4 |
+| 10 | The fold's relaunch ends the tmux session under an open Terminal view; the view attaches again | §3.1 |
+
+In the app, not the engine, and found by the critique in the code: a
+workspace card's dot is busy before waiting today and must be waiting first;
+Home stays lit while a workspace is shown; the nav's filter and ⌘K know
+places only.
 
 ## 6. Phases
 
