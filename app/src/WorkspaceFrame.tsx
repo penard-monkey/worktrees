@@ -155,7 +155,9 @@ export function WorkspaceFrame(props: {
   /** Which side is shown where there is room for one. */
   side: "chat" | "docs";
   setSide(side: "chat" | "docs"): void;
+  /** In the bar, once there are chats. */
   newChat: { busy: boolean; run(): void } | null;
+  firstChat(): void;
   chatsTab: ReactNode;
   dockLeft: boolean;
 }) {
@@ -229,7 +231,7 @@ export function WorkspaceFrame(props: {
             </div>
           )}
           {ws && tab === "overview" && <div className="wsf-scroll">{props.overview}</div>}
-          {ws && tab === "chats" && <div className="wsf-scroll">{props.counts.chats ? props.chatsTab : <NoChats newChat={() => props.newChat?.run()} />}</div>}
+          {ws && tab === "chats" && <div className="wsf-scroll">{props.counts.chats ? props.chatsTab : <NoChats newChat={props.firstChat} />}</div>}
           <div className="wsf-split" hidden={!pane} data-beside={beside || undefined}>
             {side && !beside && (
               <button className="wsf-side-line" data-testid="ws-side-toggle" aria-expanded={sideOpen} onClick={() => setSideOpen((o) => !o)}>

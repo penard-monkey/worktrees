@@ -105,7 +105,10 @@ export function DocumentPane(props: {
    *  document's versions, over it. */
   history?: (close: () => void) => ReactNode;
   /** Under the header, over the document. */
-  strips?: ReactNode;
+  strips?: ReactNode | ((mode: "edit" | "read") => ReactNode);
+  /** Files dropped on or pasted into the editor, kept by the source: the markdown
+   *  to put for each, or why not. Absent: the editor's own handling. */
+  attach?(files: File[]): Promise<{ text: string; refused: string[] }>;
   textDrag?(on: boolean): void;
   follow(to: DocTarget): void;
 }) {
@@ -142,6 +145,15 @@ export function DocumentPane(props: {
     setMenu((m) => (m ? null : { x: r.right, y: r.bottom + 4, byKey: e.detail === 0 }));
   };
   const state = saveWords(save);
+  const takes = (d: DataTransfer | null) => !!props.attach && mode === "edit" && !!d && [...d.types].includes("Files");
+  const keep = async (files: File[], at?: { x: number; y: number }) => {
+    const key = open.key;
+    if (!files.length || !props.attach) return;
+    const r = await props.attach(files);
+    // Into the document it was dropped on, and no other.
+    if (r.text && doc.handle.current?.key === key) doc.handle.current.put(r.text, at);
+    if (r.refused.length) doc.say(r.refused.join(" "));
+  };
   return (
     <>
       <header className={"ix-head" + (buttons ? " ix-head-buttons" : "")} ref={setHead} data-tier={tier}>
@@ -188,7 +200,7 @@ export function DocumentPane(props: {
         </div>
       </header>
       {menu && <DocMenu {...menu} acts={acts} close={() => setMenu(null)} />}
-      {props.strips}
+      {typeof props.strips === "function" ? props.strips(mode) : props.strips}
       {doc.history && (props.history
         ? props.history(() => doc.setHistory(false))
         : <VersionsPanel versions={doc.versions} armed={armed?.startsWith("restore:") ? armed.slice(8) : null} restore={doc.restore} close={() => doc.setHistory(false)} />)}
@@ -198,7 +210,7 @@ export function DocumentPane(props: {
             ? `This ${noun} changed on disk, so your edit was not saved. Your text is still here.`
             : `This ${noun} was changed in another editor while you had unsaved text. Your text is still here.`}</span>
           <button className="ix-btn" data-testid="ideas-keep-mine" onClick={() => void session.current?.keepMine()}
-            title="Saves your text. The other version is copied to the folder's .history first.">Keep mine (theirs goes to .history)</button>
+            title={`Saves your text. The other version is kept in ${source.keeps === ".history" ? "the folder's .history" : source.keeps} first.`}>Keep mine (theirs goes to {source.keeps})</button>
           <button className={`ix-btn${armed === "reload" ? " ix-btn-armed" : ""}`} data-testid="ideas-reload"
             onClick={() => arm.confirm("reload", () => void session.current?.reload())}>
             {armed === "reload" ? "Drop mine and reload?" : "Reload theirs"}
@@ -218,7 +230,10 @@ export function DocumentPane(props: {
           <button className="ix-btn" onClick={() => void session.current?.flush()}>Try again</button>
         </div>
       )}
-      <div className="ix-body" hidden={doc.history && !!props.history}>
+      <div className="ix-body" hidden={doc.history && !!props.history}
+        onDragOverCapture={(e) => { if (takes(e.dataTransfer)) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; } }}
+        onDropCapture={(e) => { if (takes(e.dataTransfer)) { e.preventDefault(); e.stopPropagation(); void keep([...e.dataTransfer.files], { x: e.clientX, y: e.clientY }); } }}
+        onPasteCapture={(e) => { if (e.clipboardData.files.length && takes(e.clipboardData)) { e.preventDefault(); e.stopPropagation(); void keep([...e.clipboardData.files]); } }}>
         {(edited || mode === "edit") && (
           <EditorHost open={open} handle={doc.handle} held={doc.held} hooks={doc.hooks} cursorNext={doc.cursorNext} replaced={doc.replaced} hidden={mode !== "edit"} textDrag={props.textDrag} />
         )}

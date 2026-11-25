@@ -52,5 +52,32 @@ eq("back, and forward", [b.paths[b.at], M.trailStep(b, 1), M.trailStep(t, 1), M.
 eq("a new file after Back drops what was forward", M.trailTo(b, "x.md").paths, ["MEMORY.md", "topics/a.md", "x.md"]);
 eq("a chat's note, in the memory", M.notePath("memory/notes/2026-11-24-x.md"), "notes/2026-11-24-x.md");
 
+// ── editing ──
+const link = (from, to) => `${from}->${to}`;
+const v = { folders: [folder("", f("MEMORY.md", { title: "Memory" })), folder("topics", f("topics/nas.md", { title: "NAS [layout]" }), f("topics/audiences.md")), folder("notes", f("notes/2026-11-24-a.md", { title: "Storage layout" })), folder("files", f("files/rack.png", { kind: "image" }))] };
+const ideas = [{ id: "I1", title: "Jellyfin sharing" }];
+eq("[[ offers this memory's files first, then linked ideas, never the file it is in", M.memoryPicks("", "topics/nas.md", v, ideas, link).map((p) => p.hint).sort().join() + "|" + M.memoryPicks("", "topics/nas.md", v, ideas, link).map((p) => p.hint).indexOf("idea"), "file,idea,image,note,topic|4");
+eq("…its ideas last", M.memoryPicks("", "topics/nas.md", v, ideas, link).at(-1), { id: "I1", title: "Jellyfin sharing", hint: "idea", text: "[Jellyfin sharing](idea:I1)" });
+eq("…and not itself", M.memoryPicks("nas", "topics/nas.md", v, ideas, link), []);
+eq("a plain link, its words escaped; an image is drawn", M.memoryPicks("nas", "MEMORY.md", v, [], link).concat(M.memoryPicks("rack", "MEMORY.md", v, [], link)).map((p) => p.text), ["[NAS \\[layout\\]](MEMORY.md->topics/nas.md)", "![rack](MEMORY.md->files/rack.png)"]);
+eq("by heading or path, the best first", M.memoryPicks("stor", "MEMORY.md", v, [], link).map((p) => p.id), ["notes/2026-11-24-a.md"]);
+eq("at most ten", M.memoryPicks("", "x", { folders: [folder("topics", ...Array.from({ length: 30 }, (_, i) => f(`topics/${i}.md`)))] }, ideas, link).length, 10);
+const topic = (t) => `topics/${t.toLowerCase().replace(/ /g, "-")}.md`;
+eq("a new file: under topics, or where its name says, always a text", ["NAS Layout", "notes/x", "plans/y.csv", " /a/b ", "", "../x", "a//b", ".git", "a/.b", "x\\y"].map((n) => M.newFilePath(n, topic)), ["topics/nas-layout.md", "notes/x.md", "plans/y.csv", "a/b.md", null, null, null, null, null, null]);
+eq("its heading", M.titleOf("topics/nas-layout.md"), "Nas layout");
+eq("4 MB, and said", [M.tooBig("a.png", 4 * 1024 * 1024), M.tooBig("a.png", 5 * 1024 * 1024)], [null, "a.png is 5.0 MB: a memory takes files up to 4 MB."]);
+const at = new Date("2026-11-24T10:20:30Z");
+eq("a pasted image has a name of its own; a path and a dot are not kept", [M.putName("image.png", "image/png", at), M.putName("", "image/jpeg", at), M.putName("a/b.png", "image/png", at), M.putName("..hidden", "", at)], ["pasted-2026-11-24-10-20-30.png", "pasted-2026-11-24-10-20-30.jpg", "a-b.png", "hidden"]);
+eq("who may edit it too", [[], ["A"], ["A", "B"]].map(M.mayEdit), [null, "“A” is live and may edit this file too.", "2 chats are live and may edit this file too."]);
+eq("a change under you names who is live, never who did it", [[], ["A"], ["A", "B"]].map(M.changedUnderWords), ["Changed on disk.", "Changed on disk. “A” is live.", "Changed on disk. 2 chats are live."]);
+const d = (a, b) => M.lineDiff(a, b).map((x) => ({ ctx: " ", del: "-", add: "+", gap: "~" })[x.kind] + x.text);
+eq("a line put in", d("a\nb\nc", "a\nx\nb\nc"), [" a", "+x", " b", " c"]);
+eq("one changed", d("a\nb\nc", "a\nB\nc"), [" a", "-b", "+B", " c"]);
+eq("the same text is no lines, whatever its line ends", [d("a\nb", "a\nb"), d("a\r\nb", "a\nb")], [[], []]);
+eq("what is far apart has a gap", d(["1", ..."abcdefghijkl", "2"].join("\n"), ["9", ..."abcdefghijkl", "8"].join("\n")), ["-1", "+9", " a", " b", " c", "~", " j", " k", " l", "-2", "+8"]);
+eq("its numbers are the side's own", M.lineDiff("a\nb", "a\nx\nb").map((x) => x.no), [1, 2, 3]);
+const big = M.lineDiff(Array.from({ length: 1500 }, (_, i) => `a${i}`).join("\n"), Array.from({ length: 1500 }, (_, i) => `b${i}`).join("\n"));
+eq("a block too large is all removed, all added", [big.filter((x) => x.kind === "del").length, big.filter((x) => x.kind === "add").length], [1500, 1500]);
+
 if (failed) { console.log(`\nwsmemory-check: ${failed} failed`); process.exit(1); }
 console.log("wsmemory-check: all ok");

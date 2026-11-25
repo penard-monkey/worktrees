@@ -93,6 +93,13 @@ export function linkAt(line: string, at: number): string | null {
   return null;
 }
 
+/** The destination of the markdown link at offset `at` of `line`, if any. */
+export function hrefAt(line: string, at: number): string | null {
+  const re = /!?\[(?:\\.|[^\]\\])*\]\(([^()\s]+)\)/g;
+  for (let m = re.exec(line); m; m = re.exec(line)) if (at >= m.index && at <= m.index + m[0].length) return m[1];
+  return null;
+}
+
 /** The Read view's body with `idea:` links made `#idea:` ones, which the
  *  shared renderer allows (it refuses every scheme but http(s)) and hands to
  *  `onLink`; `ideaHref` reads one back. */

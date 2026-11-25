@@ -12,7 +12,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { invoke } from "../ipc";
 import { DocNotice, DocumentPane } from "./DocumentPane";
 import { sameDoc, type DocRows, type DocTarget } from "./source";
-import { useDoc } from "./useDoc";
+import { useDoc, type Open, type PickRow } from "./useDoc";
 
 export type MainDocApi = {
   /** Save and say whether it may be left: false while its text is nowhere else. */
@@ -43,7 +43,11 @@ export function MainDocument(props: {
   float?(to: DocTarget, title: string): void;
   lead?: ReactNode;
   title?: string;
-  strips?: ReactNode;
+  strips?: ReactNode | ((mode: "edit" | "read") => ReactNode);
+  attach?: (files: File[]) => Promise<{ text: string; refused: string[] }>;
+  picks?: (query: string, from: string) => PickRow[];
+  /** It changed on disk under a person with nothing unsaved. */
+  changedUnder?: (name: string, before: string, after: string) => void;
   linkNote?: (from: string, href: string) => string | null;
   /** Moves when History is asked for from elsewhere. */
   historyAsk?: number;
@@ -56,12 +60,15 @@ export function MainDocument(props: {
   const [again, setAgain] = useState(0);
   const at = useRef(props);
   at.current = props;
+  const openRef = useRef<Open | null>(null);
   const doc = useDoc({
     source: target.source,
     notice: setNotice,
     trace: (m) => { invoke("log_event", { level: "info", msg: `document: ${m}` }).catch(() => {}); },
     listed: () => {},
     rows: props.rows,
+    picks: props.picks,
+    changedUnder: (before, after) => { const t = openRef.current; if (t) at.current.changedUnder?.(t.id, before, after); },
     follow: (to) => at.current.follow(to),
   });
   const refusedNow = useRef(false);
@@ -72,7 +79,6 @@ export function MainDocument(props: {
     refusedNow.current = !ok;
     return ok;
   }, [leaveDoc]);
-  const openRef = useRef(open);
   openRef.current = open;
   const had = useRef(false);
 
@@ -149,7 +155,7 @@ export function MainDocument(props: {
     <section className="ix-doc ix-in-main" data-testid="main-doc" data-doc={wait ? undefined : open?.id} data-wait={wait || undefined} hidden={!props.shown}>
       {notice && <DocNotice text={notice} dismiss={() => setNotice(null)} />}
       {open ? (
-        <DocumentPane doc={doc} follow={props.follow} history={props.history} lead={props.lead} title={props.title} strips={props.strips} linkNote={props.linkNote}
+        <DocumentPane doc={doc} follow={props.follow} history={props.history} lead={props.lead} title={props.title} strips={props.strips} attach={props.attach} linkNote={props.linkNote}
           float={props.float && { title: "Float: move it to the Ideas window", run: () => void float() }} />
       ) : (
         <header className="ix-head">

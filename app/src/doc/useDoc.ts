@@ -8,7 +8,7 @@ import { rememberMode, startMode, type DocKind, type DocMode } from "./docmode";
 import type { EditorHandle, EditorHooks } from "./editortypes";
 import { Session, type Changed, type SaveState } from "./ideasave";
 import { ideaLink, mergedNote, pickerMatches, versionWhen } from "./ideasrelate";
-import { ideaDocs, type Doc, type DocRows, type DocSource, type DocTarget, type Version } from "./source";
+import { type Doc, type DocRows, type DocSource, type DocTarget, type Version } from "./source";
 
 export const errText = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : String(e));
 
@@ -32,6 +32,10 @@ const clock = {
  *  being torn down. Keyed by the opening, so it is never another document's. */
 export type Held = { key: string; text: string };
 
+/** One row of the `[[` picker: what it is called, what it is, and the markdown
+ *  it writes. */
+export type PickRow = { id: string | null; title: string; hint?: string; text?: string };
+
 /** Where the cursor goes when an editor comes: into the text, or to a line. */
 export type CursorNext = { line?: number } | null;
 
@@ -45,6 +49,12 @@ export type DocOptions = {
   listed(): void;
   /** Every document there is, for the `[[` picker. */
   rows: DocRows;
+  /** What `[[` offers instead, with the text each writes: a source whose links
+   *  are its own. */
+  picks?(query: string, from: string): PickRow[];
+  /** The text changed under the open document, by somebody else, with nothing
+   *  unsaved here. */
+  changedUnder?(before: string, after: string): void;
   /** A link to another document was followed. */
   follow(to: DocTarget): void;
   /** The selection, or the text under one, moved. */
@@ -112,7 +122,12 @@ export function useDoc(o: DocOptions) {
       // the document before is on screen until React commits this one, and
       // until the editor has been fetched there is none.
       text: () => (handle.current?.key === key ? handle.current.text() : mine.text),
-      replace: (c) => { mine.text = c; if (handle.current?.key === key) handle.current.replace(c); setReadBody(c); },
+      replace: (c) => {
+        const before = handle.current?.key === key ? handle.current.text() : mine.text;
+        // Reload theirs is the person's own act, on a conflict.
+        if (session.current?.current.kind !== "conflict" && before !== c) cb.current.changedUnder?.(before, c);
+        mine.text = c; if (handle.current?.key === key) handle.current.replace(c); setReadBody(c);
+      },
       onState: (st) => {
         setSave(st);
         if (st.kind === "conflict" || st.kind === "removed" || st.kind === "error") cb.current.trace(`${source.noun} ${d.id} ${st.kind}${st.kind === "conflict" ? ` (${st.why})` : ""}`);
@@ -269,13 +284,17 @@ export function useDoc(o: DocOptions) {
   const [picker, setPicker] = useState<Picker>(null);
   const [pickIdx, setPickIdx] = useState(0);
   const pickerDismissed = useRef<number | null>(null);
-  const pickRows = useMemo(() => (picker ? pickerMatches(o.rows, picker.query, open?.id ?? null) : []), [picker, o.rows, open]);
+  const pickRows = useMemo(() => {
+    if (!picker) return [];
+    if (cb.current.picks && open) return cb.current.picks(picker.query, open.id);
+    return pickerMatches(o.rows, picker.query, open?.id ?? null).map((r): PickRow => ({ id: r.id, title: r.title }));
+  }, [picker, o.rows, open]);
   const pickRef = useRef({ picker, pickRows, pickIdx });
   pickRef.current = { picker, pickRows, pickIdx };
-  const insertLink = useCallback((r: { id: string | null; title: string }) => {
+  const insertLink = useCallback((r: PickRow) => {
     const p = pickRef.current.picker;
     if (!p || !r.id) return;
-    handle.current?.insert(p.from, p.to, ideaLink(r.title, r.id));
+    handle.current?.insert(p.from, p.to, r.text ?? ideaLink(r.title, r.id));
     cb.current.trace(`linked ${r.id} into ${openRef.current?.id}`);
     setPicker(null);
   }, []);
@@ -302,8 +321,12 @@ export function useDoc(o: DocOptions) {
       if ((k === "Enter" || k === "Tab") && rows[i]) { insertLink(rows[i]); return true; }
       return false;
     },
-    // The editor knows `idea:` links alone (editor.ts).
-    follow: (id) => cb.current.follow({ source: ideaDocs, name: id }),
+    follow: (href) => {
+      const cur = openRef.current;
+      const to = cur?.source.target(cur.id, href) ?? null;
+      if (to) cb.current.follow(to);
+      return !!to;
+    },
     selected: (h) => setHasSel(h),
     selectionMoved: () => cb.current.selectionMoved?.(),
   }), [insertLink]);
@@ -340,8 +363,9 @@ export function useDoc(o: DocOptions) {
     };
   }, []);
 
+  const say = useCallback((msg: string) => cb.current.notice(msg), []);
   return {
-    source, open, save, mode, setMode, switchMode, gotoLine, readBody, renaming, setRenaming, busy, setBusy, hasSel,
+    say, source, open, save, mode, setMode, switchMode, gotoLine, readBody, renaming, setRenaming, busy, setBusy, hasSel,
     history, setHistory, versions, tick, bump, session, handle, held, cursorNext, arm,
     begin, current, leave, openDoc, rename, saveAsNew, closeOpen, restore,
     picker, pickIdx, pickRows, insertLink, hooks, replaced,

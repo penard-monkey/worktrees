@@ -42,6 +42,8 @@ export interface DocSource {
   write(id: string, content: string, expectedMtime: number, keepHistory: boolean): Promise<Saved>;
   /** Hear what changed under the source's root. Returns the unlisten. */
   watch(on: (ev: Changed) => void): () => void;
+  /** Where a text that is overwritten on purpose (Keep mine) goes first. */
+  readonly keeps: string;
   /** One document's own history, for the pane's panel. A source whose history
    *  is its folder's (memory) leaves both out and hands the pane a panel of its
    *  own (DocumentPane's `history`). */
@@ -67,6 +69,7 @@ export interface DocSource {
 /** Ideas and plans: one folder, one set of rows, named by id. */
 export const ideaDocs: DocSource = {
   noun: "idea",
+  keeps: ".history",
   // `idea:` links become `#idea:` ones, which the shared renderer links.
   readBody: (text) => readableLinks(bodyOf(text)),
   target(_from, href) {

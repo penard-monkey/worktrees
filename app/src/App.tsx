@@ -80,11 +80,11 @@ import { NoMemory, WorkspaceOverview, type DocLite, type WsParts } from "./Works
 import { DocChips, WorkspaceFrame } from "./WorkspaceFrame";
 import { ChatDot, ChatLines, ChatsTab, NavChats, RefusedStart, StartingChat, WorkspaceChatColumn } from "./WorkspaceChat";
 import { useWsChats } from "./useWsChats";
-import { MemoryCard, MemoryFiles, MemoryHistory, MemoryPreview, MemoryUnread } from "./WorkspaceMemory";
+import { keepFiles, MemoryCard, MemoryFiles, MemoryHistory, MemoryPreview, MemoryStrips, MemoryUnread } from "./WorkspaceMemory";
 import { useWsMemory } from "./useWsMemory";
-import { fileOf, longIndex, notePath, sizeWords, trailStart, trailStep, trailTo, type Trail } from "./wsmemory";
+import { fileOf, longIndex, memoryPicks, notePath, sizeWords, trailStart, trailStep, trailTo, type Trail } from "./wsmemory";
 import { memoryDocs } from "./doc/memory";
-import { memoryLink } from "./doc/memorypath";
+import { linkTo, memoryLink } from "./doc/memorypath";
 import { navRows, type ChatRow } from "./wschats";
 import { attentionOf, docChips, LAST_VIEW_KEY, lastView, rollupOf, tabOr, wsCounts, wsFrameOn, wsTabs, type LastView, type Rollup } from "./wsview";
 import { MainDocument, type MainDocApi } from "./doc/MainDocument";
@@ -4464,6 +4464,10 @@ function App() {
   const [wsTrail, setWsTrail] = useState<Record<string, Trail>>({});
   /** A change History was asked to show, from elsewhere. */
   const [memAt, setMemAt] = useState<{ ws: string; commit: string | null; n: number } | null>(null);
+  /** The memory file that changed under its reader, and the ones whose "may edit
+   *  this too" was heard, while the app runs. */
+  const [memUnder, setMemUnder] = useState<{ ws: string; name: string; before: string; after: string } | null>(null);
+  const [memHeard, setMemHeard] = useState<ReadonlySet<string>>(new Set());
   const [memBusy, setMemBusy] = useState(false);
   /** The chat each workspace has in its middle column, while the app runs. */
   const [wsChat, setWsChat] = useState<Record<string, string | null>>({});
@@ -6908,6 +6912,8 @@ function App() {
     setWsSide("chat");
     setWsStart({ ws: id, why: null });
     const got = await wsChats.start(id);
+    // A workspace's first chat makes its memory.
+    void wsMem.refresh(id);
     if ("refused" in got) { setWsStart({ ws: id, why: got.refused }); return; }
     setWsStart(null);
     setWsChat((c) => ({ ...c, [id]: got.conv }));
@@ -10744,10 +10750,11 @@ function App() {
                 tabs={tabsOn}
                 tab={wsTabNow}
                 counts={{ ideas: wsShown?.ideas?.length ?? 0, chats: wsShown && wsChatsOn ? wsChats.of(wsShown.id)?.chats.length ?? 0 : 0 }}
-                newChat={wsShown && wsChatsOn ? { busy: wsStart?.ws === wsShown.id && wsStart.why === null, run: () => void startChat(wsShown.id) } : null}
+                newChat={wsShown && wsChatsOn && (wsChats.of(wsShown.id)?.chats.length ?? 0) > 0 ? { busy: wsStart?.ws === wsShown.id && wsStart.why === null, run: () => void startChat(wsShown.id) } : null}
                 middle={wsMiddle}
                 side={wsSide}
                 setSide={setWsSide}
+                firstChat={() => { if (wsShown) void startChat(wsShown.id); }}
                 chatsTab={wsShown && wsChatsOn && (
                   <ChatsTab note={(n) => openMemory(wsShown.id, notePath(n))} rows={wsChats.rows(wsShown.id)} on={wsChat[wsShown.id] ?? null} starting={wsStart?.why === null} ago={ago}
                     open={(conv) => openChat(wsShown.id, conv)} start={() => void startChat(wsShown.id)} />
@@ -10772,7 +10779,7 @@ function App() {
                     showTab={(t) => void showWs(wsShown.id, t)}
                     memory={!wsChatsOn ? null : wsMem.error(wsShown.id) ? <MemoryUnread why={wsMem.error(wsShown.id)!} retry={() => void wsMem.refresh(wsShown.id)} />
                       : !memView ? <p className="ws-ov-none">Reading…</p>
-                      : !memView.made ? <NoMemory newChat={() => void startChat(wsShown.id)} make={() => void makeMemory(wsShown.id)} busy={memBusy} />
+                      : !memView.made ? <NoMemory make={() => void makeMemory(wsShown.id)} busy={memBusy} />
                       : (
                         <MemoryCard ws={wsShown.id} view={memView} ago={ago} open={(path) => openMemory(wsShown.id, path)} diff={(commit) => void showChange(wsShown.id, commit)}
                           follow={(href) => { const to = memoryDocs(wsShown.id).target("MEMORY.md", href); if (to) followDoc(to); }}
@@ -10782,7 +10789,6 @@ function App() {
                     chats={wsChatsOn ? <ChatLines rows={navRows(wsChats.rows(wsShown.id)).rows} ago={ago} open={(conv) => openChat(wsShown.id, conv)} /> : null}
                     chatCount={wsChats.of(wsShown.id)?.chats.length ?? 0}
                     newChat={() => void startChat(wsShown.id)}
-                    starting={wsStart?.why === null}
                     projects={wsShown.projects.map((p) => {
                       const places = (ws?.projects.find((v) => v.root === p.root)?.snapshot?.places ?? []);
                       return { root: p.root, name: basename(p.root), registered: p.registered, places: places.length,
@@ -10795,7 +10801,7 @@ function App() {
                 has={wsShown ? (wsTabNow === "plan" ? !!wsShown.plan : wsTabNow === "memory" ? madeHere : anyIdea) : false}
                 memory={{
                   count: memView?.count ?? 0,
-                  files: wsShown && memView?.made && !wsMem.error(wsShown.id) ? <MemoryFiles view={memView} on={memPath(wsShown.id)} ago={ago} open={(path) => openMemory(wsShown.id, path)} /> : null,
+                  files: wsShown && memView?.made && !wsMem.error(wsShown.id) ? <MemoryFiles ws={wsShown.id} made={(path) => void (async () => { await wsMem.refresh(wsShown.id); void showWsRef.current(wsShown.id, "memory", { doc: path, startIn: "edit" }); })()} view={memView} on={memPath(wsShown.id)} ago={ago} open={(path) => openMemory(wsShown.id, path)} /> : null,
                   instead: !wsShown ? null
                     : wsMem.error(wsShown.id) ? <MemoryUnread why={wsMem.error(wsShown.id)!} retry={() => void wsMem.refresh(wsShown.id)} />
                     : memView && !memView.made ? <NoMemory newChat={() => void startChat(wsShown.id)} make={() => void makeMemory(wsShown.id)} busy={memBusy} />
@@ -10852,9 +10858,15 @@ function App() {
                         <MemoryHistory key={`${mainDoc.ws}|${mainDoc.name}|${memAt?.ws === mainDoc.ws ? memAt.n : 0}`} ws={mainDoc.ws} path={mainDoc.name} at={memAt?.ws === mainDoc.ws ? memAt.commit : null} tick={wsMem.tick(mainDoc.ws)}
                           open={(path) => { close(); setMemAt(null); openMemory(mainDoc.ws, path); }} close={() => { close(); setMemAt(null); }} />
                       ),
-                      strips: mainDoc.name === "MEMORY.md" && memView && longIndex(memView) ? (
-                        <div className="wsm-long" data-testid="memory-long" role="status"><span>{longIndex(memView)}</span><button className="ctrl sm" disabled title="Not yet: it starts a chat that moves detail into topics">Tidy…</button></div>
-                      ) : undefined,
+                      strips: (mode: "edit" | "read") => (
+                        <MemoryStrips mode={mode} long={mainDoc.name === "MEMORY.md" && memView ? longIndex(memView) : null}
+                          live={wsChats.rows(mainDoc.ws).filter((x) => x.live).map((x) => x.chat.title)}
+                          heard={memHeard.has(`${mainDoc.ws}|${mainDoc.name}`)} hear={() => setMemHeard((h) => new Set([...h, `${mainDoc.ws}|${mainDoc.name}`]))}
+                          under={memUnder?.ws === mainDoc.ws && memUnder.name === mainDoc.name ? memUnder : null} seen={() => setMemUnder(null)} />
+                      ),
+                      attach: (files: File[]) => keepFiles(mainDoc.ws, mainDoc.name, files),
+                      picks: (query: string, from: string) => memoryPicks(query, from, wsMem.of(mainDoc.ws), ideasOn ? (wsById(mainDoc.ws)?.ideas ?? []).flatMap((id) => { const d = ideaDocs.find((x) => x.id === id); return d ? [d] : []; }) : [], linkTo),
+                      changedUnder: (name: string, before: string, after: string) => setMemUnder({ ws: mainDoc.ws, name, before, after }),
                     } : {})}
                   />
                 )}

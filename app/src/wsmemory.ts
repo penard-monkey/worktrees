@@ -100,6 +100,92 @@ export function trailTo(t: Trail, path: string): Trail {
   return { at: paths.length - 1, paths };
 }
 export const trailStep = (t: Trail, by: -1 | 1): Trail | null => (t.paths[t.at + by] === undefined ? null : { at: t.at + by, paths: t.paths });
+// ── editing (slice 5) ───────────────────────────────────────────────────────
+const label = (t: string): string => (t.trim() || "Untitled").replace(/\\/g, "\\\\").replace(/\[/g, "\\[").replace(/\]/g, "\\]");
+const isImage = (f: MemoryFile) => f.kind === "image";
+const hintOf = (f: MemoryFile): string => (isImage(f) ? "image" : f.path.startsWith("notes/") ? "note" : f.path.startsWith("topics/") ? "topic" : "file");
+/** The markdown a link to a memory file is: plain, relative to the file it is
+ *  written in; an image is drawn. `link` is memorypath's `linkTo`. */
+export const linkText = (from: string, f: MemoryFile, link: (from: string, to: string) => string): string =>
+  `${isImage(f) ? "!" : ""}[${label(isImage(f) ? f.name.replace(/\.[^.]+$/, "") : f.title ?? f.name)}](${link(from, f.path)})`;
+export type MemoryPick = { id: string; title: string; hint: string; text: string };
+/** What `[[` offers in a memory file: its files first (the best match first),
+ *  then the workspace's linked ideas. At most ten. */
+export function memoryPicks(query: string, from: string, v: MemoryView | null | undefined, ideas: readonly { id: string; title: string }[], link: (from: string, to: string) => string): MemoryPick[] {
+  const q = query.trim().toLowerCase();
+  const score = (t: string) => (t.toLowerCase().startsWith(q) ? 0 : 1);
+  const files = (v?.folders ?? []).flatMap((d) => d.files)
+    .filter((f) => f.path !== from && (!q || f.path.toLowerCase().includes(q) || (f.title ?? "").toLowerCase().includes(q)))
+    .sort((a, b) => score(fileName(a)) - score(fileName(b)) || newest(a, b))
+    .map((f) => ({ id: f.path, title: fileName(f), hint: hintOf(f), text: linkText(from, f, link) }));
+  const linked = ideas.filter((i) => !q || i.title.toLowerCase().includes(q)).map((i) => ({ id: i.id, title: i.title, hint: "idea", text: `[${label(i.title)}](idea:${i.id})` }));
+  return [...files, ...linked].slice(0, 10);
+}
+/** The path a new file's name asks for: a folder of its own when it has one, else
+ *  under topics; a text. `null`: not a name. */
+export function newFilePath(name: string, topic: (title: string) => string): string | null {
+  const n = name.trim().replace(/^\/+|\/+$/g, "");
+  if (!n || n.split("/").some((p) => !p || p.startsWith(".")) || /[\\\u0000-\u001f]/.test(n)) return null;
+  if (!n.includes("/")) return topic(n);
+  return /\.(md|markdown|txt|csv|json|ya?ml|toml)$/i.test(n) ? n : `${n}.md`;
+}
+export const titleOf = (path: string): string => path.slice(path.lastIndexOf("/") + 1).replace(/\.[^.]+$/, "").replace(/[-_]+/g, " ").replace(/^./, (c) => c.toUpperCase());
+/** A file dropped in: 4 MB at most, as the engine has it. */
+export const PUT_MAX = 4 * 1024 * 1024;
+export const tooBig = (name: string, size: number): string | null => (size > PUT_MAX ? `${name} is ${sizeWords(size)}: a memory takes files up to 4 MB.` : null);
+/** A pasted image has no name of its own worth keeping. */
+export const putName = (name: string, type: string, now: Date): string =>
+  /^image\.\w+$/.test(name) || !name ? `pasted-${now.toISOString().slice(0, 19).replace(/[T:]/g, "-")}.${(type.split("/")[1] ?? "png").replace("svg+xml", "svg").replace("jpeg", "jpg")}` : name.replace(/[\\/\u0000-\u001f]/g, "-").replace(/^\.+/, "") || "file";
+
+/** Who else may write the open file. */
+export function mayEdit(live: readonly string[]): string | null {
+  if (!live.length) return null;
+  return live.length === 1 ? `“${live[0]}” is live and may edit this file too.` : `${live.length} chats are live and may edit this file too.`;
+}
+/** It changed on disk with nothing unsaved here. No event says by whom: a chat is
+ *  named as live, never as the one that did it. */
+export const changedUnderWords = (live: readonly string[]): string =>
+  `Changed on disk.${live.length === 1 ? ` “${live[0]}” is live.` : live.length ? ` ${live.length} chats are live.` : ""}`;
+
+export type DiffLine = { kind: "ctx" | "del" | "add" | "gap"; no: number | null; text: string };
+/** Two texts as lines, what is between their common head and tail by longest
+ *  common subsequence (a block too large for that is all removed, all added), with
+ *  three lines of context. */
+export function lineDiff(before: string, after: string): DiffLine[] {
+  const a = before.split(/\r?\n/), b = after.split(/\r?\n/);
+  let s = 0;
+  while (s < a.length && s < b.length && a[s] === b[s]) s++;
+  let ea = a.length, eb = b.length;
+  while (ea > s && eb > s && a[ea - 1] === b[eb - 1]) { ea--; eb--; }
+  const A = a.slice(s, ea), B = b.slice(s, eb);
+  const mid: DiffLine[] = [];
+  if (A.length * B.length > 1_000_000) {
+    A.forEach((t, i) => mid.push({ kind: "del", no: s + i + 1, text: t }));
+    B.forEach((t, i) => mid.push({ kind: "add", no: s + i + 1, text: t }));
+  } else {
+    const w = B.length + 1, L = new Uint32Array((A.length + 1) * w);
+    for (let i = A.length - 1; i >= 0; i--) for (let j = B.length - 1; j >= 0; j--) L[i * w + j] = A[i] === B[j] ? L[(i + 1) * w + j + 1] + 1 : Math.max(L[(i + 1) * w + j], L[i * w + j + 1]);
+    for (let i = 0, j = 0; i < A.length || j < B.length;) {
+      if (i < A.length && j < B.length && A[i] === B[j]) { mid.push({ kind: "ctx", no: s + j + 1, text: B[j] }); i++; j++; }
+      else if (j >= B.length || (i < A.length && L[(i + 1) * w + j] >= L[i * w + j + 1])) { mid.push({ kind: "del", no: s + i + 1, text: A[i] }); i++; }
+      else { mid.push({ kind: "add", no: s + j + 1, text: B[j] }); j++; }
+    }
+  }
+  if (!mid.length) return [];
+  const head: DiffLine[] = b.slice(Math.max(0, s - 3), s).map((t, i) => ({ kind: "ctx", no: Math.max(0, s - 3) + i + 1, text: t }));
+  const tail: DiffLine[] = b.slice(eb, eb + 3).map((t, i) => ({ kind: "ctx", no: eb + i + 1, text: t }));
+  // A long unchanged run between two changes is one gap.
+  const out: DiffLine[] = [...head];
+  for (let i = 0; i < mid.length;) {
+    let j = i;
+    while (j < mid.length && mid[j].kind === "ctx") j++;
+    if (j - i > 8) { out.push(...mid.slice(i, i + 3), { kind: "gap", no: null, text: "" }, ...mid.slice(j - 3, j)); i = j; }
+    else if (j > i) { out.push(...mid.slice(i, j)); i = j; }
+    else { out.push(mid[i]); i++; }
+  }
+  return [...out, ...tail];
+}
+
 /** The file a chat's note is, in the memory (`chats.json` names it from the
  *  workspace's folder). */
 export const notePath = (note: string): string => note.replace(/^memory\//, "");

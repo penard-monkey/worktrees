@@ -14,14 +14,14 @@ export function place(x: number, y: number, w = 260, h = 160): React.CSSProperti
 
 /** The `[[` picker, under the cursor. Keys come through the editor
  *  (`EditorHooks.pickerKey`); a click picks too. */
-export function LinkPicker<T extends Row>(props: { x: number; y: number; rows: T[]; index: number; pick(r: T): void }) {
+export function LinkPicker<T extends Pick<Row, "id" | "title"> & { hint?: string }>(props: { x: number; y: number; rows: T[]; index: number; pick(r: T): void }) {
   return (
     <div className="ix-pop ix-linkpick" role="listbox" data-testid="ideas-link-picker" style={place(props.x, props.y + 4, 280, 220)}
       onMouseDown={(e) => e.preventDefault()}>
-      {props.rows.length === 0 && <p className="ix-quiet ix-pop-head">No idea's title matches.</p>}
+      {props.rows.length === 0 && <p className="ix-quiet ix-pop-head">Nothing matches.</p>}
       {props.rows.map((r, i) => (
         <button key={r.id!} role="option" aria-selected={i === props.index} className={`ix-pop-item${i === props.index ? " on" : ""}`}
-          data-testid="ideas-link-pick" onClick={() => props.pick(r)}>{r.title || "Untitled"}</button>
+          data-testid="ideas-link-pick" onClick={() => props.pick(r)}>{r.title || "Untitled"}{r.hint && <span className="ix-pop-key">{r.hint}</span>}</button>
       ))}
     </div>
   );

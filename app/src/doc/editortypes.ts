@@ -11,8 +11,8 @@ export type EditorHooks = {
   picker?(p: { from: number; to: number; query: string; x: number; y: number } | null): void;
   /** A key while the picker is open; `true` = it took the key. */
   pickerKey?(key: "ArrowUp" | "ArrowDown" | "Enter" | "Tab" | "Escape"): boolean;
-  /** ⌘-click (Ctrl elsewhere) on an `idea:` link. */
-  follow?(id: string): void;
+  /** ⌘-click (Ctrl elsewhere) on a link, by its href. `true`: it was followed. */
+  follow?(href: string): boolean;
   /** Whether text is selected, when that changes. */
   selected?(has: boolean): void;
   /** The selection, or the text under one, moved. */
@@ -34,6 +34,9 @@ export type DocEditor = {
   /** Replace document positions `from..to` with `text`, as a person's input
    *  (so it saves), and put the cursor after it. */
   insert(from: number, to: number, text: string): void;
+  /** Put `text` at the cursor, or where a point of the window is, as a person's
+   *  input. */
+  put(text: string, at?: { x: number; y: number }): void;
   /** Put the cursor at the start of line `n` (1-based, the file's) and show it. */
   gotoLine(n: number): void;
   destroy(): void;

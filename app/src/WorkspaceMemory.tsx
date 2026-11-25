@@ -4,20 +4,24 @@
  *  `memoryDocs` (doc/memory.ts). Module scope: it holds state. */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { memoryDocs, type MemoryChange, type MemoryFile, type MemoryFileDiff, type MemoryImage, type MemoryView } from "./doc/memory";
-import { linkTo } from "./doc/memorypath";
+import { isImagePath, linkTo, topicPath } from "./doc/memorypath";
 import { readableLinks } from "./doc/ideasrelate";
 import { parseUnifiedDiff } from "./diff";
 import * as Icons from "./icons";
 import { Markdown } from "./markdown";
 import { useArmed } from "./useArmed";
-import { changeFiles, changedBy, changeWords, conflictWords, fileGroups, fileName, filesWords, revertOf, sizeWords, STATUS_WORDS } from "./wsmemory";
+import { useEscape } from "./useEscape";
+import {
+  changeFiles, changedBy, changedUnderWords, changeWords, conflictWords, fileGroups, fileName, filesWords, lineDiff, linkText, mayEdit, newFilePath, putName,
+  revertOf, sizeWords, STATUS_WORDS, titleOf, tooBig,
+} from "./wsmemory";
 import { whenWords } from "./wschats";
 import "./WorkspaceMemory.css";
 
 const errText = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : String(e));
 
 /** The files: the index, then notes, topics, files; folded where there are many. */
-export function MemoryFiles(props: { view: MemoryView; on: string | null; ago(epoch: number): string; open(path: string): void }) {
+export function MemoryFiles(props: { ws: string; view: MemoryView; on: string | null; ago(epoch: number): string; open(path: string): void; made(path: string): void }) {
   const { view } = props;
   const [q, setQ] = useState("");
   const [folds, setFolds] = useState<Record<string, boolean>>({});
@@ -53,6 +57,7 @@ export function MemoryFiles(props: { view: MemoryView; on: string | null; ago(ep
           </section>
         );
       })}
+      <NewFile ws={props.ws} made={props.made} />
       {(view.truncated || view.skipped.length > 0) && (
         <p className="wsm-skipped" data-testid="memory-skipped" title={view.skipped.map((s) => `${s.path}: ${s.why}`).join("\n")}>
           {view.truncated ? "Not every file is listed. " : ""}{view.skipped.length ? `${filesWords(view.skipped.length)} not shown: ${view.skipped[0].path} (${view.skipped[0].why})${view.skipped.length > 1 ? "…" : ""}` : ""}
@@ -60,6 +65,104 @@ export function MemoryFiles(props: { view: MemoryView; on: string | null; ago(ep
       )}
     </div>
   );
+}
+
+/** "+ New file": a name, and a text under topics (or where the name says). */
+function NewFile({ ws, made }: { ws: string; made(path: string): void }) {
+  const [name, setName] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEscape(() => { setName(null); setErr(null); }, name !== null);
+  const path = name === null ? null : newFilePath(name, (t) => topicPath(t));
+  const make = async () => {
+    if (!path || busy) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await memoryDocs(ws).create(path, `# ${titleOf(path)}\n\n`);
+      setName(null);
+      made(path);
+    } catch (e) { setErr(errText(e)); }
+    finally { setBusy(false); }
+  };
+  if (name === null) return <button className="wsm-new" data-testid="memory-new" onClick={() => setName("")}><Icons.Plus size={12} /> New file</button>;
+  return (
+    <div className="wsm-newf">
+      <input className="wsc-filter" data-testid="memory-new-name" autoFocus placeholder="Its name" value={name} spellCheck={false} disabled={busy}
+        onChange={(e) => setName(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === "Enter") void make(); }} />
+      <p className="wsm-skipped" data-testid="memory-new-path">{err ?? (path ? path : name.trim() ? "That is not a file name." : "Under topics, unless the name has a folder.")}</p>
+      <div className="ws-ov-line">
+        <button className="ctrl sm" data-testid="memory-new-make" disabled={!path || busy} onClick={() => void make()}>Make</button>
+        <button className="ctrl sm" onClick={() => { setName(null); setErr(null); }}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+/** Over a memory file: a long index, who else may write it, and what changed
+ *  under the person with nothing of theirs unsaved. */
+export function MemoryStrips(props: {
+  mode: "edit" | "read";
+  long: string | null;
+  /** The titles of the live chats. */
+  live: readonly string[];
+  /** Said already, for this file. */
+  heard: boolean;
+  hear(): void;
+  under: { before: string; after: string } | null;
+  seen(): void;
+}) {
+  const [diff, setDiff] = useState(false);
+  const { under } = props;
+  useEffect(() => setDiff(false), [under]);
+  const may = props.mode === "edit" && !props.heard ? mayEdit(props.live) : null;
+  return (
+    <>
+      {props.long && <div className="wsm-long" data-testid="memory-long" role="status"><span>{props.long}</span><button className="ctrl sm" disabled title="Not yet: it starts a chat that moves detail into topics">Tidy…</button></div>}
+      {may && (
+        <div className="wsm-long" data-testid="memory-may-edit" role="status">
+          <span>{may} <span className="wsm-change-d">If it does while you have unsaved text, you choose: keep yours, or reload its version.</span></span>
+          <button className="ctrl sm" data-testid="memory-may-edit-ok" onClick={props.hear}>Dismiss</button>
+        </div>
+      )}
+      {under && (
+        <>
+          <div className="wsm-long under" data-testid="memory-under" role="status">
+            <span>{changedUnderWords(props.live)}</span>
+            <button className="ctrl sm" data-testid="memory-under-diff" aria-expanded={diff} onClick={() => setDiff((d) => !d)}>Diff</button>
+            <button className="ctrl sm" data-testid="memory-under-ok" onClick={props.seen}>Dismiss</button>
+          </div>
+          {diff && <div className="wsm-under"><LineDiff before={under.before} after={under.after} /></div>}
+        </>
+      )}
+    </>
+  );
+}
+function LineDiff({ before, after }: { before: string; after: string }) {
+  const rows = useMemo(() => lineDiff(before, after), [before, after]);
+  return (
+    <div className="wsm-diff" data-testid="memory-diff" role="table" aria-label="What changed">
+      {rows.map((r, i) => r.kind === "gap" ? <div key={i} className="wsm-dl gap" aria-hidden="true">⋯</div> : (
+        <div key={i} className={`wsm-dl ${r.kind}`} role="row"><span className="wsm-dn">{r.no}</span><span className="wsm-ds" aria-hidden="true">{r.kind === "add" ? "+" : r.kind === "del" ? "−" : " "}</span><span className="wsm-dt">{r.text || " "}</span></div>
+      ))}
+    </div>
+  );
+}
+
+/** Files dropped on or pasted into a memory file: kept under `files/`, each a
+ *  link (an image is drawn). One that is refused is said, and the rest go on. */
+export async function keepFiles(ws: string, from: string, files: readonly File[]): Promise<{ text: string; refused: string[] }> {
+  const put: string[] = [], refused: string[] = [];
+  for (const f of files) {
+    const name = putName(f.name, f.type, new Date());
+    const big = tooBig(name, f.size);
+    if (big) { refused.push(big); continue; }
+    try {
+      const r = await memoryDocs(ws).put(name, new Uint8Array(await f.arrayBuffer()));
+      put.push(linkText(from, { path: r.path, name: r.file, size: r.size, mtime_ms: r.mtime_ms, kind: isImagePath(r.path) ? "image" : "other", title: null }, linkTo));
+    } catch (e) { refused.push(`${name} was not kept: ${errText(e)}.`); }
+  }
+  return { text: put.join("\n"), refused };
 }
 
 /** A file that is not a text: an image's preview, or its name and size. */

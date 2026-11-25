@@ -46,7 +46,8 @@ async function overview(page, tag, eng) {
   ok(await until(page, () => !!document.querySelector("[data-testid=ws-doc-memory] [data-testid=memory-fresh]")) && !(await page.locator("[data-testid=ws-doc-memory]").first().evaluate((e) => e.classList.contains("none"))), `${tag} the Memory chip has something behind it, and the purple dot: it changed since you looked`);
   await name(page);
   await page.waitForSelector("[data-testid=memory-excerpt]");
-  ok((await page.locator("[data-testid=memory-excerpt] .md-h1").innerText()) === "Memory: Everything" && /MEMORY\.md · [\d.]+ (B|KB) · 5 files/.test(await page.locator("[data-testid=ws-ov-card-memory] .wsf-card-side").innerText()), `${tag} the Overview has the index as it reads, its size and the file count`);
+  ok(await page.evaluate(() => { const e = document.querySelector("[data-testid=memory-excerpt]"); const h1 = e.querySelector(".md-h1"), h2 = e.querySelector(".md-h2"), p = e.querySelector("p"); const px = (x) => parseFloat(getComputedStyle(x).fontSize); return h1.getBoundingClientRect().height === 0 && px(h2) <= px(p) * 1.15; }), `${tag} its headings are a card's, and its own title is not drawn twice`);
+  ok(/What this workspace is for/.test(await page.locator("[data-testid=memory-excerpt]").innerText()) && /MEMORY\.md · [\d.]+ (B|KB) · 5 files/.test(await page.locator("[data-testid=ws-ov-card-memory] .wsf-card-side").innerText()), `${tag} the Overview has the index as it reads, its size and the file count`);
   ok(/Edited by hand 4h ago/.test(await page.locator("[data-testid=memory-last]").innerText()) && /4 files/.test(await page.locator("[data-testid=memory-last]").innerText()), `${tag} what last changed it, and how much`);
   ok(await page.evaluate(() => { const e = document.querySelector("[data-testid=memory-excerpt]"); return e.scrollTop === 0 && getComputedStyle(e).overflowY === "hidden"; }), `${tag} never in a scroller of its own`);
   // A long one is cut, and says where the rest is.
@@ -139,6 +140,7 @@ async function hist(page, tag, eng) {
   await history(page);
   ok(await until(page, () => document.querySelectorAll("[data-testid=memory-log-row]").length > 0) && await histRows(page) === "edit,fold,undo,fold,made", `${tag} the index's changes, newest first (${await histRows(page)})`);
   ok(await page.evaluate(() => getComputedStyle(document.querySelector("[data-testid=main-doc] .ix-body")).display === "none"), `${tag} History takes the document's place`);
+  ok(await page.evaluate(() => [...document.querySelectorAll(".wsm-row")].every((r) => { const n = r.querySelector(".wsm-row-n"), d = r.querySelector(".wsm-row-d").getBoundingClientRect(); return d.right >= r.getBoundingClientRect().right - 20 && n.scrollWidth <= n.clientWidth + 1; })), `${tag} a change's subject takes the row's room`);
   await page.click("[data-testid=memory-hist-close]");
   await page.click("[data-testid=memory-file][data-path='topics/nas-layout.md']");
   await isDoc(page, "topics/nas-layout.md");
@@ -222,6 +224,108 @@ async function states(page, tag) {
   ok(await until(page, () => !document.querySelector("[data-testid=main-doc]") && !document.querySelector("[data-testid=ws-doc-memory]")), `${tag} turned off, the open file is closed and the chip is gone`);
 }
 
+/** Slice 5: a person writes in it, beside chats that may. */
+async function edit(page, tag, eng) {
+  const ws = await boot(page, ["beta_workspace_chats", "beta_ideas"]);
+  await call(page, "workspace_link_idea", { id: ws, idea: "01JC8Z4K3M9QX2T7VB00000901" });
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await page.locator("[data-testid=ws-doc-memory]").first().click();
+  await isDoc(page, "MEMORY.md");
+  ok(!(await page.$("[data-testid=memory-may-edit]")), `${tag} in Read nothing is said of live chats`);
+  await page.click("[data-testid=main-doc] [data-testid=ideas-mode-edit]");
+  ok(await until(page, () => /2 chats are live and may edit this file too\./.test(document.querySelector("[data-testid=memory-may-edit]")?.textContent ?? "")), `${tag} in Edit, with chats live, it says they may edit this too`);
+  const ed = page.locator("[data-testid=main-doc] .cm-content");
+  await ed.click();
+  await page.keyboard.press("ControlOrMeta+End");
+  await page.keyboard.type("\nMINE");
+  ok(await until(page, (id) => window.__mock.memoryWrites().some((w) => w.path === "MEMORY.md" && /MINE/.test(w.content)), ws), `${tag} …and does not block: typing saves`);
+  await page.click("[data-testid=memory-may-edit-ok]");
+  ok(!(await page.$("[data-testid=memory-may-edit]")), `${tag} Dismiss`);
+  await until(page, () => document.querySelector("[data-testid=main-doc] [data-testid=ideas-save]")?.dataset.state === "clean");
+  await page.waitForTimeout(400);
+  ok(!(await page.$("[data-testid=memory-under]")), `${tag} your own save is not a change under you`);
+
+  // ── [[ ──
+  await ed.click();
+  await page.keyboard.press("ControlOrMeta+End");
+  await page.keyboard.type("\nSee [[");
+  ok(await until(page, () => document.querySelectorAll("[data-testid=ideas-link-pick]").length >= 5), `${tag} [[ offers`);
+  const rows = await page.locator("[data-testid=ideas-link-pick]").evaluateAll((b) => b.map((x) => x.textContent));
+  ok(/idea$/.test(rows.at(-1)) && rows.slice(0, -1).every((r) => /(note|topic|image|file)$/.test(r)) && !rows.some((r) => /^MEMORY/.test(r)), `${tag} …this memory's files first, then the linked idea (${rows.join(" | ")})`);
+  await page.keyboard.type("nas");
+  await until(page, () => document.querySelectorAll("[data-testid=ideas-link-pick]").length === 1);
+  await page.keyboard.press("Enter");
+  ok(await until(page, () => window.__mock.memoryWrites().some((w) => /See \[NAS layout\]\(topics\/nas-layout\.md\)/.test(w.content))), `${tag} and writes a plain markdown link`);
+  await page.locator("[data-testid=main-doc] .cm-line", { hasText: "See " }).locator("span", { hasText: "NAS layout" }).first().click({ modifiers: ["ControlOrMeta"] });
+  ok(await isDoc(page, "topics/nas-layout.md"), `${tag} ⌘-click on it follows it`);
+
+  // ── New file ── (from Read, so it is the new file's own Edit that is seen)
+  await page.click("[data-testid=main-doc] [data-testid=ideas-mode-read]");
+  await page.click("[data-testid=memory-new]");
+  await page.fill("[data-testid=memory-new-name]", "../x");
+  ok(/not a file name/.test(await page.locator("[data-testid=memory-new-path]").innerText()) && await page.locator("[data-testid=memory-new-make]").isDisabled(), `${tag} New file refuses what is not a name`);
+  await page.fill("[data-testid=memory-new-name]", "Guest access");
+  ok((await page.locator("[data-testid=memory-new-path]").innerText()) === "topics/guest-access.md", `${tag} …and says where it goes`);
+  await page.keyboard.press("Enter");
+  ok(await isDoc(page, "topics/guest-access.md") && await until(page, () => /# Guest access/.test(document.querySelector("[data-testid=main-doc] .cm-content")?.innerText ?? "")), `${tag} it is made, and opens in Edit`);
+  await page.click("[data-testid=memory-new]");
+  await page.fill("[data-testid=memory-new-name]", "Guest access");
+  await page.keyboard.press("Enter");
+  ok(await until(page, () => /already a file/.test(document.querySelector("[data-testid=memory-new-path]")?.textContent ?? "")), `${tag} one that is there is refused, in words`);
+  await page.keyboard.press("Escape");
+  ok(await until(page, () => !document.querySelector("[data-testid=memory-new-name]")), `${tag} Escape puts it away`);
+
+  // ── a dropped image, a pasted one, one too big ──
+  const drop = (kind, size, name) => page.evaluate(([kind, size, name]) => {
+    const png = atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==");
+    const bytes = size ? new Uint8Array(size) : Uint8Array.from(png, (c) => c.charCodeAt(0));
+    const dt = new DataTransfer();
+    dt.items.add(new File([bytes], name, { type: "image/png" }));
+    const el = document.querySelector("[data-testid=main-doc] .cm-content"), r = el.getBoundingClientRect();
+    const e = kind === "drop" ? new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: dt, clientX: r.x + 60, clientY: r.y + 40 }) : new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: dt });
+    el.dispatchEvent(e);
+    return e.defaultPrevented;
+  }, [kind, size, name]);
+  await ed.click();
+  ok(await drop("drop", 0, "wiring.png"), `${tag} a dropped image is taken`);
+  ok(await until(page, () => window.__mock.memoryWrites().some((w) => w.path === "topics/guest-access.md" && /!\[wiring\]\(\.\.\/files\/wiring\.png\)/.test(w.content))), `${tag} …kept under files, and linked from where it fell`);
+  ok(await until(page, () => !!document.querySelector("[data-testid=memory-file][data-path='files/wiring.png']")), `${tag} …and listed`);
+  await drop("paste", 0, "image.png");
+  ok(await until(page, () => window.__mock.memoryWrites().some((w) => /!\[pasted-[\d-]+\]\(\.\.\/files\/pasted-[\d-]+\.png\)/.test(w.content))), `${tag} a pasted one is kept under a name of its own`);
+  await drop("drop", 5 * 1024 * 1024, "huge.png");
+  ok(await until(page, () => /huge\.png is 5\.0 MB: a memory takes files up to 4 MB\./.test(document.querySelector("[data-testid=main-doc] [data-testid=ideas-notice]")?.textContent ?? "")) && !(await files(page)).includes("files/huge.png"), `${tag} 5 MB is refused in words`);
+  await page.click("[data-testid=main-doc] [data-testid=ideas-mode-read]");
+  ok(await until(page, () => [...document.querySelectorAll("[data-testid=main-doc] [data-testid=doc-image]")].some((i) => i.naturalWidth > 0)), `${tag} Read draws it`);
+
+  // ── changed under you ──
+  await open(page, "topics/nas-layout.md");
+  await page.evaluate((id) => window.__mock.memoryEdit(id, "topics/nas-layout.md", "# NAS layout\n\nONE NEW LINE\n"), ws);
+  ok(await until(page, () => /Changed on disk\. 2 chats are live\./.test(document.querySelector("[data-testid=memory-under]")?.textContent ?? "")) && /ONE NEW LINE/.test(await read(page)), `${tag} changed with nothing unsaved: it is there, and it is said`);
+  await page.click("[data-testid=memory-under-diff]");
+  ok(await until(page, () => /ONE NEW LINE/.test(document.querySelector(".wsm-under .wsm-dl.add")?.textContent ?? "") && !!document.querySelector(".wsm-under .wsm-dl.del")), `${tag} …with the diff`);
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/wsm-edit-${eng}.png` });
+  await page.click("[data-testid=memory-under-ok]");
+  ok(!(await page.$("[data-testid=memory-under]")), `${tag} …until dismissed`);
+
+  // ── both at once ──
+  await page.click("[data-testid=main-doc] [data-testid=ideas-mode-edit]");
+  await ed.click();
+  await page.keyboard.type("UNSAVED ");
+  await page.evaluate((id) => window.__mock.memoryEdit(id, "topics/nas-layout.md", "# NAS layout\n\nTHEIRS\n"), ws);
+  ok(await until(page, () => /Keep mine \(theirs goes to History\)/.test(document.querySelector("[data-testid=ideas-conflict]")?.textContent ?? "")) && /This file /.test(await page.locator("[data-testid=ideas-conflict]").innerText()), `${tag} with unsaved text it is the conflict, and theirs goes to History`);
+  ok(!(await page.$("[data-testid=memory-under]")), `${tag} …not "changed on disk"`);
+  await page.click("[data-testid=ideas-keep-mine]");
+  ok(await until(page, () => window.__mock.memoryWrites().some((w) => /UNSAVED/.test(w.content) && w.keep_history)), `${tag} Keep mine saves it, theirs committed first`);
+  await until(page, () => document.querySelector("[data-testid=main-doc] [data-testid=ideas-save]")?.dataset.state === "clean");
+  await page.waitForTimeout(400);
+  await ed.click();
+  await page.keyboard.type("AGAIN ");
+  await page.evaluate((id) => window.__mock.memoryEdit(id, "topics/nas-layout.md", "# NAS layout\n\nTHEIRS TOO\n"), ws);
+  await until(page, () => !!document.querySelector("[data-testid=ideas-conflict]"));
+  await page.click("[data-testid=ideas-reload]"); await page.click("[data-testid=ideas-reload]");
+  ok(await until(page, () => /THEIRS TOO/.test(document.querySelector("[data-testid=main-doc] .cm-content")?.innerText ?? "")) && !(await page.$("[data-testid=memory-under]")), `${tag} Reload theirs is your own act, and says nothing more`);
+}
+
 async function themes(page, tag, eng) {
   await boot(page, ["beta_workspace_chats", "beta_ideas"]);
   await page.locator("[data-testid=ws-doc-memory]").first().click();
@@ -259,7 +363,7 @@ async function themes(page, tag, eng) {
 const only = process.env.ONLY?.split(",");
 for (const [engine, eng] of [[chromium, "chromium"], [webkit, "webkit"]]) {
   const browser = await engine.launch();
-  for (const part of [overview, tabs, hist, states, themes]) {
+  for (const part of [overview, tabs, hist, states, edit, themes]) {
     if (only && !only.includes(part.name)) continue;
     const page = await (await browser.newContext({ viewport: { width: 1440, height: 900 } })).newPage();
     const errors = [];
