@@ -96,5 +96,25 @@ eq("label: shell", H.label(P("a", { tab: "terminal", shell: 2 })), "a · Termina
 eq("label: tab, with nameOf", H.label(P("a", { tab: "docs" }), () => "Alpha"), "Alpha · Docs");
 eq("label: a bare Files tab is the default and goes unsaid", H.label(P("a", { tab: "files" })), "a");
 
+// ── the workspace view ──────────────────────────────────────────────────────
+const V = (tab, doc, id = "w1") => ({ place: null, ws: { id, tab, ...(doc ? { doc } : {}) } });
+eq("a workspace is not Home", H.locKey(V("overview")) === H.locKey(HOME), false);
+eq("two tabs of it are two locations", H.locKey(V("plan")) === H.locKey(V("overview")), false);
+eq("…and two ideas on one tab", H.locKey(V("ideas", "a")) === H.locKey(V("ideas", "b")), false);
+eq("an idea means nothing off the Ideas tab", H.locKey(V("plan", "a")), H.locKey(V("plan")));
+eq("a place drops a workspace left beside it", H.normalize({ ...P("a"), ws: { id: "w1", tab: "plan" } }), P("a"));
+let v = H.record(H.empty(), HOME, 1000);
+v = H.record(v, V("overview"), 1000 + W);
+v = H.record(v, V("plan"), 1000 + 2 * W);
+v = H.record(v, P("a"), 1000 + 3 * W);
+eq("Home, Overview, Plan and a place stack", v.entries.length, 4);
+eq("Back from the place lands on the Plan tab", H.current(H.step(v, -1)), V("plan"));
+eq("…skipping a workspace that is gone", H.current(H.step(v, -1, (l) => !l.ws)), HOME);
+eq("a removed workspace's entries are pruned", H.prune(v, (l) => l.ws?.id === "w1").entries, [HOME, P("a")]);
+eq("where: a tab of the same workspace is the same where", H.whereKey(V("plan")) === H.whereKey(V("ideas", "a")), true);
+eq("…another workspace, Home and a place are not", new Set([V("plan"), V("plan", null, "w2"), HOME, P("a")].map(H.whereKey)).size, 4);
+eq("its label is the workspace's name and the tab", H.label(V("plan"), undefined, () => "Jellyfin"), "Jellyfin · Plan");
+eq("…and never Home", H.label(V("overview")), "A workspace · Overview");
+
 if (failed) { console.log(`\n${failed} failed`); process.exit(1); }
 console.log("navhistory-check: all ok");

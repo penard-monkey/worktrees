@@ -77,7 +77,7 @@ export function CombineAsk(props: { titles: string[]; act(title: string): void; 
     <div className="ix-scrim" onPointerDown={(e) => { if (e.target === e.currentTarget) props.close(); }}>
       <div className="ix-dialog" role="dialog" aria-label="Combine" data-testid="ideas-combine-ask">
         <p className="ix-dialog-head">Combine {props.titles.length} ideas into a new one</p>
-        <p className="ix-quiet">{props.titles.map((t) => `“${t}”`).join(", ")} leave the list; their ids keep pointing at the new idea, and each one's text is kept in Versions.</p>
+        <p className="ix-quiet">{props.titles.map((t) => `“${t}”`).join(", ")} leave the list; their ids keep pointing at the new idea, and each one's text is kept in History.</p>
         <input className="ix-filter" autoFocus value={title} data-testid="ideas-combine-title" onChange={(e) => setTitle(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") props.act(title); }} />
         <div className="ix-dialog-foot">
@@ -105,7 +105,7 @@ export function SplitAsk(props: { preview: string; act(o: { title: string; extra
           onChange={(e) => setTitle(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") go(); }} />
         <label className="ix-check"><input type="checkbox" checked={extract} data-testid="ideas-split-extract" onChange={(e) => setExtract(e.target.checked)} />
           Extract a copy (leave the text here)</label>
-        <p className="ix-quiet">{extract ? "This idea is not changed." : "The text here is replaced by a link to the new idea; this version is kept in Versions."}</p>
+        <p className="ix-quiet">{extract ? "This idea is not changed." : "The text here is replaced by a link to the new idea; this version is kept in History."}</p>
         <div className="ix-dialog-foot">
           <button className="ix-btn" onClick={props.close}>Cancel</button>
           <button className="ix-btn ix-btn-primary" data-testid="ideas-split-go" onClick={go}>{extract ? "Extract" : "Split"}</button>

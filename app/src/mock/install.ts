@@ -2104,6 +2104,8 @@ const mockIdeaWrites: { id: string; content: string; expected_mtime: unknown; ke
 const mockIdeaHistory: { id: string; content: string }[] = [];
 /** Phase 3's history (`.history/<id>/<stamp>.md`): every copy an act took,
  *  newest last (`__mock.ideaVersions()`). */
+let mockIdeaWriteMs = 0;
+let mockIdeaWriteFails: string | null = null;
 const mockIdeaVersions: { id: string; version: string; at: string; content: string }[] = [];
 let mockVersionSeq = 0;
 function ideaKeep(id: string, content: string) {
@@ -4256,6 +4258,8 @@ Phase 3: Frontend pane and mock harness
       const d = ideaById(args.id as string);
       const content = args.content as string;
       const carried = ideaFront(content, "id");
+      if (mockIdeaWriteMs) await new Promise((r) => setTimeout(r, mockIdeaWriteMs));
+      if (mockIdeaWriteFails) throw mockIdeaWriteFails;
       if (carried !== args.id) throw carried ? `the text carries the id ${carried}, not ${args.id}: refusing to save one idea over another` : `the text has no id: keep the frontmatter's \`id: ${args.id}\` line`;
       const keep = (args.keepHistory ?? args.keep_history) === true;
       mockIdeaWrites.push({ id: args.id as string, content, expected_mtime: args.expectedMtime ?? args.expected_mtime, keep_history: keep });
@@ -6310,16 +6314,17 @@ Phase 3: Frontend pane and mock harness
         const raw = sessionStorage.getItem(MOCK_SETTINGS_KEY);
         if (raw) return JSON.parse(raw);
       } catch { /* private mode */ }
-      // ?beta=ideas, ?beta=group_chat (or both, comma-separated) — a fresh
+      // ?beta=ideas, ?beta=group_chat, ?beta=workspace_chats (or more, comma-separated) — a fresh
       // tab with those Settings → Beta features on (beta.ts). Off by default
       // here too, as in the app. Only while nothing is stored, so turning one
       // off in the sheet sticks.
       {
         const ideas = new URLSearchParams(location.search).get("beta")?.split(",").includes("ideas");
         const groupChat = new URLSearchParams(location.search).get("beta")?.split(",").includes("group_chat");
-        if (ideas || groupChat) {
+        const wsChats = new URLSearchParams(location.search).get("beta")?.split(",").includes("workspace_chats");
+        if (ideas || groupChat || wsChats) {
           const m = /layout=(left|right)-(left|right)/.exec(location.search);
-          return { ...(ideas ? { beta_ideas: true } : {}), ...(groupChat ? { beta_group_chat: true } : {}), ...(m ? { places_side: m[1], dock_side: m[2], settings_rev: 4 } : {}) };
+          return { ...(ideas ? { beta_ideas: true } : {}), ...(groupChat ? { beta_group_chat: true } : {}), ...(wsChats ? { beta_workspace_chats: true } : {}), ...(m ? { places_side: m[1], dock_side: m[2], settings_rev: 4 } : {}) };
         }
       }
       // ?layout=<places>-<dock> (e.g. left-left: reference left, agent right) —
@@ -6870,6 +6875,10 @@ let mockNotifyGranted = new URLSearchParams(location.search).get("notify") === "
   // ── ideas: what another editor, Finder or a person does to the folder ──
   /** Every idea_write the page sent, in order. */
   ideaWrites: () => mockIdeaWrites.slice(),
+  /** Every `idea_write` takes this long. */
+  ideaSlowWrites(ms: number) { mockIdeaWriteMs = ms; },
+  /** Every `idea_write` fails with this, until it is called with `null`. */
+  ideaFailWrites(msg: string | null) { mockIdeaWriteFails = msg; },
   /** Phase S: what `idea_send` sent, and each idea's conversations. */
   ideaSends: () => mockIdeaSends.slice(),
   ideaConvs: (id: string) => (mockConvs.get(id) ?? []).map(mockConvRow),

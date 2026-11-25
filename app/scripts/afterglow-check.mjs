@@ -222,7 +222,9 @@ const sites = (app.match(/className=\{"status-dot" \+ dotClass\(p\)\}/g) || []).
 const styled = (app.match(/className=\{"status-dot" \+ dotClass\(p\)\} style=\{dotStyle\(p\)\}/g) || []).length;
 if (sites !== styled)
   fail(`App.tsx: ${sites} afterglow dot render site(s) but ${styled} carry style={dotStyle(p)} — the nav row and the Resume list must not drift`);
-if (!/places\.some\(\(p\) => doneOf\(p\) === 1\)/.test(app))
+// The three rollups (a project, a workspace's card, Everything Else) are ONE
+// rule, wsview.ts's `rollupOf`, which wsview-check.mjs runs.
+if ((app.match(/rollupOf\(places, activityOf, \(p\) => doneOf\(p\) === 1\)/g) ?? []).length !== 3 || (app.match(/rollupOf\(/g) ?? []).length !== 3)
   fail("App.tsx: the project rollup no longer keys on tier 1 — the folder would light for the whole horizon");
 // One home for the unread comparison. App.tsx may ASK (`isUnread(...)`), it may
 // not ANSWER — a second `worked > seen` in the component is the `dnd.ts`

@@ -50,7 +50,7 @@ import { StatusBody, StatusSheet, type StatusReport } from "./StatusSheet";
 import { installUsage, setSurface, trackChord } from "./usage";
 import { fileInfo } from "./filekind";
 import { fromDevice, instructionLine, instructionTitle, launchedTitle, deviceLabel, type By, type LaunchedBy, type RemoteInstruction } from "./provenance";
-import { canStep as canStepNav, empty as emptyHistory, goTo as goToNav, label as labelNav, locKey, prune as pruneNav, reachable as reachableNav, record as recordNav, type History as NavHistory, type Loc } from "./navHistory";
+import { canStep as canStepNav, empty as emptyHistory, goTo as goToNav, label as labelNav, locKey, prune as pruneNav, reachable as reachableNav, record as recordNav, whereKey, type History as NavHistory, type Loc, type WsTab } from "./navHistory";
 import { agentViewFor, applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, lowerFits, lowerFracFor, lowerRange, panelsFor, placeKey, railsMerged, railsWidth, saveSettings, stepMdZoom, stepZoom, upperTab, viewportWidth, withAgentView, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
 import {
   alphaIndex, dropIntent, landingNote, moveBefore, naturalTop, pointerIndex,
@@ -63,21 +63,24 @@ import {
   type NavView, type WsColor, type WsDef, type WsHit, type WsList,
   EVERYTHING_ELSE_ID, everythingElse,
 } from "./workspaces";
-import { groupChatBeta, ideasBeta } from "./beta";
+import { groupChatBeta, ideasBeta, workspaceChatsBeta } from "./beta";
 import { wireMenu } from "./menu";
 import { zoomDir } from "./zoomkeys";
 import { publishGroupChat } from "./betaLive";
 import { publishLanes } from "./laneLive";
 import {
-  agentFor, ideaOntoWorkspace, itemPlace, launchCall, linkIdeaCall, linkPlaceCall, mainAsk, MAIN_ASK_KEY, missingPlaces, newPath, placeOntoItem, planOntoWorkspace,
+  agentFor, ideaOntoWorkspace, itemPlace, launchCall, linkIdeaCall, linkPlaceCall, mainAsk, MAIN_ASK_KEY, makePlanCall, missingPlaces, newPath, placeOntoItem, planOntoWorkspace, problemLine,
   setPlanCall, setProjectCall, showRequest, SHOW_KEY, startCall, unlinkIdeaCall, WS_SHOW_KEY,
   type ItemRef, type Overview, type PlanView, type ProjectSet, type ProjectState, type StartDone, type WorkItem,
 } from "./plans";
 import { privacyArea, privacyWords } from "./privacypaths";
 import { PickPlace, StartReview } from "./StartWork";
 import { useGone } from "./useGone";
-import { WorkspaceOverview, type DocLite } from "./WorkspaceOverview";
+import { WorkspaceOverview, type DocLite, type WsParts } from "./WorkspaceOverview";
+import { DocChips, WorkspaceFrame } from "./WorkspaceFrame";
+import { attentionOf, docChips, rollupOf, tabOr, wsCounts, wsFrameOn, wsTabs, type Rollup } from "./wsview";
 import { MainDocument, type MainDocApi } from "./doc/MainDocument";
+import { ideaDocs as ideaSource, sameDoc, type DocTarget } from "./doc/source";
 import { remoteHostLabel, remoteTitle, remoteWebUrl } from "./remote";
 import { PrsPane } from "./PrsPane";
 import { ageOf, prOfPlace, prsShown, prSummary, TAB_MAX_AGE_S, useProjectPrs } from "./prs";
@@ -553,6 +556,8 @@ function NavButtons({ canBack, canForward, backTitle, forwardTitle, onStep, onLi
 /** What `updatePanels` may write: a place's panels less `agent_view`, which
  *  has no global and is written by `withAgentView` alone (see PlacePanels). */
 type DockPatch = Partial<Omit<PlacePanels, "agent_view">>;
+/** The document the main window has open, and where (a workspace's tab). */
+type MainDoc = DocTarget & { ws: string; tab: "plan" | "ideas"; startIn?: "edit" };
 /** One entry of `DOCK_RAIL` (declared inside App, which owns the icons). */
 type DockRailItem = { key: Settings["dock_tab"]; track: string; icon: React.ReactNode; title: string };
 
@@ -1165,7 +1170,7 @@ function WorkspaceHeader({ w, open, naming, rollup, active, onOpen, onToggle, on
   /** Show its overview. Absent with Ideas off: the name folds the card. */
   onOpen?: () => void;
   naming: boolean;
-  rollup: "" | "busy" | "waiting" | "done";
+  rollup: Rollup;
   onToggle: () => void;
   onMenu: (e: React.MouseEvent) => void;
   onArm: (e: React.PointerEvent) => void;
@@ -1199,7 +1204,7 @@ function WorkspaceHeader({ w, open, naming, rollup, active, onOpen, onToggle, on
 function EverythingElseHeader({ w, open, rollup, onToggle }: {
   w: WsDef;
   open: boolean;
-  rollup: "" | "busy" | "waiting" | "done";
+  rollup: Rollup;
   onToggle: () => void;
 }) {
   return (
@@ -4405,16 +4410,26 @@ function App() {
   // The workspace whose name is being edited inline, or "new" for the
   // "New workspace" field.
   const [wsNaming, setWsNaming] = useState<string | null>(null);
-  // Phase 4: the workspace whose overview the main area shows while no place
-  // is selected, what `workspace_overview` answered for it, and the ideas
-  // folder's documents (for its Link pickers).
+  // The workspace whose view the main area shows while no place is selected,
+  // its tab, what `workspace_overview` answered for it, and the ideas folder's
+  // documents (for its Link pickers).
   const [wsOpen, setWsOpen] = useState<string | null>(null);
   const [wsOv, setWsOv] = useState<{ id: string; ov: Overview | null; error: string | null } | null>(null);
   const [ideaDocs, setIdeaDocs] = useState<DocLite[]>([]);
-  // The document open in the main area in place of a workspace's overview
-  // (doc/MainDocument.tsx), and the workspace it was opened from.
-  const [mainDoc, setMainDoc] = useState<{ ws: string; id: string } | null>(null);
+  const [wsTab, setWsTab] = useState<WsTab>("overview");
+  /** The idea each workspace's Ideas tab shows, while the app runs. */
+  const [wsPick, setWsPick] = useState<Record<string, string>>({});
+  // The document open in the main area (doc/MainDocument.tsx): what it is, and
+  // the workspace and tab it is open in. One at a time.
+  const [mainDoc, setMainDoc] = useState<MainDoc | null>(null);
   const mainDocApi = useRef<MainDocApi | null>(null);
+  /** The one before it, for an open that is refused. */
+  const docBefore = useRef<MainDoc | null>(null);
+  /** The document that was floated to the Ideas window: a card stands in its
+   *  place. Words, not a lock: opening it here as well is always possible. */
+  const [floated, setFloated] = useState<(DocTarget & { title: string }) | null>(null);
+  /** The open document's title while its text is saved nowhere. */
+  const [docStuck, setDocStuck] = useState<string | null>(null);
   const [ideasTick, setIdeasTick] = useState(0);
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
   // A persisted Off must suppress even the first usage request at startup.
@@ -4814,6 +4829,10 @@ function App() {
   // Settings → General → Beta features (beta.ts): the Ideas window and named
   // workspaces. Every surface of either asks THIS, never the settings key.
   const ideasOn = ideasBeta(settings);
+  // Workspace chats and memory (beta), its own switch. The workspace view is
+  // drawn with either on; its parts each ask their own (wsview.ts).
+  const wsChatsOn = workspaceChatsBeta(settings);
+  const frameOn = wsFrameOn({ ideas: ideasOn, chats: wsChatsOn });
   // Group chat (beta): every surface of it in this window asks this, and the
   // ones outside App (main.tsx's guest connections, RemoteLayer) hear it
   // through betaLive. Off until the settings load, like every switch.
@@ -6692,7 +6711,15 @@ function App() {
     const key = `ws|${id}`;
     if (confirmRm !== key) { setConfirmRm(key); return; }
     closeCtx();
-    void wsRun("workspace_remove", { id });
+    void (async () => {
+      // A document of it whose text is saved nowhere is dealt with first: with
+      // the workspace gone there would be no tab to see it in.
+      if (mainDocRef.current?.ws === id && mainDocApi.current && !(await mainDocApi.current.leave())) { void showWsRef.current(id, mainDocRef.current.tab); return; }
+      const l = await wsRun("workspace_remove", { id });
+      if (!l) return;
+      commitHist((h) => pruneNav(h, (x) => x.ws?.id === id));
+      setWsOpen((cur) => (cur === id ? null : cur));
+    })();
   };
   const toggleWs = (key: string) =>
     updateSettings((prev) => ({ ws_collapsed: { ...prev.ws_collapsed, [key]: !prev.ws_collapsed?.[key] } }));
@@ -6718,30 +6745,116 @@ function App() {
     setWsNaming("new");
   };
 
-  // ── a workspace's overview (idea board phase 4, `plans.ts`) ──
+  // ── a workspace's view (idea board phase 4; workspace-view-design.md) ──
   // Clicking a workspace's name shows it in the main area while no place is
-  // selected; entering a place leaves it. Read again on every list change
-  // and every change in the ideas folder (`ideas:changed`). Ideas' beta, not
-  // the workspaces': with it off a name folds its card. Everything Else is no
-  // workspace and has none. A share open as a guest covers the main area, so
-  // it closes, as it does for a place.
-  const openWsOverview = (id: string) => {
-    if (!ideasOn || id === EVERYTHING_ELSE_ID) return;
+  // selected; entering a place leaves it. Its parts are the betas' (`wsview.ts`):
+  // with both off a name folds its card. Everything Else is no workspace and has
+  // none. A share open as a guest covers the main area, so it closes, as it does
+  // for a place.
+  const tabsOn = wsTabs({ ideas: ideasOn, chats: wsChatsOn });
+  const wsTabNow = tabOr(wsTab, tabsOn);
+  /** The workspace on screen. `selected`, not `sel`: what the main area draws. */
+  const wsShown = frameOn && !(selected && sel) && wsOpen ? wsById(wsOpen) : null;
+  const mainDocRef = useRef(mainDoc);
+  mainDocRef.current = mainDoc;
+  /** The document a tab of a workspace shows: its plan, or the idea picked (the
+   *  last one picked there, else the first linked). As the overview resolves
+   *  them once it is here: an id that was merged away names what took it. */
+  const tabDoc = (id: string, tab: WsTab, pick?: string): DocTarget | null => {
+    const w = wsById(id);
+    const ov = wsOv?.id === id ? wsOv.ov : null;
+    if (tab === "plan") {
+      if (!w?.plan) return null;
+      if (ov?.plan?.id === w.plan) return ov.plan.live ? { source: ideaSource, name: ov.plan.live } : null;
+      return { source: ideaSource, name: w.plan };
+    }
+    if (tab !== "ideas") return null;
+    const linked = ov ? ov.ideas.flatMap((i) => (i.live ? [i.live] : [])) : w?.ideas ?? [];
+    const name = pick ?? wsPick[id] ?? linked[0];
+    return name ? { source: ideaSource, name } : null;
+  };
+  /** Show a workspace's tab. Changing tab leaves the open document, and leaving
+   *  saves it: while its text cannot be saved the tab does not change, and its
+   *  banner says why. Another workspace, like a place, is never refused: the
+   *  document waits where it is (and is gone to when the tab needs the pane). */
+  const wsGoSeq = useRef(0);
+  const wsOpenRef = useRef(wsOpen);
+  wsOpenRef.current = wsOpen;
+  const showWs = async (id: string, tab: WsTab, o: { doc?: string; startIn?: "edit"; here?: boolean } = {}): Promise<boolean> => {
+    if (!frameOn || id === EVERYTHING_ELSE_ID) return false;
+    const n = ++wsGoSeq.current;
+    const to = tabOr(tab, tabsOn);
+    const want = tabDoc(id, to, o.doc);
+    const cur = mainDocRef.current;
+    const stays = cur && cur.ws === id && cur.tab === to && (!want || sameDoc(cur, want));
+    if (cur && !stays && mainDocApi.current) {
+      const from = { sel: selRef.current, ws: wsOpenRef.current };
+      const ok = await mainDocApi.current.leave();
+      // A save may take a while, and a newer click wins: another tab, a place, Home.
+      if (n !== wsGoSeq.current || from.sel !== selRef.current || from.ws !== wsOpenRef.current) return false;
+      if (!ok && !wsById(cur.ws)) {
+        // Its workspace was removed elsewhere: it is shown, with its banner, here.
+        const here: MainDoc = { ...cur, ws: id, tab: "ideas" };
+        setMainDoc(here);
+        closeShare();
+        setSel(null);
+        setWsOpen(id);
+        setWsTab("ideas");
+        return false;
+      }
+      if (!ok && (cur.ws === id || want)) {
+        closeShare();
+        setSel(null);
+        setWsOpen(cur.ws);
+        setWsTab(cur.tab);
+        return false;
+      }
+    }
     closeShare();
     setSel(null);
     setWsOpen(id);
-    // Its overview, so a document open over it is left, once it is saved.
-    void leaveMainDoc();
-  };
-  /** Leave the document open in the main area, if it can be left: `false`
-   *  while its text is saved nowhere else. */
-  const leaveMainDoc = async (): Promise<boolean> => {
-    if (mainDocApi.current && !(await mainDocApi.current.leave())) return false;
-    setMainDoc(null);
+    setWsTab(to);
+    if (to === "ideas" && o.doc) setWsPick((p) => ({ ...p, [id]: o.doc! }));
+    if (!want || (to !== "plan" && to !== "ideas")) return true;
+    if (o.here) setFloated((f) => (sameDoc(f, want) ? null : f));
+    else if (sameDoc(floated, want)) return true;
+    if (stays) { if (o.startIn) mainDocApi.current?.edit(); return true; }
+    docBefore.current = mainDocRef.current;
+    setMainDoc({ ws: id, tab: to, ...want, startIn: o.startIn });
     return true;
   };
+  const showWsRef = useRef(showWs);
+  showWsRef.current = showWs;
+  const openWsOverview = (id: string) => { void showWsRef.current(id, "overview"); };
   useEffect(() => { if (sel) setWsOpen(null); }, [sel]);
-  useEffect(() => { if (!ideasOn) setWsOpen(null); }, [ideasOn]);
+  useEffect(() => { if (!frameOn) setWsOpen(null); }, [frameOn]);
+  // A workspace's plan, or its first idea, arrives or goes while its tab is up.
+  const planHere = wsShown?.plan ?? null;
+  const anyIdea = (wsShown?.ideas ?? []).length > 0;
+  useEffect(() => {
+    if (!wsShown || (wsTabNow !== "plan" && wsTabNow !== "ideas")) return;
+    const cur = mainDocRef.current;
+    if (wsTabNow === "plan" && !planHere) {
+      if (cur?.ws === wsShown.id && cur.tab === "plan") void leaveMainDoc();
+    } else if (wsTabNow === "plan" || (anyIdea && !(cur?.ws === wsShown.id && cur.tab === "ideas"))) void showWsRef.current(wsShown.id, wsTabNow);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- what is behind the tab is the trigger
+  }, [wsShown?.id, wsTabNow, planHere, anyIdea]);
+  /** Close the document open in the main area, if it can be left: `false` while
+   *  its text is saved nowhere else. */
+  const leaveMainDoc = async (): Promise<boolean> => {
+    const cur = mainDocRef.current;
+    if (mainDocApi.current && !(await mainDocApi.current.leave())) return false;
+    // Only the one that was left: another may have opened meanwhile.
+    setMainDoc((d) => (sameDoc(d, cur) ? null : d));
+    return true;
+  };
+  // Its beta is off, or its workspace is gone: it is closed, once it is saved.
+  // (Every document is the ideas folder's until memory has a source.)
+  const docBeta = !mainDoc || ideasOn;
+  const docWs = !mainDoc || !wsList || !!wsById(mainDoc.ws);
+  useEffect(() => { if (!docBeta || !docWs) void leaveMainDoc(); }, [docBeta, docWs]); // eslint-disable-line react-hooks/exhaustive-deps
+  // What the plan and the ideas say: read again on every list change and every
+  // change in the ideas folder (`ideas:changed`). Ideas' own rows, its beta.
   useEffect(() => {
     if (!ideasOn || !wsOpen) return;
     const un = listen("ideas:changed", () => setIdeasTick((n) => n + 1));
@@ -6758,20 +6871,14 @@ function App() {
       .catch(() => { if (alive) setIdeaDocs([]); });
     return () => { alive = false; };
   }, [ideasOn, wsOpen, wsList, ideasTick]);
-  /** Open a plan or an idea in the main area, over the workspace's overview.
-   *  A document of another workspace whose text cannot be saved stays, and
-   *  the window goes to it: its banner says what to do. */
-  const openDocHere = async (id: string) => {
+  /** Open a plan or an idea in the workspace shown: its own plan on the Plan
+   *  tab, anything else on Ideas (linked there or not). */
+  const openDocHere = (id: string, startIn?: "edit") => {
     if (!ideasOn || !wsOpen) return;
-    const ws = wsOpen;
-    if (mainDoc && mainDoc.ws !== ws && mainDocApi.current && !(await mainDocApi.current.leave())) {
-      setSel(null);
-      setWsOpen(mainDoc.ws);
-      return;
-    }
-    setMainDoc({ ws, id });
+    if (id === tabDoc(wsOpen, "plan")?.name || id === wsById(wsOpen)?.plan) void showWs(wsOpen, "plan", { startIn });
+    else void showWs(wsOpen, "ideas", { doc: id, startIn });
   };
-  const docShown = ideasOn && !(selected && sel) && mainDoc !== null && wsOpen === mainDoc.ws;
+  const docShown = wsShown !== null && mainDoc !== null && wsShown.id === mainDoc.ws && wsTabNow === mainDoc.tab;
   // "It is still open in its workspace" is answered by going there.
   const docWaits = useRef<string | null>(null);
   useEffect(() => {
@@ -6894,6 +7001,17 @@ function App() {
     const c = startCall(pl.live, item, root, brief, agent, pl.mtime_ms);
     try { return await invoke<StartDone>(c.cmd, c.args); }
     finally { setIdeasTick((n) => n + 1); void refresh(); }
+  };
+  /** "Make a plan" on a workspace with none: from its linked ideas, and its own. */
+  const makePlanHere = async (id: string) => {
+    const ideas = ovHere?.ideas.flatMap((i) => (i.live ? [i.live] : [])) ?? [];
+    if (!ideas.length) return;
+    try {
+      const c = makePlanCall(ideas, wsById(id)?.name);
+      const made = await invoke<{ id: string }>(c.cmd, c.args);
+      await wsCall(setPlanCall(id, made.id));
+    } catch (e) { fail(e); }
+    setIdeasTick((n) => n + 1);
   };
   const wsCall = (c: { cmd: string; args: Record<string, unknown> }) => wsRun(c.cmd, c.args);
   const wsLite = () => (wsList?.workspaces ?? []).map((w) => ({ id: w.id, plan: w.plan ?? null, ideas: w.ideas ?? [] }));
@@ -8712,7 +8830,9 @@ function App() {
   // since the dock state seeds every place visited next, all of those too.
   const shellHere = stripUp ? frontHere
     : sel ? navSeenFront.current[placeKey(sel.repo, sel.slug)] ?? settings.term_tab_active?.[placeKey(sel.repo, sel.slug)] : undefined;
-  const navLoc: Loc | null = !sel ? { place: null } : !selected ? null : stripUp && frontHere === undefined ? null : {
+  // The workspace view is a location too: its tab, and the idea it shows.
+  const wsLoc: Loc["ws"] = !sel && wsShown ? { id: wsShown.id, tab: wsTabNow, ...(wsTabNow === "ideas" ? { doc: tabDoc(wsShown.id, "ideas")?.name } : {}) } : undefined;
+  const navLoc: Loc | null = !sel ? { place: null, ...(wsLoc ? { ws: wsLoc } : {}) } : !selected ? null : stripUp && frontHere === undefined ? null : {
     place: { repo: sel.repo, slug: sel.slug },
     dock: {
       tab: shownTab,
@@ -8734,13 +8854,16 @@ function App() {
    *  not shown as a dead end. Read through a ref: the chord handler is stable. */
   const wsNavRef = useRef(ws);
   wsNavRef.current = ws;
+  const wsAliveRef = useRef((_ws: NonNullable<Loc["ws"]>): boolean => false);
+  wsAliveRef.current = (w) => tabsOn.includes(w.tab) && frameOn && !!wsById(w.id);
   const navAlive = useCallback((l: Loc) => !l.place
-    || !!wsNavRef.current?.projects.find((p) => p.root === l.place!.repo)?.snapshot?.places.some((pl) => pl.slug === l.place!.slug), []);
+    ? !l.ws || wsAliveRef.current(l.ws)
+    : !!wsNavRef.current?.projects.find((p) => p.root === l.place!.repo)?.snapshot?.places.some((pl) => pl.slug === l.place!.slug), []);
   /** History is putting a location back. Observations are ignored until the
    *  panes show it (or 1.5 s pass — then whatever DID land amends the entry,
    *  so a target that could only be reached partly is recorded as it was). A
    *  pointer press hands control back early: you are navigating again. */
-  const navApplying = useRef<{ key: string; place: string | null; timer: number } | null>(null);
+  const navApplying = useRef<{ key: string; where: string; timer: number } | null>(null);
   const endApplying = useCallback(() => {
     if (navApplying.current) window.clearTimeout(navApplying.current.timer);
     navApplying.current = null;
@@ -8757,7 +8880,7 @@ function App() {
       // A selection history did not ask for — ⌘K, ⌘1, Enter in the filter, an
       // agent's show_doc — is a visit of your own, not the apply landing: hand
       // control back and record it. (A pointer press already does this.)
-      if ((navLoc.place ? locKey({ place: navLoc.place }) : null) === ap.place) return;
+      if (whereKey(navLoc) === ap.where) return;
       endApplying();
     }
     const mode = navAmend.current ? "amend" : "push";
@@ -8773,6 +8896,17 @@ function App() {
   const navGo = useCallback((i: number) => {
     const loc = histRef.current.entries[i];
     if (!loc || i === histRef.current.index) return;
+    // Back to another tab of the workspace on screen is a change of tab: its
+    // document is left first, and one that cannot be saved stays, with nothing
+    // moved in the history either.
+    if (loc.ws && loc.ws.id === navLocRef.current?.ws?.id && mainDocApi.current) {
+      const from = navLocRef.current;
+      void mainDocApi.current.leave().then((ok) => { if (ok && navLocRef.current && whereKey(navLocRef.current) === whereKey(from)) navApply(i, loc); });
+    } else navApply(i, loc);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const navApply = useCallback((i: number, loc: Loc) => {
+    if (histRef.current.entries[i] !== loc) return;
     commitHist((h) => goToNav(h, i));
     endApplying();
     navApplyGen.current++; // any answer still out belongs to the entry being left
@@ -8780,7 +8914,7 @@ function App() {
     const key = locKey(loc);
     navApplying.current = {
       key,
-      place: loc.place ? locKey({ place: loc.place }) : null,
+      where: whereKey(loc),
       timer: window.setTimeout(() => {
         navApplying.current = null;
         const now = navLocRef.current;
@@ -8790,7 +8924,11 @@ function App() {
     const cur = selRef.current;
     const samePlace = loc.place ? cur?.repo === loc.place.repo && cur?.slug === loc.place.slug : !cur;
     // A new object for the SAME place would re-run every effect keyed on `sel`.
-    if (!samePlace) setSel(loc.place ? { repo: loc.place.repo, slug: loc.place.slug } : null);
+    if (loc.ws) void showWsRef.current(loc.ws.id, loc.ws.tab, { doc: loc.ws.doc });
+    else {
+      if (!samePlace) setSel(loc.place ? { repo: loc.place.repo, slug: loc.place.slug } : null);
+      if (!loc.place) setWsOpen(null);
+    }
     setNavPending(loc.place ? loc : null);
     setMenu(null);
     setCtx(null);
@@ -8881,10 +9019,11 @@ function App() {
     const pl = ws?.projects.find((p) => p.root === repo)?.snapshot?.places.find((x) => x.slug === slug);
     return pl ? nameOf(pl) : slug;
   };
+  const wsNavName = (id: string) => wsById(id)?.name ?? null;
   const navTitle = (dir: -1 | 1) => {
     const [i] = reachableNav(hist, dir, navAlive);
     if (i === undefined) return dir < 0 ? "Back" : "Forward";
-    return `${dir < 0 ? "Back" : "Forward"} to ${labelNav(hist.entries[i], navName)} (${dir < 0 ? "⌘[" : "⌘]"})`;
+    return `${dir < 0 ? "Back" : "Forward"} to ${labelNav(hist.entries[i], navName, wsNavName)} (${dir < 0 ? "⌘[" : "⌘]"})`;
   };
   // Right-click on ‹ / ›: up to NAV_MENU_MAX entries that way, nearest first.
   // Disabled buttons fire no contextmenu in WebKit, and an empty list is not
@@ -8903,6 +9042,29 @@ function App() {
       onList={openNavMenu}
     />
   );
+
+  /** What the workspace view's tabs do with its plan and ideas. */
+  const wsHere = wsShown?.id ?? "";
+  const wsParts: WsParts = {
+    ov: ovHere,
+    error: wsOv?.id === wsOpen ? wsOv.error : null,
+    freePlans: ideaDocs.filter((d) => d.kind === "plan" && !(wsList?.workspaces ?? []).some((w) => w.plan === d.id)),
+    linkable: ideaDocs.filter((d) => d.kind === "idea" && !(wsShown?.ideas ?? []).includes(d.id)),
+    openDoc: (id) => openDocHere(id),
+    setPlan: (plan) => void wsCall(setPlanCall(wsHere, plan)),
+    makePlan: ovHere?.ideas.some((i) => i.live) ? () => void makePlanHere(wsHere) : null,
+    linkIdea: (id) => void wsCall(linkIdeaCall(wsHere, id)),
+    unlinkIdea: (id) => void wsCall(unlinkIdeaCall(wsHere, id)),
+    arm: (e, d) => arm(e, { kind: d.kind, id: d.id, title: d.title }),
+    snap: ws,
+    activity,
+    gone: gonePlaces,
+    workHot: drag?.target?.kind === "work" ? drag.target.item.line : null,
+    bringProject: (name) => { const p = ovHere?.projects?.find((x) => x.name === name); if (p && ovHere?.plan?.live) bringProject(ovHere.plan.live, wsHere, p); },
+    review: setWorkReview,
+    linkPlace: setWorkPick,
+    showPlace: selectSlug,
+  };
 
   // ── nav resizer (drag the nav's INNER edge — the one facing the terminal) ──
   // Both resizers clamp against the LIVE viewport, so a drag can never push the
@@ -9234,17 +9396,11 @@ function App() {
     const ghosts = pendingNew.filter(
       (g) => g.repo === pv.root && !(pv.snapshot?.places ?? []).some((p) => p.slug === g.label),
     );
-    // Rollup: a working child dominates a waiting one — busy wins, else waiting,
-    // else a JUST-finished one (t1 only). Restricting the ember to the freshest
+    // Rollup (`rollupOf`): a waiting child first, then a working one, else a
+    // JUST-finished one (t1 only). Restricting the ember to the freshest
     // tier is deliberate: t2/t3 would leave a permanent badge on every project
     // anyone touched today, which is decoration, not signal.
-    const rollup = places.some((p) => activityOf(p) === "busy")
-      ? "busy"
-      : places.some((p) => activityOf(p) === "waiting")
-        ? "waiting"
-        : places.some((p) => doneOf(p) === 1)
-          ? "done"
-          : "";
+    const rollup = rollupOf(places, activityOf, (p) => doneOf(p) === 1);
     // The folder's own tooltip splits the done case: an unread child is the
     // reason to open a collapsed project, and "just finished" would be a lie
     // about a finish that has been sitting there since this morning.
@@ -9471,9 +9627,7 @@ function App() {
         {list.map((w) => {
           const open = !settings.ws_collapsed?.[w.id];
           const places = w.projects.flatMap((p) => (pvOf(p.root)?.snapshot?.places ?? []).filter(visiblePlace));
-          const rollup = places.some((p) => activityOf(p) === "busy") ? "busy"
-            : places.some((p) => activityOf(p) === "waiting") ? "waiting"
-              : places.some((p) => doneOf(p) === 1) ? "done" : "";
+          const rollup = rollupOf(places, activityOf, (p) => doneOf(p) === 1);
           const dropOn = (drag?.target?.kind === "ws-add" || drag?.target?.kind === "ws-plan" || drag?.target?.kind === "ws-idea") && drag.target.id === w.id;
           const dragged = drag?.item.kind === "workspace" && drag.item.id === w.id;
           return (
@@ -9491,8 +9645,8 @@ function App() {
                   open={open}
                   naming={wsNaming === w.id}
                   rollup={rollup}
-                  active={ideasOn && !sel && !guestOpen && wsOpen === w.id}
-                  onOpen={ideasOn ? () => openWsOverview(w.id) : undefined}
+                  active={!guestOpen && wsShown?.id === w.id}
+                  onOpen={frameOn ? () => openWsOverview(w.id) : undefined}
                   onToggle={() => toggleWs(w.id)}
                   onMenu={(e) => wsMenu(e, w.id)}
                   onArm={(e) => arm(e, { kind: "workspace", id: w.id })}
@@ -9502,6 +9656,20 @@ function App() {
                 />
                 {open && (
                   <div className="ws-kids">
+                    {frameOn && (
+                      <DocChips
+                        chips={docChips({ ideas: ideasOn, chats: wsChatsOn }).map((tab) => ({
+                          tab,
+                          // Nothing is behind Memory until its engine is here.
+                          has: tab === "plan" ? !!w.plan : tab === "ideas" ? (w.ideas ?? []).length > 0 : false,
+                          count: tab === "ideas" ? (w.ideas ?? []).length : undefined,
+                          on: !guestOpen && wsShown?.id === w.id && wsTabNow === tab,
+                          floated: !!floated && (tab === "plan" ? w.plan === floated.name : tab === "ideas" && (w.ideas ?? []).includes(floated.name)),
+                          waits: docStuck !== null && mainDoc?.ws === w.id && mainDoc.tab === tab,
+                        }))}
+                        open={(tab) => { void showWs(w.id, tab); setMenu(null); closeCtx(); hideNav(); }}
+                      />
+                    )}
                     {w.projects.length === 0 && (
                       <div className="empty small ws-drop-hint">
                         {/* The view this hint sits in lists no project to drag,
@@ -9548,9 +9716,7 @@ function App() {
           if (!ee) return null;
           const open = !settings.ws_collapsed?.[ee.id];
           const places = ee.projects.flatMap((p) => (pvOf(p.root)?.snapshot?.places ?? []).filter(visiblePlace));
-          const rollup = places.some((p) => activityOf(p) === "busy") ? "busy"
-            : places.some((p) => activityOf(p) === "waiting") ? "waiting"
-              : places.some((p) => doneOf(p) === 1) ? "done" : "";
+          const rollup = rollupOf(places, activityOf, (p) => doneOf(p) === 1);
           return (
             <div className="ws-group ee" data-ee data-testid="ee-group">
               <EverythingElseHeader w={ee} open={open} rollup={rollup} onToggle={() => toggleWs(ee.id)} />
@@ -9771,7 +9937,7 @@ function App() {
         onPointerEnter={() => navPointer("nav", true)}
         onPointerLeave={() => navPointer("nav", false)}
       >
-        <button className={"home-item" + (sel || guestOpen ? "" : " on")} onClick={() => { closeShare(); setSel(null); setWsOpen(null); setMenu(null); closeCtx(); hideNav(); }}>
+        <button className={"home-item" + (sel || guestOpen || wsShown ? "" : " on")} onClick={() => { closeShare(); setSel(null); setWsOpen(null); setMenu(null); closeCtx(); hideNav(); }}>
           <HomeIcon /> Home
         </button>
         <div className="nav-head">
@@ -10309,29 +10475,7 @@ function App() {
                   </footer>
                 )}
               </>
-            ) : docShown ? null : ideasOn && wsOpen && wsById(wsOpen) ? (
-              <WorkspaceOverview
-                key={wsOpen}
-                name={wsById(wsOpen)!.name}
-                ov={wsOv?.id === wsOpen ? wsOv.ov : null}
-                error={wsOv?.id === wsOpen ? wsOv.error : null}
-                freePlans={ideaDocs.filter((d) => d.kind === "plan" && !(wsList?.workspaces ?? []).some((w) => w.plan === d.id))}
-                linkable={ideaDocs.filter((d) => d.kind === "idea" && !(wsById(wsOpen)!.ideas ?? []).includes(d.id))}
-                openDoc={(id) => void openDocHere(id)}
-                setPlan={(plan) => void wsCall(setPlanCall(wsOpen, plan))}
-                linkIdea={(id) => void wsCall(linkIdeaCall(wsOpen, id))}
-                unlinkIdea={(id) => void wsCall(unlinkIdeaCall(wsOpen, id))}
-                arm={(e, d) => arm(e, { kind: d.kind, id: d.id, title: d.title })}
-                snap={ws}
-                activity={activity}
-                gone={gonePlaces}
-                workHot={drag?.target?.kind === "work" ? drag.target.item.line : null}
-                bringProject={(name) => { const p = ovHere?.projects?.find((x) => x.name === name); if (p && ovHere?.plan?.live) bringProject(ovHere.plan.live, wsOpen, p); }}
-                review={setWorkReview}
-                linkPlace={setWorkPick}
-                showPlace={selectSlug}
-              />
-            ) : (
+            ) : wsShown ? null : (
               /* Home scrolls in its own box. Without it a briefing taller
                  than the pane overflowed `.main` and was clipped with nothing
                  to scroll (measured: in a 900×420 window the last resume row
@@ -10394,20 +10538,77 @@ function App() {
                 </div>
               </div>
             )}
-            {/* A plan or an idea opened from the overview, over it. Last, and
-                mounted whatever is shown: it goes once its text is saved. */}
-            {mainDoc && (
-              <MainDocument
-                id={mainDoc.id}
-                shown={docShown}
-                backTo={wsById(mainDoc.ws)?.name ?? "Home"}
-                rows={ideaDocs}
-                api={mainDocApi}
-                opened={(id) => setMainDoc((d) => (d && d.id !== id ? { ...d, id } : d))}
-                close={() => setMainDoc(null)}
-                waits={(title) => { docWaits.current = `“${title}” has text that is not saved. It is still open in its workspace.`; setNotice(docWaits.current); }}
-                back={() => setMainDoc(null)}
-                float={openIdeaDoc}
+            {/* The workspace view. Last, and mounted whatever is shown while a
+                document is open in it: the document's section keeps one parent
+                for its life, so its text survives a nav click. */}
+            {(wsShown || mainDoc) && (
+              <WorkspaceFrame
+                shown={wsShown !== null}
+                ws={wsShown && { id: wsShown.id, name: wsShown.name, color: wsColorOf(wsShown), counts: wsCounts(wsShown.projects.length) }}
+                tabs={tabsOn}
+                tab={wsTabNow}
+                counts={{ ideas: wsShown?.ideas?.length ?? 0 }}
+                showTab={(t) => { if (wsShown) void showWs(wsShown.id, t); }}
+                navButtons={navButtons}
+                onMenu={(e) => { if (wsShown) wsMenuAt(e, wsShown.id); }}
+                parts={wsParts}
+                overview={wsShown && (
+                  <WorkspaceOverview
+                    key={wsShown.id}
+                    {...wsParts}
+                    ideasOn={ideasOn}
+                    chatsOn={wsChatsOn}
+                    attention={attentionOf({
+                      unsaved: docStuck !== null && mainDoc ? { title: docStuck, elsewhere: mainDoc.ws === wsShown.id ? null : wsById(mainDoc.ws)?.name ?? null } : null,
+                      problems: ovHere?.plan?.live ? ovHere.problems.map(problemLine) : [],
+                      planError: ovHere?.plan && !ovHere.plan.live ? ovHere.plan.error ?? "it is gone" : null,
+                    })}
+                    goTo={(a) => { if (a.kind === "unsaved" && mainDoc) void showWs(wsById(mainDoc.ws) ? mainDoc.ws : wsShown.id, mainDoc.tab, { doc: mainDoc.name }); else void showWs(wsShown.id, "plan"); }}
+                    showTab={(t) => void showWs(wsShown.id, t)}
+                    projects={wsShown.projects.map((p) => {
+                      const places = (ws?.projects.find((v) => v.root === p.root)?.snapshot?.places ?? []);
+                      return { root: p.root, name: basename(p.root), registered: p.registered, places: places.length,
+                        working: places.filter((x) => activityOf(x) === "busy").length, waiting: places.filter((x) => activityOf(x) === "waiting").length };
+                    })}
+                    takeOut={(root) => wsRemoveProject(wsShown.id, root)}
+                    addProject={(e) => wsMenuAt(e, wsShown.id)}
+                  />
+                )}
+                has={wsShown ? (wsTabNow === "plan" ? !!wsShown.plan : anyIdea) : false}
+                floated={floated && wsShown && sameDoc(floated, tabDoc(wsShown.id, wsTabNow)) ? {
+                  title: floated.title,
+                  show: () => openIdeaDoc(floated.name),
+                  here: () => void showWs(wsShown.id, wsTabNow, { here: true }),
+                } : null}
+                openId={wsShown ? tabDoc(wsShown.id, wsTabNow)?.name ?? null : null}
+                openTitle={ideaDocs.find((d) => d.id === wsPick[wsShown?.id ?? ""])?.title ?? null}
+                docShown={docShown}
+                openTab={() => { if (wsShown) void showWs(wsShown.id, wsTabNow, { here: true }); }}
+                dockLeft={dockLeft}
+                doc={mainDoc && (
+                  <MainDocument
+                    target={mainDoc}
+                    startIn={mainDoc.startIn}
+                    shown={docShown}
+                    rows={ideaDocs}
+                    api={mainDocApi}
+                    opened={(to) => {
+                      setMainDoc((d) => (d && !sameDoc(d, to) ? { ...d, ...to } : d));
+                      if (mainDoc.tab === "ideas") setWsPick((p) => ({ ...p, [mainDoc.ws]: to.name }));
+                    }}
+                    refused={(to) => {
+                      const was = docBefore.current;
+                      if (!was || !sameDoc(was, to)) { setMainDoc((d) => d && { ...d, ...to }); return; }
+                      setMainDoc(was);
+                      if (wsShown) { setWsOpen(was.ws); setWsTab(was.tab); }
+                    }}
+                    follow={(to) => openDocHere(to.name)}
+                    stuck={setDocStuck}
+                    waits={(title) => { docWaits.current = `“${title}” has text that is not saved. It is still open in its workspace.`; setNotice(docWaits.current); }}
+                    closed={() => setMainDoc(null)}
+                    float={(to, title) => { setMainDoc(null); setFloated({ ...to, title }); openIdeaDoc(to.name); }}
+                  />
+                )}
               />
             )}
           </main>
@@ -11070,7 +11271,7 @@ function App() {
               try { return await invoke<CmdResult>(c.cmd, c.args); } finally { void refresh(); }
             }}
             show={(root, slug) => { setWorkReview(null); selectSlug(root, slug); }}
-            edit={() => { setWorkReview(null); if (ovHere.plan?.live) void openDocHere(ovHere.plan.live); }}
+            edit={() => { setWorkReview(null); if (ovHere.plan?.live) openDocHere(ovHere.plan.live, "edit"); }}
             close={() => setWorkReview(null)}
           />
         );
@@ -11215,7 +11416,7 @@ function App() {
           {reachableNav(hist, navMenu.dir, navAlive).slice(0, NAV_MENU_MAX).map((i) => (
             <button key={i} className="pop-item" data-testid="nav-menu-item"
               onClick={() => { setNavMenu(null); navGo(i); }}>
-              {labelNav(hist.entries[i], navName)}
+              {labelNav(hist.entries[i], navName, wsNavName)}
             </button>
           ))}
         </CtxMenu>
@@ -11477,7 +11678,7 @@ function App() {
         return (
           <CtxMenu x={ctx.x} y={ctx.y} onClose={closeCtx}>
             <div className="pop-hint">{w.name}</div>
-            {ideasOn && (
+            {frameOn && (
               <button className="pop-item" data-testid="ws-overview-open" data-track="nav.workspace.overview"
                 onClick={() => { closeCtx(); openWsOverview(w.id); }}>Overview</button>
             )}

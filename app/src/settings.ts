@@ -470,6 +470,10 @@ export type Settings = {
   // guest, the thread, and the guest's side). Off by default; read ONLY
   // through `beta.ts` (`groupChatBeta`). The engine's rows are never gated.
   beta_group_chat: boolean;
+  // Settings → General → Beta features → Workspace chats (a workspace's chats
+  // and its memory). Off by default; read ONLY through `beta.ts`
+  // (`workspaceChatsBeta`). Its own key, never Ideas'.
+  beta_workspace_chats: boolean;
   // Group chat's *Use these*: ask once before sending comments with no note
   // (the note is the instruction; without one Codex answered "the plan is
   // unchanged" in the 2026-11-14 rehearsal). False after "Don't ask again".
@@ -628,6 +632,7 @@ export const DEFAULTS: Settings = {
   ws_collapsed: {},
   beta_ideas: false,
   beta_group_chat: false,
+  beta_workspace_chats: false,
   use_these_ask_note: true,
   hidden_tiers: [],
   sort_mode: "recent",
@@ -986,6 +991,7 @@ export async function loadSettings(): Promise<Settings> {
     if (!s.ws_collapsed || typeof s.ws_collapsed !== "object") s.ws_collapsed = {};
     if (s.beta_ideas !== true) s.beta_ideas = false;
     if (s.beta_group_chat !== true) s.beta_group_chat = false;
+    if (s.beta_workspace_chats !== true) s.beta_workspace_chats = false;
     if (s.use_these_ask_note !== false) s.use_these_ask_note = true;
     if (!isHarness(s.default_provider)) s.default_provider = HARNESSES[0];
     // A tab that no longer exists must land on Files, globally AND per place.

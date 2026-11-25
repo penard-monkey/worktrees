@@ -4,10 +4,11 @@
 // edits a document. The editor's text reaches the file only through `Session`.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useArmed } from "../useArmed";
+import { rememberMode, startMode, type DocKind, type DocMode } from "./docmode";
 import type { EditorHandle, EditorHooks } from "./editortypes";
 import { Session, type Changed, type SaveState } from "./ideasave";
 import { ideaLink, mergedNote, pickerMatches, versionWhen } from "./ideasrelate";
-import type { Doc, DocRows, DocSource, Version } from "./source";
+import { ideaDocs, type Doc, type DocRows, type DocSource, type DocTarget, type Version } from "./source";
 
 export const errText = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : String(e));
 
@@ -15,7 +16,9 @@ export const errText = (e: unknown) => (typeof e === "string" ? e : e instanceof
  *  one), from the editor host's own effect — a timer set beside the state
  *  change can fire before React commits it (it did, in Chromium). `key` is
  *  this OPENING: the same document read again is a new one. */
-export type Open = { id: string; title: string; file: string; key: string; focus: boolean; kind: "idea" | "plan" };
+export type Open = { id: string; title: string; file: string; key: string; focus: boolean; kind: DocKind; source: DocSource };
+/** What one is called, to a person: a plan is the ideas folder's too. */
+export const nounOf = (o: Pick<Open, "kind" | "source">): string => (o.kind === "plan" ? "plan" : o.source.noun);
 export type Picker = Parameters<NonNullable<EditorHooks["picker"]>>[0];
 
 const clock = {
@@ -29,6 +32,9 @@ const clock = {
  *  being torn down. Keyed by the opening, so it is never another document's. */
 export type Held = { key: string; text: string };
 
+/** Where the cursor goes when an editor comes: into the text, or to a line. */
+export type CursorNext = { line?: number } | null;
+
 export type DocOptions = {
   source: DocSource;
   /** Say one line to the person; `null` clears it. */
@@ -40,7 +46,7 @@ export type DocOptions = {
   /** Every document there is, for the `[[` picker. */
   rows: DocRows;
   /** A link to another document was followed. */
-  follow(id: string): void;
+  follow(to: DocTarget): void;
   /** The selection, or the text under one, moved. */
   selectionMoved?(): void;
   /** The text was replaced under the editor (a reload, Claude's edit). */
@@ -60,16 +66,20 @@ export function useDoc(o: DocOptions) {
     setOpenState(openRef.current);
   }, []);
   const [save, setSave] = useState<SaveState>({ kind: "clean", savedAt: null });
-  const [mode, setMode] = useState<"edit" | "read">("edit");
+  const [mode, setMode] = useState<DocMode>("edit");
   const [readBody, setReadBody] = useState("");
   const [renaming, setRenaming] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [hasSel, setHasSel] = useState(false);
-  const [versions, setVersions] = useState<Version[] | null | false>(false);
+  const [history, setHistory] = useState(false);
+  const [versions, setVersions] = useState<Version[] | null>(null);
   const [tick, setTick] = useState(0);
   const session = useRef<Session | null>(null);
   const handle = useRef<EditorHandle | null>(null);
   const held = useRef<Held | null>(null);
+  /** Edit (or a line) was asked for before the editor was there: the cursor
+   *  goes in as it comes (EditorHost.tsx). */
+  const cursorNext = useRef<CursorNext>(null);
   const keySeq = useRef(0);
   const readSeq = useRef(0);
   const arm = useArmed<string>();
@@ -128,35 +138,44 @@ export function useDoc(o: DocOptions) {
     setSave({ kind: "clean", savedAt: null });
     setRenaming(null);
     arm.disarm();
-    setOpen({ id: d.id, title: d.title, file: d.file, key, focus, kind: d.kind === "plan" ? "plan" : "idea" });
+    // Another document opens as its kind does; the same one, read again by an
+    // act, stays as it is.
+    const kind = d.kind ?? "idea";
+    if (openRef.current?.id !== d.id || openRef.current.source !== source) setMode(focus ? "edit" : startMode(kind));
+    setOpen({ id: d.id, title: d.title, file: d.file, key, focus, kind, source });
     setReadBody(d.content);
-    setVersions((v) => (v === false ? false : null));
+    setVersions(null);
     setHasSel(false);
     setPicker(null);
     cb.current.began?.();
     bump();
   }, [arm, bump, setOpen, source]);
 
-  /** The open document's id NOW, before React has drawn it. */
-  const current = useCallback(() => openRef.current?.id ?? null, []);
+  /** The open document NOW, before React has drawn it. */
+  const current = useCallback((): DocTarget | null => {
+    const cur = openRef.current;
+    return cur && { source: cur.source, name: cur.id };
+  }, []);
 
   /** Leave the open document, saving first. Refused while its text cannot be
    *  saved (a conflict, or it was removed): that text exists nowhere else. */
-  const leave = useCallback(async (): Promise<boolean> => {
+  const leave = useCallback(async (before = "before you open another"): Promise<boolean> => {
     const s = session.current;
     if (!s) return true;
     await s.flush();
     if ((s.held() || s.current.kind === "error") && s.dirty()) {
-      cb.current.notice(`This ${source.noun} has text that is not saved. Keep yours or reload before you open another.`);
+      cb.current.notice(`This ${openRef.current ? nounOf(openRef.current) : "document"} has text that is not saved. Keep yours or reload ${before}.`);
       return false;
     }
     return true;
-  }, [source]);
+  }, []);
 
   /** Open one by its id. `true`: it (or what took it) is the open one now. */
   const openDoc = useCallback(async (id: string): Promise<boolean> => {
-    if (openRef.current?.id === id) return true;
+    // Every ask takes a number, this one too: a read still out for another
+    // document must not land on the one just asked for.
     const n = ++readSeq.current;
+    if (openRef.current?.id === id && openRef.current.source === source) return true;
     if (!(await leave())) return false;
     try {
       const d = await source.read(id);
@@ -165,7 +184,7 @@ export function useDoc(o: DocOptions) {
       // An id that was merged away lands on the one that took it.
       cb.current.notice(d.merged ? mergedNote(d.merged, d.title) : null);
       if (d.merged) cb.current.trace(`opened ${id}, merged into ${d.id}`);
-      if (d.id !== openRef.current?.id) {
+      if (d.id !== openRef.current?.id || openRef.current.source !== source) {
         // Typed while the read was out.
         if (!(await leave())) return false;
         if (n !== readSeq.current) return false;
@@ -182,21 +201,21 @@ export function useDoc(o: DocOptions) {
   const rename = useCallback(async (title: string) => {
     const s = session.current;
     const cur = openRef.current;
-    if (!s || !cur || !source.rename) return;
+    if (!s || !cur || !cur.source.rename) return;
     setRenaming(null);
     if (!title.trim() || title.trim() === cur.title) return;
     await s.flush();
-    if (s.held() || s.current.kind === "error") { cb.current.notice(`Save or reload this ${source.noun} before renaming it.`); return; }
+    if (s.held() || s.current.kind === "error") { cb.current.notice(`Save or reload this ${nounOf(cur)} before renaming it.`); return; }
     setBusy(true);
     try {
-      const d = await source.rename(cur.id, title.trim(), s.lastMtime);
+      const d = await cur.source.rename(cur.id, title.trim(), s.lastMtime);
       s.adopt(d.content, d.mtime_ms);
       setOpen((x) => (x && x.id === cur.id ? { ...x, title: d.title, file: d.file } : x));
       cb.current.trace(`renamed ${cur.id} → ${d.file}`);
       cb.current.listed();
     } catch (e) { cb.current.notice(`Could not rename it: ${errText(e)}`); }
     finally { setBusy(false); }
-  }, [setOpen, source]);
+  }, [setOpen]);
 
   /** A removed document's text, kept as a new one. */
   const saveAsNew = useCallback(async () => {
@@ -216,34 +235,35 @@ export function useDoc(o: DocOptions) {
     session.current?.close();
     session.current = null;
     held.current = null;
+    cursorNext.current = null;
     setOpen(null);
   }, [setOpen]);
 
   const restore = useCallback((v: Version) => arm.confirm(`restore:${v.version}`, async () => {
     const cur = openRef.current;
-    if (!cur) return;
+    if (!cur?.source.restore) return;
     const s = session.current;
     if (s) {
       await s.flush();
-      if (s.held() || s.current.kind === "error") { cb.current.notice(`Save or reload this ${source.noun} before restoring a version.`); return; }
+      if (s.held() || s.current.kind === "error") { cb.current.notice(`Save or reload this ${nounOf(cur)} before restoring a version.`); return; }
     }
     try {
-      const d = await source.restore(cur.id, v.version, s?.lastMtime);
+      const d = await cur.source.restore(cur.id, v.version, s?.lastMtime);
       cb.current.trace(`restored ${cur.id} ${v.version}`);
       begin(d);
-      cb.current.notice(`Restored the version of ${versionWhen(v.at)}. The text it replaced is in Versions.`);
+      cb.current.notice(`Restored the version of ${versionWhen(v.at)}. The text it replaced is in History.`);
       cb.current.listed();
     } catch (e) { cb.current.notice(`Could not restore it: ${errText(e)}`); }
-  }), [arm, begin, source]);
+  }), [arm, begin]);
 
-  // The Versions list follows the open document, and any change in the source.
+  // The History list follows the open document, and any change in the source.
   useEffect(() => {
-    if (!open || versions === false) return;
+    if (!open || !history || !open.source.versions) return;
     let gone = false;
-    source.versions(open.id).then((v) => { if (!gone) setVersions(v); }).catch((e) => { if (!gone) cb.current.notice(`Could not read its versions: ${errText(e)}`); });
+    open.source.versions(open.id).then((v) => { if (!gone) setVersions(v); }).catch((e) => { if (!gone) cb.current.notice(`Could not read its history: ${errText(e)}`); });
     return () => { gone = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open?.id, versions === false, tick, source]);
+  }, [open?.id, open?.source, history, tick]);
 
   // ── the `[[` picker
   const [picker, setPicker] = useState<Picker>(null);
@@ -282,17 +302,28 @@ export function useDoc(o: DocOptions) {
       if ((k === "Enter" || k === "Tab") && rows[i]) { insertLink(rows[i]); return true; }
       return false;
     },
-    follow: (id) => cb.current.follow(id),
+    // The editor knows `idea:` links alone (editor.ts).
+    follow: (id) => cb.current.follow({ source: ideaDocs, name: id }),
     selected: (h) => setHasSel(h),
     selectionMoved: () => cb.current.selectionMoved?.(),
   }), [insertLink]);
   const replaced = useCallback(() => cb.current.replaced?.(), []);
 
-  const switchMode = useCallback((m: "edit" | "read") => {
+  /** Show it the other way. A person's choice is remembered for its kind; the
+   *  app's own switch (going to a line) is not one. */
+  const switchMode = useCallback((m: DocMode, chosen = true) => {
     if (m === "read") setReadBody(handle.current?.text() ?? held.current?.text ?? "");
     setMode(m);
-    if (m === "edit") window.setTimeout(() => handle.current?.focus(), 0);
+    if (chosen && openRef.current) rememberMode(openRef.current.kind, m);
+    cursorNext.current = m === "edit" ? {} : null;
+    if (m === "edit") window.setTimeout(() => { if (handle.current && cursorNext.current) { cursorNext.current = null; handle.current.focus(); } }, 0);
   }, []);
+  /** Put the cursor on a line, in Edit. */
+  const gotoLine = useCallback((line: number) => {
+    switchMode("edit", false);
+    cursorNext.current = { line };
+    window.setTimeout(() => { if (handle.current) { cursorNext.current = null; handle.current.gotoLine(line); } }, 0);
+  }, [switchMode]);
 
   // A hidden or closing window is a save point, and so is the pane's own end.
   useEffect(() => {
@@ -310,8 +341,8 @@ export function useDoc(o: DocOptions) {
   }, []);
 
   return {
-    source, open, save, mode, setMode, switchMode, readBody, renaming, setRenaming, busy, setBusy, hasSel,
-    versions, setVersions, tick, bump, session, handle, held, arm,
+    source, open, save, mode, setMode, switchMode, gotoLine, readBody, renaming, setRenaming, busy, setBusy, hasSel,
+    history, setHistory, versions, tick, bump, session, handle, held, cursorNext, arm,
     begin, current, leave, openDoc, rename, saveAsNew, closeOpen, restore,
     picker, pickIdx, pickRows, insertLink, hooks, replaced,
   };

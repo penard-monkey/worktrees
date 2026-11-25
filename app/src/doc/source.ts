@@ -5,10 +5,12 @@
 //
 // A source is a FAMILY of documents, and a document is named in it by one
 // string: an idea's id, or for a memory source bound to its workspace, a path.
+import type { ReactNode } from "react";
 import { invoke, listen } from "../ipc";
+import type { DocKind } from "./docmode";
 import type { Changed, Saved } from "./ideasave";
-import type { Row } from "./ideasrelate";
-import { withId } from "./ideatext";
+import { ideaHref, readableLinks, type Row } from "./ideasrelate";
+import { bodyOf, withId } from "./ideatext";
 
 /** A document as its source reads it. */
 export type Doc = {
@@ -18,11 +20,16 @@ export type Doc = {
   file: string;
   mtime_ms: number;
   content: string;
-  kind?: "idea" | "plan";
+  kind?: DocKind;
   /** The id asked for was merged into this one. */
   merged?: { id: string; title: string | null; date: string | null };
 };
 export type Version = { version: string; at: string; size: number; title: string | null };
+
+/** One document, wherever it comes from: its source, and its name in it. */
+export type DocTarget = { source: DocSource; name: string };
+export const sameDoc = (a: DocTarget | null, b: DocTarget | null): boolean =>
+  !!a && !!b && a.source === b.source && a.name === b.name;
 
 export interface DocSource {
   /** What one is called: "This idea changed on disk…". */
@@ -33,12 +40,22 @@ export interface DocSource {
   write(id: string, content: string, expectedMtime: number, keepHistory: boolean): Promise<Saved>;
   /** Hear what changed under the source's root. Returns the unlisten. */
   watch(on: (ev: Changed) => void): () => void;
-  versions(id: string): Promise<Version[]>;
-  restore(id: string, version: string, expectedMtime: number | undefined): Promise<Doc>;
+  /** One document's own history, for the pane's panel. A source whose history
+   *  is its folder's (memory) leaves both out and hands the pane a panel of its
+   *  own (DocumentPane's `history`). */
+  versions?(id: string): Promise<Version[]>;
+  restore?(id: string, version: string, expectedMtime: number | undefined): Promise<Doc>;
   /** The file's name from a title, when the source can. */
   rename?(id: string, title: string, expectedMtime: number): Promise<Doc>;
   /** A removed document's text, kept as a new one. */
   keepAsNew?(title: string, text: string): Promise<Doc>;
+  /** The text as Read draws it (the frontmatter is the file's, not the prose). */
+  readBody(text: string): string;
+  /** A link in document `from`: the document it points at, in this source or
+   *  another. `null`: not one, and nothing happens. */
+  link(href: string, from: string): DocTarget | null;
+  /** An image in document `from`. Left out: its words are drawn instead. */
+  image?(src: string, alt: string, from: string): ReactNode;
   /** The refusals this source's rows give, when they are not the ideas'
    *  (ideasave.ts `isStale`, `isGone`). */
   readonly refusals?: { stale(e: string): boolean; gone(e: string): boolean };
@@ -47,6 +64,12 @@ export interface DocSource {
 /** Ideas and plans: one folder, one set of rows, named by id. */
 export const ideaDocs: DocSource = {
   noun: "idea",
+  // `idea:` links become `#idea:` ones, which the shared renderer links.
+  readBody: (text) => readableLinks(bodyOf(text)),
+  link(href) {
+    const id = ideaHref(href);
+    return id ? { source: ideaDocs, name: id } : null;
+  },
   read: (id) => invoke<Doc>("idea_read", { id }),
   write: (id, content, expectedMtime, keepHistory) =>
     invoke<Saved>("idea_write", keepHistory ? { id, content, expectedMtime, keepHistory: true } : { id, content, expectedMtime }),

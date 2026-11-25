@@ -197,11 +197,11 @@ check(/if \(target\.kind === "plan"\) \{ void doAddIdeas\(target\.id, target\.id
 check(/if \(target\.kind === "plan-projects"\) \{ void doAddProject\(target\.id, target\.root\)/.test(comp) && /void doAddProject\(planView\.doc\.id, root\)/.test(comp),
   "a project dropped on the plan's Projects and the Add project… click end in doAddProject");
 check((comp.match(/void doMakeWorkspace\(/g) ?? []).length >= 2, "Make workspace: the plan strip and the list row's menu, one function");
-check(/doMakePlan\(planSources\(open, selected, ideaRowsAll\)\)/.test(comp) && /doMakePlan\(planSources\(null, selected, ideaRowsAll\)\)/.test(comp),
+check(/doMakePlan\(planSources\(openRow, selected, ideaRowsAll\)\)/.test(comp) && /doMakePlan\(planSources\(null, selected, ideaRowsAll\)\)/.test(comp),
   "Make a plan: from the open idea's strip and from the selection, one function, one rule");
-check(/if \(target\.kind === "ws-plan"\) \{ void wsCall\(setPlanCall\(target\.id, target\.plan\)\)/.test(app) && /setPlan=\{\(plan\) => void wsCall\(setPlanCall\(wsOpen, plan\)\)\}/.test(app),
+check(/if \(target\.kind === "ws-plan"\) \{ void wsCall\(setPlanCall\(target\.id, target\.plan\)\)/.test(app) && /setPlan: \(plan\) => void wsCall\(setPlanCall\(wsHere, plan\)\),/.test(app),
   "a plan dropped on a workspace and the overview's Link a plan ▸ end in the same call");
-check(/if \(target\.kind === "ws-idea"\) \{ void wsCall\(linkIdeaCall\(target\.id, target\.idea\)\)/.test(app) && /linkIdea=\{\(id\) => void wsCall\(linkIdeaCall\(wsOpen, id\)\)\}/.test(app),
+check(/if \(target\.kind === "ws-idea"\) \{ void wsCall\(linkIdeaCall\(target\.id, target\.idea\)\)/.test(app) && /linkIdea: \(id\) => void wsCall\(linkIdeaCall\(wsHere, id\)\),/.test(app),
   "an idea dropped on a workspace and the overview's Link an idea ▸ end in the same call");
 check(/planOntoWorkspace\(item\.id, onto, all\)/.test(app) && /ideaOntoWorkspace\(item\.id, onto\)/.test(app), "the main window's drop resolves through plans.ts's rules");
 const eeHead = app.slice(app.indexOf("function EverythingElseHeader("), app.indexOf("function WsGoneRow("));
@@ -215,7 +215,7 @@ check(/<PlanPanel[\s\S]{0,200}view=\{planView\}/.test(comp) && /\{v\.problems\.l
   "a plan's problems are drawn above the editor, which shows the document whatever they are");
 
 // ── phase 5: the review, the drops, Clone and Create ───────────────────────
-const review = fs.readFileSync(START, "utf8"), panel = fs.readFileSync(PANEL, "utf8"), over = fs.readFileSync(OVERVIEW, "utf8");
+const review = fs.readFileSync(START, "utf8"), panel = fs.readFileSync(PANEL, "utf8"), over = fs.readFileSync(OVERVIEW, "utf8") + fs.readFileSync(here("../src/WorkspaceFrame.tsx"), "utf8");
 check((comp.match(/startCall\(/g) ?? []).length === 1 && (app.match(/startCall\(/g) ?? []).length === 1, "each window starts in ONE place");
 check(!/startCall|doStart|plan_start/.test(panel) && !/startCall|startItem|plan_start/.test(over), "a plan's list starts nothing: its button opens the review");
 check(/start=\{\(brief\) => doStart\(/.test(comp) && (comp.match(/doStart\(/g) ?? []).length === 1 && /start=\{\(brief\) => startItem\(/.test(app) && (app.match(/startItem\(/g) ?? []).length === 1,
@@ -247,6 +247,7 @@ check(/closest\("button,input,textarea,select,a"\);\s*if \(ctl && !ctl\.hasAttri
   "navdrag: a press in a button arms a drag only when the button is a data-drag-handle");
 for (const [file, text, want] of [
   ["WorkspaceOverview.tsx", fs.readFileSync(OVERVIEW, "utf8"), 3],
+  ["WorkspaceFrame.tsx", fs.readFileSync(here("../src/WorkspaceFrame.tsx"), "utf8"), 1],
   ["PlanPanel.tsx", fs.readFileSync(PANEL, "utf8"), 1],
   ["StartWork.tsx", review, 1],
 ]) {

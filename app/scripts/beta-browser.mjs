@@ -99,7 +99,7 @@ async function run(engine, name) {
   await setMode(page, "advanced");
   ok(await has(page, ".settings-body [data-sec=beta]"), `${tag} Advanced: Beta features is drawn on General`);
   const boxes = await page.$$eval(".settings-body [data-sec=beta] input[type=checkbox]", (b) => b.map((x) => x.closest("label")?.innerText.trim()));
-  ok(JSON.stringify(boxes) === JSON.stringify(["Ideas", "Group chat"]), `${tag} …one checkbox per beta feature, Ideas and Group chat: ${JSON.stringify(boxes)}`);
+  ok(JSON.stringify(boxes) === JSON.stringify(["Ideas", "Group chat", "Workspace chats"]), `${tag} …one checkbox per beta feature, Ideas, Group chat and Workspace chats: ${JSON.stringify(boxes)}`);
   ok(!(await page.evaluate(() => document.querySelector(".settings-body [data-sec=beta]")?.innerText.includes("workspaces"))), `${tag} …and it no longer mentions workspaces`);
   await page.fill(".settings-search-input", "beta");
   await page.waitForTimeout(200);

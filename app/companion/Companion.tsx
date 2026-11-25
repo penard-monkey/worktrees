@@ -21,6 +21,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { engineState, invoke, listen, onEngineState, type EngineState } from "../src/ipc";
 import { revealOnHost } from "../src/onhost";
 import { wireMenu } from "../src/menu";
+import * as Icons from "../src/icons";
 import { WindowZoom } from "./zoom";
 import { applySettings, loadSettings } from "../src/settings";
 import { setTermScrollback } from "../src/TerminalPane";
@@ -304,13 +305,15 @@ export function Companion() {
     trace: (m) => trace(gen, m),
     listed: () => void refresh(),
     rows: listing?.ideas ?? NO_ROWS,
-    follow: (id) => void openIdea(id),
+    follow: (to) => void openIdea(to.name),
     selectionMoved: () => readQuote(true),
     // The same offsets over another text: offered, never attached by itself.
     replaced: () => readQuote(false),
     began: () => { window.clearTimeout(quoteTimer.current); setQuote(null); },
   });
-  const { open, mode, busy, setBusy, session, handle, arm, hasSel, tick: relTick, bump, begin, leave, closeOpen, openDoc: openIdea, setMode, switchMode } = doc;
+  const { open, mode, busy, setBusy, session, handle, arm, hasSel, tick: relTick, bump, begin, leave, closeOpen, openDoc: openIdea, setMode, gotoLine } = doc;
+  /** As the list's rules take it (an idea or a plan: this window's documents). */
+  const openRow = open && { id: open.id, kind: open.kind === "plan" ? ("plan" as const) : ("idea" as const) };
 
   // The conversations' live state, by tmux session (serve sends the last one
   // as soon as this window declares the event).
@@ -401,7 +404,7 @@ export function Companion() {
         if (v[0]) await invoke("idea_restore", { id, version: v[0].version });
       }
       trace(gen, `undo: restored ${restore.join(",")} removed ${remove.join(",")}`);
-      setNotice("Undone. Every version is still in Versions.");
+      setNotice("Undone. Every version is still in History.");
       void refresh();
       if (open && (restore.includes(open.id) || remove.includes(open.id))) {
         if (remove.includes(open.id) && restore.length) { await openIdeaRef.current(restore[0]); } else await reopen();
@@ -417,7 +420,7 @@ export function Companion() {
   const doRelate = useCallback(async (id: string, other: string) => {
     const d = await act<Doc>(relateCall(id, other), `relate ${id} to ${other}`);
     if (!d) return;
-    setNotice(`Related “${titleOf(id)}” to “${titleOf(other)}”. Undo with Versions.`);
+    setNotice(`Related “${titleOf(id)}” to “${titleOf(other)}”. Undo with History.`);
     if (open?.id === id) await reopen(d); else bump();
   }, [act, titleOf, open, reopen]);
 
@@ -490,7 +493,7 @@ export function Companion() {
     await session.current?.flush();
     const d = await act<Doc>(removeIdeaCall(plan, idea, mtimeOf(plan)), `take ${idea} out of plan ${plan}`);
     if (!d) return;
-    setNotice(`Took it out of “${d.title}”. The idea stays; the plan's last version is in Versions.`);
+    setNotice(`Took it out of “${d.title}”. The idea stays; the plan's last version is in History.`);
     await afterPlanEdit(d);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [act, afterPlanEdit]);
@@ -793,27 +796,23 @@ export function Companion() {
         {open ? (
           <DocumentPane
             doc={doc}
-            follow={(id) => void openIdea(id)}
+            follow={(to) => void openIdea(to.name)}
             textDrag={textDragOn}
-            tools={<>
-                <button className={`ix-btn${chatOpen ? " on" : ""}`} data-testid="ideas-chat-toggle" aria-pressed={chatOpen} onClick={() => setChatOpen((o) => !o)}
-                  title="Talk this idea through with Claude, beside the editor">
-                  {dots.get(open.id) && <span className={`ix-dot ix-dot-${dots.get(open.id)}`} aria-hidden="true" />}Conversations
-                </button>
-                <button className="ix-btn" data-testid="ideas-relate" disabled={busy} onClick={() => setPick({ act: "relate", id: open.id })}
-                  title="Mark another idea as related to this one">Relate…</button>
-                <button className="ix-btn" data-testid="ideas-merge" disabled={busy} onClick={() => setPick({ act: "merge", id: open.id })}
-                  title="Move this idea's text into another idea; this one leaves the list">Merge into…</button>
-                <button className="ix-btn" data-testid="ideas-split" disabled={busy || !hasSel || mode !== "edit"} onMouseDown={(e) => e.preventDefault()} onClick={askSplit}
-                  title="Split the selected text into a new idea (or drag the selection onto the list; ⌥ keeps a copy)">Split…</button>
-            </>}
-            after={<>
-                {listing?.dir && <button className="ix-btn" data-testid="ideas-reveal" onClick={reveal}>Show in Finder</button>}
-                <button className={`ix-btn${arm.armed === "remove" ? " ix-btn-armed" : ""}`} data-testid="ideas-remove" disabled={busy} onClick={remove}
-                  title="Removes the file. A copy is kept in the folder's .history.">
-                  {arm.armed === "remove" ? "Remove? Kept in .history" : "Remove"}
-                </button>
-            </>}
+            tool={(small) => (
+              <button className={`ix-btn${chatOpen ? " on" : ""}${small ? " ix-btn-icon" : ""}`} data-testid="ideas-chat-toggle" aria-pressed={chatOpen} onClick={() => setChatOpen((o) => !o)}
+                title="Conversations: talk this idea through with Claude, beside the editor" aria-label="Conversations">
+                {dots.get(open.id) && <span className={`ix-dot ix-dot-${dots.get(open.id)}`} aria-hidden="true" />}
+                {small ? <Icons.MessageSquare size={13} /> : "Conversations"}
+              </button>
+            )}
+            acts={[
+              { testId: "ideas-relate", label: "Relate…", disabled: busy, title: "Mark another idea as related to this one", run: () => setPick({ act: "relate", id: open.id }) },
+              { testId: "ideas-merge", label: "Merge into…", disabled: busy, title: "Move this idea's text into another idea; this one leaves the list", run: () => setPick({ act: "merge", id: open.id }) },
+              { testId: "ideas-split", label: "Split…", disabled: busy || !hasSel || mode !== "edit", title: "Split the selected text into a new idea (or drag the selection onto the list; ⌥ keeps a copy)", run: askSplit },
+              ...(listing?.dir ? [{ testId: "ideas-reveal", label: "Show in Finder", run: reveal }] : []),
+              { testId: "ideas-remove", label: arm.armed === "remove" ? "Remove? Kept in .history" : "Remove", title: "Removes the file. A copy is kept in the folder's .history.", disabled: busy,
+                armed: arm.armed === "remove", stays: arm.armed !== "remove", run: remove },
+            ]}
             strips={<>
             <RelatedStrip rels={related.filter((r) => r.how !== "planned-in" && r.how !== "plan-of")} open={(id) => void openIdea(id)} />
             {open.kind === "plan" ? (
@@ -838,16 +837,16 @@ export function Companion() {
                   makeWorkspace={() => void doMakeWorkspace(open.id)}
                   openWorkspace={showWorkspace}
                   linkWorkspace={() => void openWsPick("set-plan", open.id)}
-                  gotoLine={(n) => { if (mode !== "edit") switchMode("edit"); window.setTimeout(() => handle.current?.gotoLine(n), 0); }}
+                  gotoLine={gotoLine}
                 />
               )
             ) : (
               <PlanStrip
                 plans={plansIn(related)}
-                sources={planSources(open, selected, ideaRowsAll).length}
+                sources={planSources(openRow, selected, ideaRowsAll).length}
                 busy={busy}
                 open={(id) => void openIdea(id)}
-                make={() => void doMakePlan(planSources(open, selected, ideaRowsAll))}
+                make={() => void doMakePlan(planSources(openRow, selected, ideaRowsAll))}
                 link={() => void openWsPick("link-idea", open.id)}
               />
             )}
@@ -890,7 +889,7 @@ export function Companion() {
           title={pick.act === "relate" ? `Relate “${titleOf(pick.id)}” to…` : `Merge “${titleOf(pick.id)}” into…`}
           rows={ideaRows}
           exclude={pick.id}
-          confirm={pick.act === "merge" ? (r) => `“${titleOf(pick.id)}” is appended to “${r.title}” and leaves the list. Its id keeps pointing at “${r.title}”; both versions are kept in Versions.` : undefined}
+          confirm={pick.act === "merge" ? (r) => `“${titleOf(pick.id)}” is appended to “${r.title}” and leaves the list. Its id keeps pointing at “${r.title}”; both versions are kept in History.` : undefined}
           act={(r) => { const p = pick; setPick(null); if (p.act === "relate") void doRelate(p.id, r.id!); else void doMerge(r.id!, p.id); }}
           close={() => setPick(null)}
         />

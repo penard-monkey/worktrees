@@ -1,0 +1,70 @@
+// The workspace view's pure rules (app/src/wsview.ts), run: the card's dot, the
+// attention line, a tab that is not drawn, and the document pane's steps
+// (doc/useTier.ts, doc/docmode.ts).
+//
+//   node app/scripts/wsview-check.mjs     # exits non-zero on failure
+//
+// Which tabs each beta draws is beta-check.mjs's. What the screens do is
+// workspace-view-browser.mjs's and documents-browser.mjs's.
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
+import { transformWithEsbuild } from "vite";
+
+const read = (rel) => fs.readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
+const load = async (src) => import("data:text/javascript;base64," + Buffer.from((await transformWithEsbuild(src, "x.ts", { loader: "ts", format: "esm" })).code).toString("base64"));
+let failed = 0;
+const eq = (name, got, want) => {
+  const g = JSON.stringify(got), w = JSON.stringify(want);
+  if (g === w) return;
+  failed++;
+  console.log(`not ok — ${name}\n     got: ${g}\n    want: ${w}`);
+};
+const src = read("../src/wsview.ts");
+eq("wsview.ts has no runtime import", /^import (?!type )/m.test(src), false);
+const V = await load(src.replace(/^import type .*$/gm, ""));
+
+// ── the dot: waiting, then working, then just done ──
+const roll = (...xs) => V.rollupOf(xs, (x) => x, (x) => x === "done");
+eq("one waiting among working is waiting", roll("busy", "waiting", "busy"), "waiting");
+eq("one working among done is busy", roll("done", "busy"), "busy");
+eq("done", roll("", "done"), "done");
+eq("nothing", roll("", ""), "");
+eq("no items", roll(), "");
+
+// ── the attention line ──
+const none = { unsaved: null, problems: [], planError: null };
+eq("nothing needs anybody", V.attentionOf(none), []);
+eq("an unsaved document here", V.attentionOf({ ...none, unsaved: { title: "Plan", elsewhere: null } }), [{ kind: "unsaved", text: "“Plan” has text that is not saved." }]);
+eq("…in another workspace names it", V.attentionOf({ ...none, unsaved: { title: "Plan", elsewhere: "Jellyfin" } })[0].text, "“Plan”, in Jellyfin, has text that is not saved.");
+eq("one problem", V.attentionOf({ ...none, problems: ["Line 3: x"] }), [{ kind: "plan", text: "The plan has a problem. Line 3: x" }]);
+eq("more than one: the count and the first", V.attentionOf({ ...none, problems: ["Line 3: x", "Line 9: y"] })[0].text, "The plan has 2 problems. Line 3: x");
+eq("a plan that cannot be read has no problems to count", V.attentionOf({ ...none, problems: ["Line 3: x"], planError: "it is gone" }), [{ kind: "plan", text: "The plan cannot be read: it is gone." }]);
+eq("the document first", V.attentionOf({ unsaved: { title: "P", elsewhere: null }, problems: ["L"], planError: null }).map((a) => a.kind), ["unsaved", "plan"]);
+
+eq("a tab that is not drawn is Overview", [V.tabOr("plan", ["overview", "memory"]), V.tabOr("memory", ["overview", "memory"])], ["overview", "memory"]);
+eq("counts", [V.wsCounts(0), V.wsCounts(1), V.wsCounts(3)], ["0 projects", "1 project", "3 projects"]);
+
+// ── the pane's header by its own width (§4.1) ──
+const T = await load(read("../src/doc/useTier.ts").replace(/^import .*$/gm, "const useState = () => [], useLayoutEffect = () => {};"));
+const pane = read("../src/doc/DocumentPane.tsx");
+const breaks = [Number(pane.match(/export const NARROW = (\d+);/)?.[1]), Number(pane.match(/export const FULL = (\d+);/)?.[1])];
+eq("the steps are the design's", breaks, [420, 640]);
+eq("the header's steps", [340, 419, 420, 639, 640, 1052].map((w) => T.tierOf(w, breaks)), [0, 0, 1, 1, 2, 2]);
+eq("the pane uses them, and its own width", /const BREAKS = \[NARROW, FULL\] as const;/.test(pane) && /useTier\(head, BREAKS\)/.test(pane), true);
+
+// ── Edit or Read, per kind ──
+globalThis.window = undefined;
+const M = await load(read("../src/doc/docmode.ts"));
+eq("with no storage: ideas in Edit, plans and memory in Read", ["idea", "plan", "memory"].map(M.startMode), ["edit", "read", "read"]);
+const kept = new Map();
+globalThis.window = { localStorage: { getItem: (k) => kept.get(k) ?? null, setItem: (k, v) => kept.set(k, v) } };
+M.rememberMode("plan", "edit");
+eq("a choice is its kind's alone", ["idea", "plan", "memory"].map(M.startMode), ["edit", "edit", "read"]);
+kept.set("wt.doc.mode.idea", "junk");
+eq("junk in storage is the default", M.startMode("idea"), "edit");
+globalThis.window = { get localStorage() { throw new Error("blocked"); } };
+M.rememberMode("idea", "read");
+eq("blocked storage is the default, and no error", M.startMode("plan"), "read");
+
+if (failed) { console.log(`\nwsview-check: ${failed} failed`); process.exit(1); }
+console.log("wsview-check: all ok");

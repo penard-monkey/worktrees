@@ -103,8 +103,6 @@ button.ix-row-main:hover { background: var(--bg-elev); }
 body.dragging .ix-row-main:hover { background: transparent; }
 .ix-list-hot { box-shadow: inset 0 0 0 2px var(--accent); }
 .ix-list-tip { padding: var(--s1) var(--s3); }
-.ix-catch { position: fixed; inset: 0; z-index: 20; }
-body.dragging .ix-catch { pointer-events: none; }
 .ix-scrim { position: fixed; inset: 0; z-index: 30; background: rgb(0 0 0 / 0.35); display: flex; align-items: flex-start; justify-content: center; padding: 12vh 16px 16px; }
 .ix-dialog {
   width: min(440px, 100%); max-height: 76vh; overflow-y: auto; display: flex; flex-direction: column; gap: var(--s2); padding: var(--s3);

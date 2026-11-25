@@ -1,16 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 import { editorNow, loadEditor } from "./loadeditor";
 import type { DocEditor, EditorHandle, EditorHooks } from "./editortypes";
-import { errText, type Held, type Open } from "./useDoc";
+import { errText, type CursorNext, type Held, type Open } from "./useDoc";
 
-/** One editor view for the pane's life; a new document gets a new STATE (its
- *  own history, its own line separator). The view is fetched the first time
+/** One editor view from the pane's first Edit to its end (DocumentPane.tsx
+ *  mounts this then, so a document that is only read fetches no editor); a new
+ *  document gets a new STATE (its own history, its own line separator). The
+ *  view is fetched the first time
  *  (`loadeditor.ts`); until it is here the document's text is `held`. */
 export function EditorHost(props: {
   open: Open;
   handle: React.RefObject<EditorHandle | null>;
   held: React.RefObject<Held | null>;
   hooks: EditorHooks;
+  /** Edit was asked for before the editor was here. */
+  cursorNext: React.RefObject<CursorNext>;
   /** The text was replaced under the editor. */
   replaced(): void;
   hidden: boolean;
@@ -63,7 +67,10 @@ export function EditorHost(props: {
       insert: (from, to, text) => editor.insert(from, to, text),
       gotoLine: (n) => editor.gotoLine(n),
     };
-    if (open.focus) editor.focus();
+    const next = props.cursorNext.current;
+    props.cursorNext.current = null;
+    if (next?.line !== undefined) editor.gotoLine(next.line);
+    else if (open.focus || next) editor.focus();
     // The text is read once per opening; a reload goes through `replace`,
     // never through a re-render.
     // eslint-disable-next-line react-hooks/exhaustive-deps

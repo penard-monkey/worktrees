@@ -25,7 +25,7 @@
 import type { Settings } from "./settings";
 
 /** The keys a beta feature may use: each its own `beta_<name>` boolean. */
-export type BetaKey = "beta_ideas" | "beta_group_chat";
+export type BetaKey = "beta_ideas" | "beta_group_chat" | "beta_workspace_chats";
 
 export type BetaFeature = {
   /** Its own settings key, default off (settings.ts). */
@@ -43,7 +43,7 @@ export const BETA_FEATURES: readonly BetaFeature[] = [
   {
     key: "beta_ideas",
     label: "Ideas",
-    what: "Adds the Ideas window (the lightbulb in the rail, and ⌘⇧I) and a workspace's overview, with its plan and ideas. Still changing. Turning it off hides it and keeps what you wrote.",
+    what: "Adds the Ideas window (the lightbulb in the rail, and ⌘⇧I) and a workspace's plan and ideas in its view. Still changing. Turning it off hides it and keeps what you wrote.",
     testId: "beta-ideas",
   },
   {
@@ -52,6 +52,12 @@ export const BETA_FEATURES: readonly BetaFeature[] = [
     what: "Share a running session with a guest, talk beside it in a thread, and see what a host shares with you. Start with Share… on a running session, or Join with a link… on Home. Turning it off hides it and keeps every pairing and share.",
     testId: "beta-group-chat",
   },
+  {
+    key: "beta_workspace_chats",
+    label: "Workspace chats",
+    what: "Still being built: a workspace's own chats and its memory. Today it adds a workspace's Memory and Chats tabs, both empty, and nothing can be started from them yet. Turning it off hides them.",
+    testId: "beta-workspace-chats",
+  },
 ];
 
 /** Ideas (idea board phases 0, 1, 3, 4 and S): the Ideas window, the rail's
@@ -59,6 +65,12 @@ export const BETA_FEATURES: readonly BetaFeature[] = [
  *  companion.rs `BETA`), and a workspace's overview (its plan and linked
  *  ideas), which is all of phase 4 the main window draws. Named workspaces left the beta on 2026-11-14. */
 export const ideasBeta = (s: Pick<Settings, "beta_ideas">): boolean => s.beta_ideas === true;
+
+/** Workspace chats and memory (docs/proposals/workspace-chats.md,
+ *  workspace-view-design.md): the workspace view's Memory and Chats tabs, its
+ *  Memory chip, and its Overview's Memory and Chats. Never Ideas' flag: the
+ *  frame both draw in shows with either on, and each part asks its own. */
+export const workspaceChatsBeta = (s: Pick<Settings, "beta_workspace_chats">): boolean => s.beta_workspace_chats === true;
 
 /** Group chat (docs/proposals/group-chat.md, PRs #650–#664): the owner's
  *  Share bar, thread, join asks and Settings → Remote → Guests, and the
