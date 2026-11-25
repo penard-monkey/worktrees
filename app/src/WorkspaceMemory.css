@@ -13,7 +13,7 @@
 .wsm-file { display: block; width: 100%; border: 0; background: transparent; padding: 3px var(--s3); color: var(--txt-hi); font: inherit; font-size: var(--fs-label); text-align: left; }
 .wsm-file:hover { background: var(--bg-elev); }
 .wsm-file.on { background: var(--bg-elev); box-shadow: inset 3px 0 0 var(--ws-hue); }
-.wsm-file-in { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
+.wsm-file-in { width: 100%; box-sizing: border-box; display: flex; align-items: center; gap: var(--s2); min-width: 0; }
 .wsm-file-i { flex: none; color: var(--txt-dim); line-height: 0; }
 .wsm-file-n { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wsm-file-s { flex: none; color: var(--txt-dim); font-size: var(--fs-meta); }
@@ -37,7 +37,9 @@
 .wsm-row:hover, .wsm-cfile:hover { background: var(--bg-elev); }
 .wsm-row.fold, .wsm-row.redo { border-left-color: var(--done); }
 .wsm-row.undo { border-left-color: var(--warn); }
-.wsm-row-n { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Its own width first, not a share of nothing: WKWebView sizes what is in a
+   <button> by its content (AGENTS.md), and a basis of 0 has none. */
+.wsm-row-n { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wsm-row.undone .wsm-row-n { color: var(--txt); text-decoration: line-through; }
 .wsm-row-u, .wsm-row-d { flex: none; color: var(--txt); font-size: var(--fs-meta); }
 .wsm-pm { flex: none; display: inline-flex; gap: 4px; font-size: var(--fs-meta); }

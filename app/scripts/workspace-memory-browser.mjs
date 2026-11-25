@@ -140,6 +140,7 @@ async function hist(page, tag, eng) {
   await history(page);
   ok(await until(page, () => document.querySelectorAll("[data-testid=memory-log-row]").length > 0) && await histRows(page) === "edit,fold,undo,fold,made", `${tag} the index's changes, newest first (${await histRows(page)})`);
   ok(await page.evaluate(() => getComputedStyle(document.querySelector("[data-testid=main-doc] .ix-body")).display === "none"), `${tag} History takes the document's place`);
+  ok(await page.evaluate(() => [...document.querySelectorAll(".wsm-row")].every((r) => { const n = r.querySelector(".wsm-row-n"), d = r.querySelector(".wsm-row-d").getBoundingClientRect(); return d.right >= r.getBoundingClientRect().right - 20 && n.scrollWidth <= n.clientWidth + 1; })), `${tag} a change's subject takes the row's room`);
   await page.click("[data-testid=memory-hist-close]");
   await page.click("[data-testid=memory-file][data-path='topics/nas-layout.md']");
   await isDoc(page, "topics/nas-layout.md");
