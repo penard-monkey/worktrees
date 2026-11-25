@@ -1,4 +1,4 @@
-//! The 291 commands, each with its exposure, capability and objects, in ONE
+//! The 293 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -1030,6 +1030,9 @@ commands! { cx, a;
     set_pi_trust: HostConsole => project::set_pi_trust(&cx.ctx, a.get("mode")?),
     set_pi_allowed: HostConsole [console, project(repo)] => project::set_pi_allowed(a.get("repo")?, a.get("allow")?),
     set_kimi_allowed: HostConsole [console, project(repo)] => project::set_kimi_allowed(a.get("repo")?, a.get("allow")?),
+    // Codex folder trust: a read of the allowance, and the console-only grant.
+    codex_status: Engine [read, opt_project(repo, Free), filtered(by_project)] => project::codex_status(&cx.ctx, a.get("repo")?),
+    set_codex_allowed: HostConsole [console, project(repo)] => project::set_codex_allowed(a.get("repo")?, a.get("allow")?),
     remote_url: Engine [read, project(repo)] => project::remote_url(a.get("repo")?),
     project_prs: Engine [read, project(repo), places(places)] => project::project_prs(a.get("repo")?, a.get("max_age_secs")?, a.get("places")?),
     open_editor: ClientLocal => refused(),
@@ -1506,7 +1509,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 291 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 293 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1540,7 +1543,7 @@ mod tests {
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 291, "the table has 291 commands");
+        assert_eq!(TABLE.len(), 293, "the table has 293 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1979,7 +1982,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 71), ("write", 23), ("admin", 42), ("console", 112), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 72), ("write", 23), ("admin", 42), ("console", 113), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7), ("guest", 9),
         ]
         .into();

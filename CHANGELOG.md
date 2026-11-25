@@ -5,11 +5,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+
+- **Codex folder trust: allow a repo once, and its Codex lanes stop at no prompt.** Codex asks "Trust this folder?" in every repo it
+  has not seen, nothing in Worktrees can answer it, and a launch into one was refused (or, forced, sat at the modal). Turn a repo
+  on in Settings → Agent policy → Codex folder trust, or run `worktrees trust codex [<repo>] [--revoke]`, and its Codex lanes
+  start trusted: Codex then reads the repo's `AGENTS.md` and `.codex/` config and runs without its folder prompt, so code the
+  repo ships runs inside Codex with no question. **Off for every repo until you turn it on**, and only you can: the CLI and the
+  desktop's Settings, never a repo's `.worktrees.toml`, an agent's MCP tools or a paired device. It rides on each launch as one
+  per-run `-c` (measured on Codex 0.172.0; the inline-table form, because the dotted `projects."<path>"` form is not read), so
+  nothing is saved: `~/.codex/config.toml` is never written, a plain `codex` outside Worktrees is unaffected, and turning a repo
+  off applies at its next launch. A path with a quote, backslash or control character in it cannot be spelled safely and is
+  refused in words. A repo that is not allowed is refused as before, and the refusal now names the new way instead of leaving
+  `--force` (which only starts Codex at its prompt) as the apparent fix. `worktrees doctor --codex` (and `doctor`, and the MCP
+  `doctor`) report each allowed repo and whether a launch there would be trusted.
+
 ### Fixed
 
 - **A guest sees the pictures in a shared session.** Where the owner's chat drew the images in the agent's reply, the guest's view of the same session drew only their alt text, and no thumbnail under a Read of an image: the guest view never asked for one, and no row a guest may call answered with one. A new guest row, `shared_image`, does. It names the share, the turn and the path; the host finds the shared place and judges the path exactly as the owner's chat does (inside the place, no link out, nothing under `(main)`'s `.worktrees/`, the same size and type limits), and only for a picture that turn of the shared session shows, so a guest cannot look through the place by guessing names. In a session that has ended, a picture changed on disk since is refused. Two pictures stay the owner's: one in a message a person sent, and a Read of a file outside the place. Both computers need this version; with an older host the guest sees the alt text, as before. Pictures arriving late no longer move what a guest is reading.
 - **Text fields look like text fields.** In Settings (Join with a link was the report), the header search, the dock and the chat composer a field was a flat box a few shades darker than its panel with a 1.2:1 edge, which in a light theme reads as greyed out; the owner took a while to find out they could type. Every editable field now has a fill that differs from its surface (white in the light themes, lighter than the panel, as the Settings search already was), an edge at least 3:1 against it in all six themes (`--line-field`, new; `--line-strong` was 1.3-2.8:1), an accent edge plus an outline when focused, and a disabled field loses its fill and edge and shows a not-allowed cursor, so the two cannot be mistaken. The Join form's name field, disabled while a join runs, now shows the difference. `app/scripts/fieldlook-browser.mjs` measures all of it in Chromium and WebKit.
 - **A chat answer can start with `#`, `!` or `@`.** Typing `#2. Also, let's use the prefix ot instead of go.` into a question's free-text row was refused ("An answer can't start with #"), because answers shared the composer's rule, where a leading `# ! @ /` runs something. An answer goes into a field the prompt itself opened, and on Claude 2.1.331 those symbols only insert text there (the free-text row, a preview question's notes, a permission prompt's amend field), so only a leading `/` is refused now. Messages and slash commands keep the composer's rule. Codex's question notes are not measured and keep refusing a leading `@ ! #`.
+
+- **A markdown link to a local file in the chat did nothing.** A reply ending in `[Open the prototype](/path/to/index.html)` drew a link that was dead: the chat acted only on `http(s)`. It now follows the Files and Plan panes' rule: `http(s)` opens in the browser, a path (absolute, or relative to the place; `%20` decoded, `#fragment` dropped) opens in the Files tab, where the file's own Open button is the step before anything runs, and any other scheme is refused with a message. A shared session, which has no Files tab, says it cannot open a file on the host's computer.
 
 ## [0.53.1] - 2026-11-23
 

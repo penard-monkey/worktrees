@@ -4171,6 +4171,29 @@ mod tests {
         s.tools().iter().map(|t| t["name"].as_str().unwrap_or_default().to_string()).collect()
     }
 
+    /// The folder-trust allowances (`[trust] pi|kimi|codex`) are the owner's:
+    /// no tool is named for one and none takes a `trust`/`allow` argument, so an
+    /// agent can read them (`doctor`) but never grant itself or a peer one —
+    /// least of all through `create_worktree`/`open_place`.
+    #[test]
+    fn no_tool_can_set_a_trust_allowance() {
+        let sc = scratch("no-trust-tool");
+        let wt = repo_with_worktree(&sc);
+        for mutations in [false, true] {
+            let server = server_in(&sc.root, &wt, mutations);
+            let tools = server.tools();
+            assert!(tools.len() > 5, "the server lists its tools");
+            for t in &tools {
+                let name = t["name"].as_str().unwrap_or_default();
+                assert!(!name.contains("trust") && !name.contains("allow"), "{name}");
+                let props = t["inputSchema"]["properties"].as_object().cloned().unwrap_or_default();
+                for k in props.keys() {
+                    assert!(!k.contains("trust") && !k.contains("allow"), "{name} takes `{k}`");
+                }
+            }
+        }
+    }
+
     /// `show_doc` with a position, from a LANE. A relative path means the
     /// file in the caller's own working tree — the one it has been editing and
     /// is talking about — and falls back to the repository root only when the

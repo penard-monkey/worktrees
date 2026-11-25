@@ -27,6 +27,7 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Notice, Step } from "./chat";
+import { chatLinkAction } from "./chatlink";
 import { closeShare, guestLinkOf, joinShare, useGuests, type GuestHostView, type GuestShare } from "./guest";
 import { SharedThumb, sharedImageNode, type SharedAt } from "./GuestImage";
 import { readImagePath } from "./imgsrc";
@@ -111,8 +112,14 @@ function useSharedTurns(link: GuestLink | undefined, share: string, binding: num
 const clock = (at: number | null) => (at ? new Date(at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "");
 const HARNESS: Record<string, string> = { claude: "Claude", codex: "Codex" };
 
-function onLink(href: string) {
-  if (/^https?:/i.test(href)) openUrl(href).catch((e) => console.warn(`[guest] open ${href}: ${String(e)}`));
+/** A guest has no Files tab, and a local path names a file on the HOST's
+ *  machine, so only http(s) opens; every other link is refused in words
+ *  (`say`), never silently (the same rule as ChatPane's, chat.ts). */
+function guestLink(href: string, say: (words: string) => void) {
+  const a = chatLinkAction(href, "");
+  if (a.kind === "url") openUrl(a.url).catch((e) => console.warn(`[guest] open ${href}: ${String(e)}`));
+  else if (a.kind === "refuse") say(`Refused to open a ${a.scheme}: link.`);
+  else if (a.kind === "path") say("That link names a file on the host’s computer, which a shared session cannot open.");
 }
 
 function noticeWords(n: Notice): string {
@@ -176,7 +183,7 @@ function Asked({ st, owner }: { st: Extract<Step, { kind: "question" | "permissi
   return <li className="chat-note" data-testid="guest-asked">{what} · {owner} {answer}</li>;
 }
 
-function TurnItems({ t, agent, owner, at }: { t: SharedTurn; agent: string; owner: string; at: SharedAt }) {
+function TurnItems({ t, agent, owner, at, onLink }: { t: SharedTurn; agent: string; owner: string; at: SharedAt; onLink: (href: string) => void }) {
   const { link, share, binding } = at;
   // The agent's text alone: a person's message draws no picture here, because a
   // guest's own words reach it (*Use these*) and the host refuses its paths.
@@ -243,6 +250,8 @@ function ShareView({ hv, share, binding }: { hv: GuestHostView; share: GuestShar
   const agent = HARNESS[b?.harness ?? ""] ?? "The agent";
   const { turns, more, error, loaded, older, earlier } = useSharedTurns(link, share.id, binding, st.live, allowed, hv.bump);
   const [joinErr, setJoinErr] = useState<string | null>(null);
+  const [linkNote, setLinkNote] = useState<string | null>(null);
+  const onLink = useCallback((href: string) => { setLinkNote(null); guestLink(href, setLinkNote); }, []);
 
   // §1 step 4: opening an invited share asks to join.
   useEffect(() => {
@@ -294,8 +303,9 @@ function ShareView({ hv, share, binding }: { hv: GuestHostView; share: GuestShar
             {error && <p className="chat-note" role="alert" data-testid="guest-error">Couldn’t read the session: {error}</p>}
             {allowed && loaded && turns.length === 0 && <p className="chat-note">No messages in this session yet.</p>}
             <ol className="chat-list" data-testid="guest-list">
-              {turnKeys(turns).map(([key, t]) => <TurnItems key={key} t={t} agent={agent} owner={hv.owner} at={at} />)}
+              {turnKeys(turns).map(([key, t]) => <TurnItems key={key} t={t} agent={agent} owner={hv.owner} at={at} onLink={onLink} />)}
             </ol>
+            {linkNote && <p className="chat-note" role="alert" data-testid="guest-link-note">{linkNote}</p>}
           </div>
         </div>
       </div>

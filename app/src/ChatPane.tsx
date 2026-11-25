@@ -28,6 +28,7 @@ import { announcement, gather, hear, promptKeyOf, type Bundle, type ChatView, ty
 // Attachments (docs/proposals/chat-attachments.md): their own line, for the same reason.
 import { addAttachments, attachProblem, removeAttachment, sizeWords, splitAttached, type Attachment, type IdeaConv } from "./chat";
 import { loadCommands, ranItems, sendCommand, type SlashCommand } from "./chat";
+import { chatLinkAction } from "./chatlink";
 import { commandProblem, commandWords, confirmStep, confirmWords, filterCommands, menuFor, slashDraft, sourceWord, type Armed } from "./slash";
 import { HARNESS_LABEL, isHarness, type Harness } from "./harness";
 import * as Icons from "./icons";
@@ -162,9 +163,13 @@ export function ChatPane(props: ChatPaneProps) {
 
   const { pathLinks, menu } = useDocPathLinks(idea ? null : path, null, props.reloadToken, props.onOpenPath);
   const onLink = useCallback((href: string) => {
-    if (/^https?:/i.test(href)) openUrl(href).catch((e) => props.onError(`open ${href}: ${String(e)}`));
+    // The rule is chatLinkAction's (chat.ts): a local link opens in the Files tab, never in another app.
+    const a = chatLinkAction(href, root);
+    if (a.kind === "url") openUrl(a.url).catch((e) => props.onError(`open ${href}: ${String(e)}`));
+    else if (a.kind === "path") props.onOpenPath(a.path, {});
+    else if (a.kind === "refuse") props.onError(`refused to open ${a.scheme}: link`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [root]);
 
   const data = v.turns.data;
   // A Codex command's output, which no rollout keeps, after the transcript's.

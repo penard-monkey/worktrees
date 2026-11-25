@@ -49,6 +49,9 @@ function mockModel(h: Harness, asked: unknown): string {
 // a machine without kimi.
 let kimiMcpMode: "off" | "read-only" | "mutations" = "off";
 const kimiAllowed = new Set<string>();
+// Settings → Policy → Codex folder trust: the `[trust] codex` allowance (core
+// `trust`, in ~/.config/worktrees/config.toml). Empty = off for every repo.
+const codexAllowed = new Set<string>();
 /** The remote door's state in the harness: the hosts this "machine" is
  *  paired with, and the one the window drives. `?remote` starts with one
  *  chosen, so the path-taking acts can be seen greyed. */
@@ -1393,6 +1396,19 @@ function mockImageTurns(now: number, place: string, filler: number, extra = fals
       reply: steps.filter((x) => x.kind === "text").map((x) => x.text).join("\n\n"), tools: ["Read", "Read"] },
   ];
 }
+// `?turns=links` (fix/chat-local-links): a reply whose markdown links name
+// local files: an absolute path to an .html file, a relative one with a
+// `%20` and a #fragment, and the ones a click must refuse or ignore (file:,
+// javascript:, a bare #anchor). `chat-links-browser.mjs` clicks each.
+function mockLinkTurns(now: number, place: string): MockTurn[] {
+  const text = [
+    "The prototype is ready:",
+    `[Open the prototype](${place}/docs/design/takes/astra/index.html)`,
+    "[Concept review](docs/design/takes/astra/REVIEW.md#verdict) · [Notes](docs/my%20notes/DESIGN.md)",
+    "[A file link](file:///etc/hosts) · [A script](javascript:alert(1)) · [Up](#top)",
+  ].join("\n\n");
+  return [{ at: now - 120, user: "Show me the prototype.", truncated: false, steps: [{ kind: "text", at: now - 116, text }], reply: text, tools: [] }];
+}
 // `?turns=cut` gives every Claude and Codex place turns the host shortens
 // (`mockHostShort`): a 10,000-character reply whose last sentence is past the
 // cut; a turn whose later `text` steps the host drops, the question among
@@ -1507,6 +1523,11 @@ function mockTurnsAt(repo: string, slug: string) {
   }
   if (harness === "claude" && new URLSearchParams(location.search).get("turns") === "images") {
     t = mockImageTurns(now, mockPlacePath(repo, slug), Number(new URLSearchParams(location.search).get("filler") ?? 0), new URLSearchParams(location.search).get("imgextra") === "1");
+    mockTurns.set(key, t);
+    return t;
+  }
+  if (harness === "claude" && new URLSearchParams(location.search).get("turns") === "links") {
+    t = mockLinkTurns(now, mockPlacePath(repo, slug));
     mockTurns.set(key, t);
     return t;
   }
@@ -5402,6 +5423,27 @@ Phase 3: Frontend pane and mock harness
         allowed: [...kimiAllowed], repo_root: root, repo_allowed: allowed,
         launch: root ? { env: allowed ? ["KIMI_CODE_TRUST_WORKSPACE", "1"] : null, source: allowed ? "allowance" : "ask", allowed, shadowed: false } : null,
       };
+    }
+    case "codex_status": {
+      const root = typeof args.repo === "string" ? args.repo : null;
+      const allowed = !!root && codexAllowed.has(root);
+      const known = new Set(ws.projects.map((p) => p.root));
+      return {
+        projects: ws.projects.map((p) => ({ root: p.root, name: projectName(p.root), allowed: codexAllowed.has(p.root) })),
+        stale: [...codexAllowed].filter((r) => !known.has(r)),
+        repo_root: root, repo_allowed: allowed,
+        launch: root ? {
+          config: allowed ? `projects={"${root}"={trust_level="trusted"}}` : null,
+          source: allowed ? "allowance" : "own", allowed, repo_root: root, reason: null,
+        } : null,
+        own_trusted: root ? false : null,
+      };
+    }
+    case "set_codex_allowed": {
+      const root = String(args.repo);
+      const had = codexAllowed.has(root);
+      if (args.allow) codexAllowed.add(root); else codexAllowed.delete(root);
+      return had !== !!args.allow;
     }
     case "kimi_mcp_status":
       return kimiMcpStatus();

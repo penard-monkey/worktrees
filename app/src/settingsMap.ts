@@ -91,6 +91,7 @@ export const HOST_KEYS = [
   "pi_trust", // pi_status .trust ≠ never
   "pi_allowed", // pi_status .allowed non-empty
   "kimi_allowed", // kimi_status .allowed non-empty
+  "codex_allowed", // codex_status, any project allowed
   "cross_project", // cross_project_status .level ≠ off
   "private_projects", // cross_project_status, any project private
   "quota_gate", // quota_settings .gate off
@@ -119,6 +120,7 @@ export const HOST_GETTERS: Record<HostKey, string> = {
   pi_trust: "pi_status",
   pi_allowed: "pi_status",
   kimi_allowed: "kimi_status",
+  codex_allowed: "codex_status",
   cross_project: "cross_project_status",
   private_projects: "cross_project_status",
   quota_gate: "quota_settings",
@@ -277,6 +279,7 @@ export const SECTIONS: readonly SectionDef[] = [
   { id: "plan-limits", page: "policy", tier: "beginner", label: "Plan limits", keywords: ["quota", "usage limit", "spent plan", "rate limit", "gate"], host: ["quota_gate"], write: "set_quota_settings" },
   { id: "plan-threshold", page: "policy", tier: "advanced", label: "Weekly threshold", keywords: ["weekly limit", "quota threshold", "percent", "warn"], host: ["quota_pct"], write: "set_quota_settings" },
   { id: "pi-trust", page: "policy", tier: "advanced", label: "pi", keywords: ["pi permissions", "pi trust", "project trust", "allowed repos"], host: ["pi_trust", "pi_allowed"], write: "set_pi_trust" },
+  { id: "codex-trust", page: "policy", tier: "advanced", label: "Codex folder trust", keywords: ["codex trust", "folder trust", "trust this folder", "allowed folders", "codex prompt"], host: ["codex_allowed"], write: "set_codex_allowed" },
   { id: "kimi-trust", page: "policy", tier: "advanced", label: "Kimi", keywords: ["kimi permissions", "kimi trust", "folder trust", "allowed folders"], host: ["kimi_allowed"], write: "set_kimi_allowed" },
   { id: "cross-project", page: "policy", tier: "advanced", label: "Other projects", keywords: ["cross project", "other repos", "read other projects", "private projects", "reach", "access"], host: ["cross_project", "private_projects"], write: "set_cross_project" },
   { id: "limits", page: "policy", tier: "advanced", label: "Limits", keywords: ["max agents", "cap agents", "agent limit", "how many agents", "live agents", "concurrency", "memory", "swap"], host: ["limits"], write: "set_limits" },

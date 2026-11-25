@@ -1400,6 +1400,27 @@ that each cost a measurement, all on 0.157.1:
 `agent-setup fix` from the suite's cwd, this checkout, and pushed a real branch
 to the real remote: `cd "$REPO"`, and refuse unless origin is `$ORIGIN`.
 
+**Codex lanes are trusted by an allowance, one `-c` per launch, and
+`~/.codex/config.toml` is never written** (`feat/codex-folder-trust`, the
+owner's ask of 2026-11-24). A repo in `[trust] codex` (`trust::codex_launch_trust`,
+`worktrees trust codex`, Settings → Policy → Codex folder trust; empty = off for
+every repo, `trust` is in `USER_ONLY_KEYS` so a repo cannot grant it, and the
+setter `set_codex_allowed` is `HostConsole`, like pi's and kimi's: a paired device
+holding every capability is refused, and no MCP tool names or takes a trust/allow
+argument) launches with `-c 'projects={"<repo root>"={trust_level="trusted"}}'`
+from `Codex::place_flags`, resume included. **Measured on codex-cli 0.172.0: only
+the INLINE TABLE works.** The dotted form `projects."<path>".trust_level=…` still
+stops at the modal for any path, with or without a `.` in it (the key's quotes
+are not honoured), while the inline table starts straight in for a place under
+`.worktrees/` (the main repo's root is the key), takes spaces and dots in the
+path, and MERGES with the user's own `projects`. A path with `"`, `\` or a
+control character is refused (`codex_trust_override`), never escaped on a guess,
+and never answered by writing the config. `codextrust::check` counts the
+allowance as trusted only where Codex's own config would stop at its prompt, and
+never over a config Codex cannot read. A `--force` launch of an unallowed repo
+still starts Codex AT the prompt, and `ops`'s launch-anyway note says so; do not
+type Enter into that pane to answer it (a lane did, 2026-11-23).
+
 **kimi has one too, and four of its habits are traps.** `docs/kimi-manual-checks.md`
 pins the 2.2.0 wire log and screens. (1) Interactive kimi takes NO prompt word —
 a trailing one is "unknown command" — so its opener is typed by a helper the
