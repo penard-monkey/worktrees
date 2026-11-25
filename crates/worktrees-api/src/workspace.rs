@@ -301,6 +301,7 @@ pub struct Added {
 /// as `worktrees projects add` does, so the two never disagree.
 pub fn add_project(ctx: &Ctx, dir: String) -> Result<Added, String> {
     let project = Project::discover(Path::new(&dir)).map_err(|e| e.msg)?;
+    worktrees_core::wsfolder::refuse_project(Path::new(&project.main_root), ctx.workspaces_dir())?;
     crate::projects::import_app_projects(ctx);
     worktrees_core::registry::add(&project.main_root)?;
     let adopted = worktrees_core::adopt::adopt(&project);
@@ -412,6 +413,7 @@ pub fn create_project(ctx: &Ctx, location: String, name: String) -> Result<Works
     }
     let target = base.join(name);
     crate::projects::forbid_new_path(&project_roots(ctx), &target)?;
+    worktrees_core::wsfolder::refuse_project(&target, ctx.workspaces_dir())?;
     if target.exists() {
         return Err(if target.join(".git").exists() {
             format!(
@@ -541,6 +543,7 @@ pub fn clone_project(
     let folder = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| src.name.clone());
     let target = wclone::plan_target(&parent, &folder)?;
     crate::projects::forbid_new_path(&project_roots(ctx), &target).map_err(invalid)?;
+    worktrees_core::wsfolder::refuse_project(&target, ctx.workspaces_dir()).map_err(invalid)?;
     // Never the raw URL: `https://user:TOKEN@host/…` is a legal thing to paste.
     let shown = wclone::redact_url(&src.url);
     applog("info", &format!("clone_project start {shown} -> {}", target.display()));
@@ -602,6 +605,7 @@ pub fn init_repo(ctx: &Ctx, dir: String) -> Result<Workspace, String> {
         return Err(format!("{dir} is not a directory"));
     }
     crate::projects::forbid_new_path(&project_roots(ctx), Path::new(&dir))?;
+    worktrees_core::wsfolder::refuse_project(Path::new(&dir), ctx.workspaces_dir())?;
     if !git::git_ok(&dir, &["rev-parse", "--is-inside-work-tree"]) {
         git::git_status_captured(&dir, &["init"]).map_err(|e| {
             applog("error", &format!("git init failed in {dir}: {e}"));

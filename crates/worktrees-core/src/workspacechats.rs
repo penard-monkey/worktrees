@@ -40,10 +40,8 @@ use serde_json::{Map, Value};
 
 use crate::desksessions::{self as desk, Desk, Launch};
 pub use crate::desksessions::Start;
+use crate::wsfolder::{folder_at, make_at, refuse_real, OVERRIDE_ENV};
 
-/// Moves the folder that holds every workspace's folder, for a test or a
-/// sandbox. Never `XDG_DATA_HOME` (AGENTS.md: Claude's install lives there).
-pub const OVERRIDE_ENV: &str = "WORKTREES_WORKSPACES_DIR";
 /// The record, in the workspace's folder.
 pub const RECORD: &str = "chats.json";
 const LOCK: &str = ".chats.json.lock";
@@ -68,75 +66,14 @@ pub const SETTINGS: &str = r#"{"autoMemoryEnabled":false}"#;
 
 const NOUN: &str = "chat";
 
-// ── where ───────────────────────────────────────────────────────────────────
-
-/// The folder that holds every workspace's folder: [`OVERRIDE_ENV`] when it
-/// is set and not empty, else [`default_dir`].
-pub fn dir() -> PathBuf {
-    match std::env::var_os(OVERRIDE_ENV).filter(|v| !v.is_empty()) {
-        Some(v) => PathBuf::from(v),
-        None => default_dir(),
-    }
-}
-
-/// `$XDG_DATA_HOME/worktrees/workspaces` (`~/.local/share/worktrees/workspaces`).
-pub fn default_dir() -> PathBuf {
-    let base = std::env::var("XDG_DATA_HOME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("{}/.local/share", std::env::var("HOME").unwrap_or_default()));
-    PathBuf::from(base).join("worktrees").join("workspaces")
-}
-
-/// Refuse a write under the user's real folder when this process runs an
-/// engine for a test (`registry::forbid_real_writes`).
-pub fn refuse_real(root: &Path) -> Result<(), String> {
-    refuse_real_in(root, &default_dir(), crate::registry::real_writes_forbidden())
-}
-
-fn refuse_real_in(root: &Path, real: &Path, forbidden: bool) -> Result<(), String> {
-    if !forbidden {
-        return Ok(());
-    }
-    let same = root == real || matches!((fs::canonicalize(root), fs::canonicalize(real)), (Ok(a), Ok(b)) if a == b);
-    if same {
-        return Err(format!(
-            "refused: a test reached the user's real workspaces folder ({}). Give the engine under test its own \
-             folder ({OVERRIDE_ENV} in a child's environment, never set_var, or `Ctx::with_workspaces`), or use \
-             the `*_at` forms with a temp dir.",
-            real.display()
-        ));
-    }
-    Ok(())
-}
-
-fn check_ws(ws: &str) -> Result<(), String> {
-    if crate::ulid::is_valid(ws) { Ok(()) } else { Err(format!("not a workspace id: {ws:?}")) }
-}
-
 fn check_conv(conv: &str) -> Result<(), String> {
     desk::check_conv(NOUN, conv)
-}
-
-/// Workspace `ws`'s folder under `root`, the id checked first.
-pub fn folder(root: &Path, ws: &str) -> Result<PathBuf, String> {
-    check_ws(ws)?;
-    Ok(root.join(ws))
-}
-
-/// Make workspace `ws`'s folder, refusing a link where it should be.
-pub fn make_folder_at(root: &Path, ws: &str) -> Result<PathBuf, String> {
-    let dir = folder(root, ws)?;
-    refuse_real(root)?;
-    fs::create_dir_all(root).map_err(|e| format!("{}: {e}", root.display()))?;
-    crate::fsx::make_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    Ok(dir)
 }
 
 fn ws_desk(root: &Path, ws: &str) -> Result<Desk, String> {
     Ok(Desk {
         root: root.to_path_buf(),
-        dirs: vec![folder(root, ws)?],
+        dirs: vec![folder_at(root, ws)?],
         file: RECORD,
         convs: CHATS_DIR,
         owner: format!("the workspace {ws}"),
@@ -144,41 +81,6 @@ fn ws_desk(root: &Path, ws: &str) -> Result<Desk, String> {
         refuse_real,
         lock: Some(LOCK),
     })
-}
-
-/// The path as it resolves: its longest existing part canonicalised, the rest
-/// as written. `Path::canonicalize` alone cannot answer for a folder that is
-/// about to be made.
-fn resolved(p: &Path) -> PathBuf {
-    let mut base = p;
-    let mut rest = Vec::new();
-    loop {
-        if let Ok(c) = fs::canonicalize(base) {
-            return rest.iter().rev().fold(c, |p: PathBuf, n| p.join(n));
-        }
-        match (base.file_name(), base.parent()) {
-            (Some(n), Some(up)) => {
-                rest.push(n.to_os_string());
-                base = up;
-            }
-            _ => return p.to_path_buf(),
-        }
-    }
-}
-
-/// Refuse `target` as a project when it is the workspaces folder `root` or
-/// anything under it: a workspace's memory is a git repository, and as a
-/// project its chats would be taken for its places' agents. `target` need not
-/// exist yet.
-pub fn refuse_project(target: &Path, root: &Path) -> Result<(), String> {
-    if !resolved(target).starts_with(resolved(root)) {
-        return Ok(());
-    }
-    Err(format!(
-        "{} is in the workspaces folder ({}), which holds workspaces' memory and chats and is never a project",
-        target.display(),
-        root.display()
-    ))
 }
 
 /// Refuse a workspaces folder inside a registered project, or one holding a
@@ -379,7 +281,7 @@ pub fn remove_at(root: &Path, ws: &str, conv: &str) -> Result<(), String> {
 /// `context.md` (`context` is given the chat's id) and its record entry with
 /// the session id Claude will be given. Nothing is launched.
 pub fn prepare_at(root: &Path, ws: &str, context: impl FnOnce(&str) -> String) -> Result<Chat, String> {
-    let dir = make_folder_at(root, ws)?;
+    let dir = make_at(root, ws)?;
     let desk = ws_desk(root, ws)?;
     desk.read::<Chat>()?;
     let conv = crate::ulid::new();
@@ -614,7 +516,7 @@ pub fn context_text(c: &Context) -> String {
 /// names, through no link.
 pub fn note_exists(root: &Path, ws: &str, c: &Chat) -> bool {
     let rel = PathBuf::from(note_path(&c.started, &c.id));
-    let Ok(mut at) = folder(root, ws) else { return false };
+    let Ok(mut at) = folder_at(root, ws) else { return false };
     let parts: Vec<_> = rel.components().collect();
     for (i, part) in parts.iter().enumerate() {
         let Component::Normal(n) = part else { return false };
@@ -658,7 +560,7 @@ fn launch<'a>(cwd: &'a Path, c: &'a Chat, session: &'a str, how: Start, opener: 
 /// registered project. Answers the tmux session's name.
 pub fn launch_at(root: &Path, ws: &str, conv: &str, how: Start, resume_opener: Option<String>) -> Result<String, String> {
     check_conv(conv)?;
-    let cwd = folder(root, ws)?;
+    let cwd = folder_at(root, ws)?;
     check_root(root, &crate::registry::read_lenient().roots())?;
     let c = find_at(root, ws, conv)?;
     let session = session_name(&c.id);
@@ -674,9 +576,8 @@ pub fn launch_at(root: &Path, ws: &str, conv: &str, how: Start, resume_opener: O
 /// the chat back out (record entry and folder), so a refusal leaves nothing of
 /// it, and no folder at all when it would have been the workspace's first.
 pub fn start_at(root: &Path, ws: &str, context: impl FnOnce(&str) -> String) -> Result<(Chat, String), String> {
-    check_ws(ws)?;
+    let dir = folder_at(root, ws)?;
     check_root(root, &crate::registry::read_lenient().roots())?;
-    let dir = folder(root, ws)?;
     let had_folder = fs::symlink_metadata(&dir).is_ok();
     let c = prepare_at(root, ws, context)?;
     match launch_at(root, ws, &c.id, Start::Fresh, None) {
@@ -714,7 +615,7 @@ pub fn close(conv: &str) -> Result<bool, String> {
 /// that is taken) and answer where it went, or `None` when it had none. The
 /// app deletes nothing here.
 pub fn retire_folder_at(root: &Path, ws: &str) -> Result<Option<PathBuf>, String> {
-    let dir = folder(root, ws)?;
+    let dir = folder_at(root, ws)?;
     match fs::symlink_metadata(&dir) {
         Ok(_) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -733,7 +634,7 @@ pub fn retire_folder_at(root: &Path, ws: &str) -> Result<Option<PathBuf>, String
 
 /// Put a folder [`retire_folder_at`] moved back where it was.
 pub fn restore_folder_at(root: &Path, ws: &str, from: &Path) -> Result<(), String> {
-    let dir = folder(root, ws)?;
+    let dir = folder_at(root, ws)?;
     refuse_real(root)?;
     fs::rename(from, &dir).map_err(|e| format!("could not move {} back to {}: {e}", from.display(), dir.display()))
 }
@@ -922,7 +823,7 @@ mod tests {
     }
 
     #[test]
-    fn a_workspaces_folder_inside_a_registered_project_is_refused_and_nothing_in_it_is_a_project() {
+    fn a_workspaces_folder_inside_a_registered_project_is_refused() {
         let top = tmp("root");
         let proj = top.join("proj");
         let inside = proj.join("ws");
@@ -932,26 +833,7 @@ mod tests {
         assert!(check_root(&top, &roots).is_err(), "a folder that holds a project");
         let outside = top.join("workspaces");
         assert!(check_root(&outside, &roots).is_ok());
-        // Not there yet, by any spelling, and through a link.
-        for t in [outside.clone(), outside.join("X").join("memory"), top.join("workspaces").join("new")] {
-            assert!(refuse_project(&t, &outside).unwrap_err().contains("never a project"), "{}", t.display());
-        }
-        fs::create_dir_all(outside.join("W").join("memory")).unwrap();
-        let link = top.join("link");
-        std::os::unix::fs::symlink(outside.join("W"), &link).unwrap();
-        assert!(refuse_project(&link.join("memory"), &outside).is_err(), "through a link");
-        assert!(refuse_project(&proj, &outside).is_ok());
-        assert!(refuse_project(&top.join("workspaces-2"), &outside).is_ok(), "a sibling that shares the name's head");
         let _ = fs::remove_dir_all(&top);
-    }
-
-    #[test]
-    fn a_test_engine_cannot_write_the_real_folder() {
-        let real = tmp("real");
-        assert!(refuse_real_in(&real, &real, true).unwrap_err().contains(OVERRIDE_ENV));
-        assert!(refuse_real_in(&real, &real, false).is_ok());
-        assert!(refuse_real_in(&real.join("other"), &real, true).is_ok());
-        let _ = fs::remove_dir_all(&real);
     }
 
     /// Removing moves; it deletes nothing, and a second one does not land on
@@ -1050,7 +932,7 @@ mod tests {
     fn a_refused_start_takes_everything_back() {
         let root = tmp("refused").join("workspaces");
         let ws = crate::ulid::new();
-        let dir = folder(&root, &ws).unwrap();
+        let dir = folder_at(&root, &ws).unwrap();
         let c = prepare_at(&root, &ws, |_| String::new()).unwrap();
         remove_at(&root, &ws, &c.id).unwrap();
         undo_folder(&dir);

@@ -1,4 +1,4 @@
-//! The 290 commands, each with its exposure, capability and objects, in ONE
+//! The 306 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -39,7 +39,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::sync::Arc;
-use worktrees_api::{agents, config, files, hostenv, ideas, ideasessions, keepawake, macprivacy, meta, ops, plans, prefs, presets, profiles, project, status, term, viewer, workspace, workspaces, Ctx};
+use worktrees_api::{agents, config, files, hostenv, ideas, ideasessions, keepawake, macprivacy, meta, ops, plans, prefs, presets, profiles, project, status, term, viewer, workspace, workspacechats, workspaces, Ctx};
 use worktrees_core::authz::{self, Caller, Capability, Caps, DeviceId, Grant, Projects, Registry};
 use worktrees_core::fetchpolicy::Fetcher;
 
@@ -367,6 +367,8 @@ macro_rules! obj {
     (opt($($inner:tt)+)) => { Obj::Opt(&obj!($($inner)+)) };
     (idea($a:ident)) => { Obj::Idea(stringify!($a)) };
     (idea_conv($c:ident, $i:ident)) => { Obj::IdeaConv(stringify!($c), stringify!($i)) };
+    (workspace($a:ident)) => { Obj::Workspace(stringify!($a)) };
+    (workspace_chat($c:ident, $i:ident)) => { Obj::WorkspaceChat(stringify!($c), stringify!($i)) };
     (share($a:ident)) => { Obj::Share(stringify!($a)) };
     (guest) => { Obj::Guest };
     (global) => { Obj::Global };
@@ -1431,7 +1433,7 @@ commands! { cx, a;
     workspaces_list: HostConsole => workspaces::workspaces_list(),
     workspace_create: HostConsole => workspaces::workspace_create(a.get("name")?),
     workspace_rename: HostConsole => workspaces::workspace_rename(a.get("id")?, a.get("name")?),
-    workspace_remove: HostConsole => workspaces::workspace_remove(a.get("id")?),
+    workspace_remove: HostConsole => workspaces::workspace_remove(&cx.ctx, a.get("id")?),
     workspace_set_projects: HostConsole => workspaces::workspace_set_projects(a.get("id")?, a.get("roots")?),
     workspace_reorder: HostConsole => workspaces::workspace_reorder(a.get("ids")?),
     workspace_set_color: HostConsole => workspaces::workspace_set_color(a.get("id")?, a.get("color")?),
@@ -1457,6 +1459,37 @@ commands! { cx, a;
     workspace_link_idea: HostConsole [console, idea(idea)] => plans::workspace_link_idea(&cx.ctx, a.get("id")?, a.get("idea")?),
     workspace_unlink_idea: HostConsole => plans::workspace_unlink_idea(&cx.ctx, a.get("id")?, a.get("idea")?),
     workspace_overview: HostConsole => plans::workspace_overview(&cx.ctx, a.get("id")?),
+    // ── workspace chats (`worktrees_core::workspacechats`) ──────────────────
+    // Claude in its own tmux session (`worktrees~ws~<conv>`), in the
+    // workspace's own folder, belonging to no project and never a place.
+    // Console rows on two objects, `workspace(id)` (the list has it) and
+    // `workspace_chat(conv, id)` (its `chats.json` does), so no device grant
+    // reaches them. The chat rows run the agent rows' bodies (`agents::*_at`):
+    // `workspace_send` and `workspace_answer_text` are `idea_send`'s and
+    // `idea_answer_text`'s behind one more console-only door (the owner,
+    // 2026-11-24), audited the same way.
+    workspace_chats: HostConsole [console, workspace(id)] => workspacechats::workspace_chats(&cx.ctx, a.get("id")?),
+    workspace_chat_start: HostConsole [console, workspace(id)] => workspacechats::workspace_chat_start(&cx.ctx, a.get("id")?),
+    workspace_chat_resume: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_chat_resume(&cx.ctx, a.get("id")?, a.get("conv")?),
+    workspace_chat_close: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_chat_close(&cx.ctx, a.get("id")?, a.get("conv")?),
+    workspace_chat_remove: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_chat_remove(&cx.ctx, a.get("id")?, a.get("conv")?),
+    workspace_chat_rename: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_chat_rename(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("title")?),
+    workspace_turns: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_turns(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("n")?),
+    workspace_turn_text: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_turn_text(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("turn_id")?),
+    workspace_tool_call: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_tool_call(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("call_id")?),
+    workspace_prompt: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_prompt(&cx.ctx, a.get("id")?, a.get("conv")?),
+    workspace_answer: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_answer(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("choice")?, a.get("fingerprint")?),
+    workspace_answer_text: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_answer_text(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("choice")?, a.get("fingerprint")?, a.get("text")?),
+    workspace_answer_many: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_answer_many(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("choices")?, a.get("fingerprint")?),
+    workspace_send: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_send(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("text")?),
+    workspace_interrupt: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_interrupt(&cx.ctx, a.get("id")?, a.get("conv")?),
+    workspace_term_open: HostConsole [console, workspace_chat(conv, id)] => {
+        let (session, id) = workspacechats::workspace_term_open(
+            &cx.ctx, a.get("id")?, a.get("conv")?, a.get("cols")?, a.get("rows")?, cx.frames.bytes(a.channel("on_bytes")?),
+        )?;
+        cx.frames.note_term(id, session);
+        Ok::<u32, String>(id)
+    },
 }
 
 #[cfg(test)]
@@ -1500,7 +1533,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 290 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 306 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1524,7 +1557,8 @@ mod tests {
     /// `workspace_from_plan`, `workspace_set_plan`, `workspace_link_idea`,
     /// `workspace_unlink_idea`, `workspace_overview`) and phase 5's three
     /// (`plan_set_project`, `plan_start`, `plan_link_place`), and the chat's images (`read_place_image`, `agent_call_image`), and phase S's sixteen
-    /// idea-session console rows (`idea_conversation*`, `idea_*` over the agent bodies, `idea_term_open`), and group
+    /// idea-session console rows (`idea_conversation*`, `idea_*` over the agent bodies, `idea_term_open`), the workspace
+    /// chats' sixteen console rows (`workspace_chat*`, `workspace_*` over the agent bodies, `workspace_term_open`), and group
     /// chat's eighteen share rows (fourteen console with PR D's `share_used` and `share_check`, four
     /// `guest`), its thread's two (`thread_read`, `thread_post`, `guest`) and PR C's
     /// two `guest` history rows (`shared_turns`, `shared_tool_call`), and the host's sleep
@@ -1534,7 +1568,7 @@ mod tests {
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 290, "the table has 290 commands");
+        assert_eq!(TABLE.len(), 306, "the table has 306 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1950,7 +1984,7 @@ mod tests {
     /// `push_allow_security`); Settings → Agent policy → Limits'
     /// `limits_settings` (`read`) and `set_limits` (`admin`); and the policy
     /// presets' `policy_preset_status` (`read`) and `apply_policy_preset`
-    /// (console); the named workspaces' seven (console); and the idea board's seven and phase 3's seven (console); phase 4's ten and phase 5's three (console); phase S's sixteen idea-session rows (console); `read_place_image` and `agent_call_image` are `read`; the host's sleep hold's `get_keep_awake` (`read`) and `set_keep_awake` (`admin`); and group chat's
+    /// (console); the named workspaces' seven (console); and the idea board's seven and phase 3's seven (console); phase 4's ten and phase 5's three (console); phase S's sixteen idea-session rows (console); the workspace chats' sixteen (console); `read_place_image` and `agent_call_image` are `read`; the host's sleep hold's `get_keep_awake` (`read`) and `set_keep_awake` (`admin`); and group chat's
     /// shares: fourteen console rows (`share_*` for the owner, `share_used`, `share_check`, `guest_places_hide`,
     /// `shares_all`, `guests_list`, `guest_remove`, `owner_set_name`) and the
     /// four `guest` rows (`GUEST_ROWS`), the capability's first, the thread's
@@ -1972,7 +2006,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 71), ("write", 23), ("admin", 42), ("console", 112), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 71), ("write", 23), ("admin", 42), ("console", 128), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7), ("guest", 8),
         ]
         .into();

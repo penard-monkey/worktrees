@@ -36,7 +36,9 @@
 //! machine's launch lock, as `ops::launch` does.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
