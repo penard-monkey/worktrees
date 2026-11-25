@@ -450,7 +450,7 @@ fn reserve(ctx: &Ctx, w: &Workspace, c: &Chat, at: &Locus, live: bool) -> Result
     crate::memory::memory_commit_if_dirty(ctx, &w.id, None).map_err(|e| format!("the memory could not be committed, so nothing was folded: {e}"))?;
     let attempt = ulid::new();
     // Its note is named the first time, by what the chat is called by then.
-    let mut named = c.clone();
+    let mut named = chats::named_at(root, &w.id, &c.id)?;
     chats::name_note(&mut named, &io.today());
     let opener = chats::write_fold_at(root, &w.id, &named, &attempt)?;
     // A relaunch is a launch: what it is told is as fresh as its rules.
@@ -465,6 +465,7 @@ fn reserve(ctx: &Ctx, w: &Workspace, c: &Chat, at: &Locus, live: bool) -> Result
     };
     chats::update_at(root, &w.id, &c.id, |x| {
         x.note = named.note.clone();
+        x.attempts.extend(fold.attempt.clone());
         x.fold = Some(fold.clone());
     })?;
     ctx.memory.hold(&w.id);
@@ -543,6 +544,7 @@ fn subject(head: &str, title: &str) -> String {
 pub fn closed(ctx: &Ctx, ws: &str, c: &Chat, ran: bool) -> Result<(bool, Option<Change>), String> {
     let run = ctx.folds.runs().remove(&c.id);
     let stopped = run.as_ref().is_some_and(Run::running);
+    let title = chats::named_at(ctx.workspaces_dir(), ws, &c.id).map_or_else(|_| "a chat".into(), |c| c.title);
     // With what another engine's fold may be writing, one lock for the look and
     // the commit.
     let _lock = wslock::take(ctx.workspaces_dir(), ws)?;
@@ -555,14 +557,14 @@ pub fn closed(ctx: &Ctx, ws: &str, c: &Chat, ran: bool) -> Result<(bool, Option<
         }
     }
     if stopped {
-        let done = crate::memory::memory_commit_if_dirty(ctx, ws, Some(&subject("Fold stopped", &c.title)));
+        let done = crate::memory::memory_commit_if_dirty(ctx, ws, Some(&subject("Fold stopped", &title)));
         ctx.memory.release(ws);
         return Ok((true, done?));
     }
     if !ran || ctx.memory.is_held(ws) || !matches!(chats::folding_at(ctx.workspaces_dir(), ws), Ok(None)) {
         return Ok((false, None));
     }
-    Ok((false, crate::memory::memory_commit_if_dirty(ctx, ws, Some(&subject("Chat closed", &c.title)))?))
+    Ok((false, crate::memory::memory_commit_if_dirty(ctx, ws, Some(&subject("Chat closed", &title)))?))
 }
 
 /// After an undo or a redo: which chats' folds are undone now, in their
@@ -715,6 +717,7 @@ fn land(ctx: &Ctx, ws: &str, conv: &str, attempt: &str, wrote: bool) -> Option<F
         if !c.fold.as_ref().is_some_and(|f| f.state == chats::FOLDING && f.attempt.as_deref() == Some(attempt)) {
             return None;
         }
+        let c = chats::named_at(root, ws, conv).ok()?;
         if io.dies("before the commit") {
             return None;
         }
@@ -1153,6 +1156,99 @@ mod tests {
         assert_eq!(f.lines, Some(FoldLines { added: top.added as u32, removed: top.removed as u32 }));
         assert!(!d.held() && now.fold.is_empty() && !d.up(&conv));
         assert!(d.tick(3).0.is_empty(), "once");
+    }
+
+    /// Whose words each turn is, as `workspace_turns` answers it.
+    fn whose(d: &Desk, conv: &str) -> Vec<(String, Option<String>)> {
+        let v = crate::workspacechats::workspace_turns(&d.ctx, d.ws.clone(), conv.into(), Some(20)).unwrap();
+        v["turns"].as_array().unwrap().iter().map(|t| (t["user"].as_str().unwrap_or("-").to_string(), t["engine"].as_str().map(str::to_string))).collect()
+    }
+
+    /// The turns the engine sent are marked, each attempt's of every fold, and
+    /// no one else's: not the same words sent again, another chat's opener,
+    /// words that look like one, or one a message only quotes.
+    #[test]
+    fn a_turn_the_engine_sent_says_so_and_no_other_does() {
+        let d = Desk::new("engine");
+        let other = d.chat("Other", false);
+        let conv = d.chat("Chat 2", true);
+        d.fold(&conv).unwrap();
+        let first = d.opener();
+        // Stopped: its attempt is not the record's fold any more.
+        crate::workspacechats::workspace_chat_close(&d.ctx, d.ws.clone(), conv.clone()).unwrap();
+        assert_eq!(d.rec(&conv).fold.unwrap().attempt, None);
+        d.fold(&conv).unwrap();
+        let second = d.opener();
+        assert_ne!(first, second);
+        let start = chats::opener(&conv);
+        let unknown = chats::fold_opener(&wsfolder::folder_at(d.ctx.workspaces_dir(), &d.ws).unwrap(), &conv, &ulid::new());
+        let said = [
+            (start.clone(), Some("start")), ("Hello".into(), None), (start.clone(), None), (first.clone(), Some("fold")), (first.clone(), None),
+            (format!("It said: {second}"), None), (second.clone(), Some("fold")), (unknown, None), (chats::opener(&other), None),
+            ("Read the fold.md and do what it says.".into(), None),
+        ];
+        let lines: Vec<String> = said.iter().flat_map(|(u, _)| turn(u, "2027-01-15T08:00:05Z", "Right.")).collect();
+        *d.agent.lines.lock().unwrap() = lines.clone();
+        let want: Vec<(String, Option<String>)> = said.iter().map(|(u, e)| (u.clone(), e.map(str::to_string))).collect();
+        assert_eq!(whose(&d, &conv), want);
+        // By the whole transcript, however few are asked for.
+        let v = crate::workspacechats::workspace_turns(&d.ctx, d.ws.clone(), conv.clone(), Some(6)).unwrap();
+        assert!(v["turns"][0].get("engine").is_none(), "the first opener's second saying: {}", v["turns"][0]);
+        // What is read starts later: no first turn of it is the start.
+        *d.agent.lines.lock().unwrap() = [lines[1..2].to_vec(), lines[4..].to_vec()].concat();
+        assert_eq!(whose(&d, &conv)[1], (start, None));
+        // A chat never folded has its start only.
+        *d.agent.lines.lock().unwrap() = [turn(&chats::opener(&other), "2027-01-15T08:00:05Z", "Hi."), turn(&second, "2027-01-15T08:00:06Z", "?")].concat();
+        assert_eq!(whose(&d, &other).into_iter().map(|w| w.1).collect::<Vec<_>>(), vec![Some("start".to_string()), None]);
+    }
+
+    /// A turn read whole says what its short one did.
+    #[test]
+    fn a_whole_turn_says_the_engine_sent_it() {
+        let d = Desk::new("whole");
+        let conv = d.chat("Chat 1", true);
+        *d.agent.lines.lock().unwrap() = [turn(&chats::opener(&conv), "2027-01-15T08:00:05Z", "Right."), turn("Hello", "2027-01-15T08:00:06Z", "Right.")].concat();
+        let short = crate::workspacechats::workspace_turns(&d.ctx, d.ws.clone(), conv.clone(), None).unwrap();
+        let whole = |i: usize| crate::workspacechats::workspace_turn_text(&d.ctx, d.ws.clone(), conv.clone(), short["turns"][i]["id"].as_str().unwrap().into()).unwrap()["turn"].clone();
+        assert_eq!((whole(0)["engine"].clone(), whole(1).get("engine").cloned()), (json!("start"), None));
+    }
+
+    /// A chat that was never sent a message is folded as `Chat N`, whatever a
+    /// client called it: the note, the commit and the record.
+    #[test]
+    fn a_fold_never_takes_its_opener_for_a_name() {
+        let d = Desk::new("unsent");
+        d.chat("Earlier", false);
+        let conv = d.chat("Chat 2", true);
+        let stem = |x: &str| chats::fold_opener(&wsfolder::folder_at(d.ctx.workspaces_dir(), &d.ws).unwrap(), x, "");
+        // The row refuses it, from an ask to the landing.
+        let name = |x: &str, t: &str| crate::workspacechats::workspace_chat_rename(&d.ctx, d.ws.clone(), x.into(), t.into());
+        let cut = format!("{}…", stem(&conv).chars().take(40).collect::<String>());
+        assert!(name(&conv, &cut).is_err());
+        // A record that has it already.
+        let spoil = |x: &str| chats::update_at(d.ctx.workspaces_dir(), &d.ws, x, |c| c.title = format!("{}…", stem(x).chars().take(40).collect::<String>())).unwrap();
+        spoil(&conv);
+        d.fold(&conv).unwrap();
+        assert_eq!(d.rec(&conv).note, format!("memory/notes/2026-11-24-chat-2-{}.md", conv[20..].to_lowercase()));
+        assert_eq!(d.rec(&conv).title, "Chat 2");
+        assert!(name(&conv, &d.opener()).is_err());
+        // Named after the opener while it folds.
+        spoil(&conv);
+        d.note(&conv, "# Chat\n", 5);
+        d.tick(3);
+        assert_eq!(d.tick(3).0[0].event, "landed");
+        assert_eq!((d.log()[0].subject.as_str(), d.rec(&conv).title.as_str()), ("fold: Chat 2", "Chat 2"));
+        // Stopped, and closed without one.
+        for (fold, subject) in [(true, "Fold stopped: Chat 3"), (false, "Chat closed: Chat 4")] {
+            let x = d.chat("x", true);
+            if fold {
+                d.fold(&x).unwrap();
+            }
+            spoil(&x);
+            d.put("topics/half.md", subject);
+            crate::workspacechats::workspace_chat_close(&d.ctx, d.ws.clone(), x).unwrap();
+            assert_eq!(d.log()[0].subject, subject);
+        }
     }
 
     /// Fold now on a chat folded before: its note is rewritten, and the old one

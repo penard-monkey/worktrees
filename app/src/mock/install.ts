@@ -2059,7 +2059,7 @@ function ideasTouched() {
 // does. Each reply takes `?ideareply=<ms>` (default 600) of "busy".
 type MockConv = {
   id: string; harness: "claude"; session_id: string; title: string; started: string; started_from: string;
-  live: boolean; state: "idle" | "busy" | "waiting"; turns: { id: string; at: number; user: string | null; reply: string; tools: string[]; truncated: false }[];
+  live: boolean; state: "idle" | "busy" | "waiting"; turns: { id: string; at: number; user: string | null; engine?: "start" | "fold"; reply: string; tools: string[]; truncated: false }[];
   prompt: null | { fp: string; ask: string };
 };
 const mockConvs = new Map<string, MockConv[]>(); // idea id → conversations
@@ -2082,11 +2082,11 @@ function ideaSessionsPush() {
     idea_of: Object.fromEntries(live.map(({ idea, c }) => [convSession(c), idea])),
   });
 }
-function convReply(idea: string, c: MockConv, user: string | null, reply: string) {
+function convReply(idea: string, c: MockConv, user: string | null, reply: string, engine?: "start") {
   c.state = "busy"; ideaSessionsPush();
   setTimeout(() => {
     if (!c.live) return;
-    c.turns.push({ id: `t${c.turns.length + 1}`, at: Math.floor(Date.now() / 1000), user, reply, tools: [], truncated: false });
+    c.turns.push({ id: `t${c.turns.length + 1}`, at: Math.floor(Date.now() / 1000), user, ...(engine ? { engine } : {}), reply, tools: [], truncated: false });
     if (user && /\b(edit|change|add)\b/i.test(user)) {
       c.prompt = { fp: `fp-${c.id}-${c.turns.length}`, ask: user };
       c.state = "waiting";
@@ -2186,11 +2186,17 @@ function chatSessionsPush() {
     fold: Object.fromEntries(mockChatFolds),
   });
 }
-function chatReply(c: MockChat, user: string | null, reply: string) {
+/** What the engine launches a chat on (`workspacechats::openers`); a fold's
+ *  goes on with its attempt. */
+const mockChatOpeners = (w: string, c: MockChat) => ({
+  start: `Read chats/${c.id}/start.md and begin.`,
+  fold: `Read ${MOCK_WS_DIR}/${w}/chats/${c.id}/fold.md and do what it says. This is fold `,
+});
+function chatReply(c: MockChat, user: string | null, reply: string, engine?: "start") {
   c.state = "busy"; c.last_activity = isoAgo(0); chatSessionsPush();
   setTimeout(() => {
     if (!c.live) return;
-    c.turns.push({ id: `t${c.turns.length + 1}`, at: Math.floor(Date.now() / 1000), user, reply, tools: [], truncated: false });
+    c.turns.push({ id: `t${c.turns.length + 1}`, at: Math.floor(Date.now() / 1000), user, ...(engine ? { engine } : {}), reply, tools: [], truncated: false });
     if (user && /\b(edit|change|add)\b/i.test(user)) {
       c.prompt = { fp: `fp-${c.id}-${c.turns.length}`, ask: user };
       c.state = "waiting";
@@ -4779,7 +4785,7 @@ Phase 3: Frontend pane and mock harness
       };
       list.push(c); mockConvs.set(d.id!, list);
       // Claude opens on start.md: one turn, its own words about the idea.
-      convReply(d.id!, c, `Read .desk/${d.id}/${conv}/start.md and begin.`, `I read **${ideaTitle(d.content) ?? d.file}**. What would you like to sharpen first?`);
+      convReply(d.id!, c, `Read .desk/${d.id}/${conv}/start.md and begin.`, `I read **${ideaTitle(d.content) ?? d.file}**. What would you like to sharpen first?`, "start");
       return { id: d.id, conversation: mockConvRow(c), session: convSession(c) };
     }
     case "idea_conversation_resume": {
@@ -4888,7 +4894,7 @@ Phase 3: Frontend pane and mock harness
       mockMemory.beforeLaunch(w.id);
       const c = mockChatNew(ideaId(), `Chat ${list.length + 1}`, 0, 0, { live: true });
       list.push(c); mockChats.set(w.id, list);
-      chatReply(c, `Read chats/${c.id}/start.md and begin.`, "I read the memory's index and the list of projects. What would you like to settle?");
+      chatReply(c, mockChatOpeners(w.id, c).start, "I read the memory's index and the list of projects. What would you like to settle?", "start");
       return { id: w.id, chat: mockChatRecord(c), session: chatSession(c) };
     }
     case "workspace_chat_resume": {
@@ -4914,9 +4920,7 @@ Phase 3: Frontend pane and mock harness
       c.fold = { asked: isoAgo(0), asked_ms: Date.now(), state: "folding", reverted: false };
       c.live = true; c.state = "busy"; c.last_activity = isoAgo(0);
       mockChatFolds.set(chatSession(c), { workspace: id, chat: c.id, state: "folding", why: null, left: null });
-      // The engine's opener, word for word (core's `fold_opener`): an absolute path
-      // and the attempt's id.
-      c.turns.push(chatTurn(c.turns.length + 1, 0, `Read ${MOCK_WS_DIR}/${id}/chats/${c.id}/fold.md and do what it says. This is fold ${ideaId()}.`, ""));
+      c.turns.push({ id: `t${c.turns.length + 1}`, at: Math.floor(Date.now() / 1000), user: `${mockChatOpeners(id, c).fold}${ideaId()}.`, engine: "fold", reply: "", tools: [], truncated: false });
       chatSessionsPush();
       setTimeout(() => {
         // Stopped, or moved by `__mock.wsFold`, meanwhile.
@@ -4944,6 +4948,9 @@ Phase 3: Frontend pane and mock harness
       const c = chatOf(args.id as string, args.conv as string);
       const t = String(args.title ?? "").split(/[\r\n]/)[0].trim().slice(0, 120);
       if (!t) throw "a chat needs a title";
+      const line = t.replace(/\s+/g, " ").replace(/[….\s]+$/, "");
+      const said = Object.values(mockChatOpeners(args.id as string, c));
+      if (line.startsWith(said[1].trim()) || ([...line].length >= 20 && said.some((s) => s.startsWith(line)))) throw "that is what the app told the chat, not a name for it";
       c.title = t;
       return { id: args.id, chat: mockChatRecord(c) };
     }
