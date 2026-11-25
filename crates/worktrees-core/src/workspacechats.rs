@@ -1150,6 +1150,9 @@ mod tests {
             // This build's first notes, for a chat that was never folded.
             format!("memory/notes/2026-11-24-{}.md", c.id),
         ];
+        // A file that IS there, newer than any fold, must not pass for the note.
+        fs::create_dir_all(root.join(&ws).join("memory")).unwrap();
+        fs::write(root.join(&ws).join("memory/MEMORY.md"), "index").unwrap();
         for b in &bad {
             let t = fs::read_to_string(&p).unwrap();
             fs::write(&p, t.replace(&named, b)).unwrap();
