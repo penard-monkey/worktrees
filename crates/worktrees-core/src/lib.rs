@@ -94,6 +94,7 @@ pub mod ulid;
 pub mod workspacechats;
 pub mod workspaces;
 pub mod wsfolder;
+pub mod wslock;
 pub mod ui;
 
 pub use error::{Result, WtError};
