@@ -265,24 +265,23 @@ function ProjectsCard(props: { projects: WsProjectRow[]; takeOut(root: string): 
   );
 }
 
-/** No memory, and no chats: the designed empty states, until their engine is
- *  here. Every button is off and says why. */
-export function NoMemory() {
+/** No memory, and no chats: the designed empty states. */
+export function NoMemory({ newChat }: { newChat: () => void }) {
   return (
     <div className="wsf-empty" data-testid="ws-no-memory">
       <p>No memory yet. It starts with the first chat.</p>
       <div className="ws-ov-line">
-        <button className="ctrl sm" disabled title={SOON} data-testid="ws-new-chat-memory">New chat</button>
+        <button className="ctrl sm" data-testid="ws-new-chat-memory" onClick={newChat}>New chat</button>
         <button className="ctrl sm" disabled title={SOON} data-testid="ws-make-memory">Make memory</button>
       </div>
     </div>
   );
 }
-export function NoChats() {
+export function NoChats({ newChat }: { newChat: () => void }) {
   return (
     <div className="wsf-empty" data-testid="ws-no-chats">
       <p>No chats yet.</p>
-      <div className="ws-ov-line"><button className="ctrl sm" disabled title={SOON} data-testid="ws-new-chat">New chat</button></div>
+      <div className="ws-ov-line"><button className="ctrl sm" data-testid="ws-new-chat" onClick={newChat}>New chat</button></div>
     </div>
   );
 }
@@ -300,26 +299,34 @@ export function WorkspaceOverview(props: WsParts & {
   projects: WsProjectRow[];
   takeOut(root: string): void;
   addProject(e: React.MouseEvent): void;
+  /** The chats' own lines, and how many there are. */
+  chats: ReactNode;
+  chatCount: number;
+  starting: boolean;
+  newChat(): void;
 }) {
   const work = props.ideasOn && <WorkCard {...props} />;
   return (
     <div className="wsf-ov" data-testid="ws-overview">
       {props.error && <p className="ws-ov-err" role="alert">{props.error}</p>}
       {props.attention.map((a) => (
-        <div key={a.kind} className="wsf-attn" data-testid="ws-attention" data-kind={a.kind} role="status">
+        <div key={a.kind === "chat" ? a.conv : a.kind} className="wsf-attn" data-testid="ws-attention" data-kind={a.kind} role="status">
           <span className="wsf-attn-dot" aria-hidden="true" />
           <span className="wsf-attn-t">{a.text}</span>
-          <button className="ctrl sm" data-testid="ws-attention-go" onClick={() => props.goTo(a)}>{a.kind === "unsaved" ? "Go to it ▸" : "Open the plan ▸"}</button>
+          <button className="ctrl sm" data-testid="ws-attention-go" onClick={() => props.goTo(a)}>{a.kind === "chat" ? "Open the chat ▸" : a.kind === "unsaved" ? "Go to it ▸" : "Open the plan ▸"}</button>
         </div>
       ))}
       <div className="wsf-cols">
         <div className="wsf-col wsf-col-main">
           {props.chatsOn
-            ? <Card name="Memory" testId="ws-ov-card-memory" className="wsf-card-tall" act={<button className="ctrl sm" onClick={() => props.showTab("memory")}>Open ▸</button>}><NoMemory /></Card>
+            ? <Card name="Memory" testId="ws-ov-card-memory" className="wsf-card-tall" act={<button className="ctrl sm" onClick={() => props.showTab("memory")}>Open ▸</button>}><NoMemory newChat={props.newChat} /></Card>
             : work}
         </div>
         <div className="wsf-col wsf-col-side">
-          {props.chatsOn && <Card name="Chats" testId="ws-ov-card-chats" act={<button className="ctrl sm" onClick={() => props.showTab("chats")}>All ▸</button>}><NoChats /></Card>}
+          {props.chatsOn && <Card name="Chats" testId="ws-ov-card-chats" act={<>
+            {props.chatCount > 0 && <button className="ctrl sm" data-testid="ws-ov-chats-all" onClick={() => props.showTab("chats")}>All {props.chatCount}</button>}
+            <button className="ctrl sm" data-testid="ws-ov-new-chat" disabled={props.starting} onClick={props.newChat}>New chat</button>
+          </>}>{props.chatCount > 0 ? props.chats : <NoChats newChat={props.newChat} />}</Card>}
           {props.chatsOn && work}
           {props.ideasOn && <IdeasCard {...props} />}
           <ProjectsCard projects={props.projects} takeOut={props.takeOut} addProject={props.addProject} />

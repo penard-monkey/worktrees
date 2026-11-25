@@ -18,8 +18,6 @@
 //     that a text which cannot be saved refuses;
 //   - the document's section is ONE element with ONE parent through tabs,
 //     places, Home and another workspace, and an unsaved text waits in it;
-//   - a chat's column, when there is one, is the middle, the documents on the
-//     dock's side;
 //   - layout and six themes.
 const { chromium, webkit } = await import(process.env.PLAYWRIGHT_MODULE ?? "playwright");
 const BASE = process.env.IDEAS_MOCK_URL ?? "http://localhost:1466";
@@ -109,10 +107,12 @@ async function gates(page, tag) {
   ok(await page.locator("[data-testid=ws-docs]").first().locator("button").evaluateAll((b) => b.map((x) => x.dataset.testid).join()) === "ws-doc-memory", `${tag} …one chip, Memory, and no Plan or Ideas`);
   ok(!(await page.$("[data-testid=ws-ov-card-work]")) && !(await page.$("[data-testid=ws-ov-card-ideas]")) && !!(await page.$("[data-testid=ws-ov-card-memory]")) && !!(await page.$("[data-testid=ws-ov-card-chats]")) && !!(await page.$("[data-testid=ws-ov-card-projects]")), `${tag} …and an Overview of Memory, Chats and Projects`);
   ok(await page.locator("[data-testid=ideas-rail]").count() === 0, `${tag} …without the lightbulb: Ideas is its own switch`);
+  const other = await page.evaluate(() => [...document.querySelectorAll("[data-testid=ws-name]")].map((e) => e.textContent).find((n) => !n.startsWith("Everything")));
+  await pickWs(page, other);
   for (const [t, words, buttons] of [["memory", "No memory yet. It starts with the first chat.", ["New chat", "Make memory"]], ["chats", "No chats yet.", ["New chat"]]]) {
     await tab(page, t);
     const e = await page.evaluate((t) => { const el = document.querySelector(`[data-testid=ws-no-${t}]`); return el && { words: el.querySelector("p").textContent, b: [...el.querySelectorAll("button")].map((x) => [x.textContent, x.disabled, x.title]) }; }, t);
-    ok(e?.words === words && JSON.stringify(e.b.map((x) => x[0])) === JSON.stringify(buttons) && e.b.every((x) => x[1] && /Not yet/.test(x[2])), `${tag} ${t}'s empty state, its buttons off and saying why (${JSON.stringify(e)})`);
+    ok(e?.words === words && JSON.stringify(e.b.map((x) => x[0])) === JSON.stringify(buttons) && e.b.find((x) => x[0] === "New chat")[1] === false, `${tag} ${t}'s empty state, with New chat (${JSON.stringify(e)})`);
   }
   await page.keyboard.press("Meta+Comma");
   const box = page.locator("[data-testid=beta-workspace-chats]");
@@ -125,7 +125,7 @@ async function gates(page, tag) {
 async function frame(page, tag, name) {
   const { plan, ws } = await setup(page, ["beta_ideas", "beta_workspace_chats"]);
   ok(await tabs(page) === "overview,memory,plan,ideas,chats" && await isTab(page, "overview"), `${tag} a workspace opens on Overview, first of its five tabs`);
-  ok(await page.locator("[data-testid=ws-frame-name]").innerText() === "Everything" && /^3 projects$/.test(await page.locator(".wsf-counts").innerText()) && await page.locator("[data-testid=ws-frame] >> text=New chat").evaluateAll((b) => b.every((x) => x.closest("[data-testid=ws-no-memory], [data-testid=ws-no-chats]"))), `${tag} its bar: the name, its projects, and no New chat until there are chats`);
+  ok(await page.locator("[data-testid=ws-frame-name]").innerText() === "Everything" && /^3 projects · 2 chats live$/.test(await page.locator(".wsf-counts").innerText()) && await page.locator("[data-testid=ws-frame-new-chat]").count() === 1, `${tag} its bar: the name, its projects and live chats, New chat`);
   ok(!(await homeLit(page)), `${tag} Home is not lit while a workspace is shown`);
   ok(await group(page, "Everything").locator(".ws-icon").first().evaluate((e) => e.classList.contains("waiting")), `${tag} the card's dot is waiting, though lanes work in it too`);
   const chips = await page.evaluate(() => [...document.querySelectorAll("[data-testid=ws-docs]")[0].querySelectorAll("button")].map((b) => [b.dataset.testid, b.classList.contains("none"), b.querySelector(".wsf-chip-n")?.textContent ?? ""]));
@@ -137,7 +137,7 @@ async function frame(page, tag, name) {
 
   // ── the overview's acts ──
   await tab(page, "overview");
-  ok(!(await page.$("[data-testid=ws-attention]")), `${tag} nothing needs anybody: no attention line`);
+  ok(await page.locator("[data-testid=ws-attention]").evaluateAll((a) => a.map((x) => x.dataset.kind).join()) === "chat", `${tag} a chat waits, and nothing else needs anybody: one attention line`);
   ok(await page.locator("[data-testid=ws-ov-card-work] [data-testid=ws-ov-review]").count() === 2 && await page.locator("[data-testid=ws-ov-card-work] [data-testid=ws-ov-link-place]").count() === 2, `${tag} the plan's work has Review… and Link a place…`);
   await page.locator("[data-testid=ws-ov-review]").first().click();
   ok(await page.waitForSelector("[data-testid=start-review]").then(() => true, () => false), `${tag} Review… opens the review`);
@@ -179,7 +179,7 @@ async function frame(page, tag, name) {
   await page.evaluate((a) => window.__mock.ideaEditElsewhere(a.id, a.c), { id: plan, c: broken });
   await tab(page, "overview");
   ok(await until(page, () => /The plan has a problem/.test(document.querySelector("[data-testid=ws-attention][data-kind=plan]")?.textContent ?? "")), `${tag} a plan with a problem is the attention line`);
-  await page.click("[data-testid=ws-attention-go]");
+  await page.click("[data-testid=ws-attention][data-kind=plan] [data-testid=ws-attention-go]");
   ok(await isTab(page, "plan") && await isDoc(page, plan), `${tag} …which opens the plan`);
 
   // ── unlink, the empty states, Make a plan ──
@@ -360,24 +360,6 @@ async function orphan(page, tag) {
   ok(await until(page, (id) => window.__mock.ideaFile(id).content.includes(" HELD"), plan), `${tag} and is saved from there`);
 }
 
-async function chat(page, tag) {
-  await setup(page);
-  await page.setViewportSize({ width: 1440, height: 900 });
-  // Nothing passes a chat yet: the frame's own rules, with a column put in.
-  const m = await page.evaluate(() => {
-    const body = document.querySelector(".wsf-body"), docs = document.querySelector(".wsf-docs");
-    const whole = docs.getBoundingClientRect().width === body.getBoundingClientRect().width;
-    const mid = document.createElement("div"); mid.className = "wsf-mid"; body.prepend(mid); body.setAttribute("data-mid", "");
-    const r = (e) => e.getBoundingClientRect();
-    const right = r(docs).left >= r(mid).right - 1 && r(docs).right >= r(body).right - 1;
-    const share = r(docs).width / r(body).width;
-    body.dataset.dock = "left";
-    const left = r(docs).left <= r(body).left + 1 && r(mid).left >= r(docs).right - 1;
-    return { whole, right, left, share, mid: r(mid).width, docs: r(docs).width };
-  });
-  ok(m.whole && m.right && m.left && Math.abs(m.share - 0.46) < 0.02 && m.mid >= 420 && m.docs >= 340, `${tag} no chat: the documents are the whole room; with one they are on the dock's side (${JSON.stringify(m)})`);
-}
-
 async function layout(page, tag, name) {
   await setup(page, ["beta_ideas", "beta_workspace_chats"]);
   for (const [w, h] of [[1600, 1000], [1440, 900], [1200, 800], [900, 700]]) {
@@ -447,7 +429,7 @@ async function themes(page, tag, name) {
 const only = process.env.ONLY?.split(",");
 for (const [engine, name] of [[chromium, "chromium"], [webkit, "webkit"]]) {
   const browser = await engine.launch();
-  for (const part of [gates, frame, history, life, removed, orphan, chat, layout, themes]) {
+  for (const part of [gates, frame, history, life, removed, orphan, layout, themes]) {
     if (only && !only.includes(part.name)) continue;
     const page = await (await browser.newContext({ viewport: { width: 1440, height: 900 } })).newPage();
     const errors = [];

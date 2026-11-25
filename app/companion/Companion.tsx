@@ -32,7 +32,8 @@ import { DocNotice, DocumentPane } from "../src/doc/DocumentPane";
 import { ideaDocs, type Doc, type Version } from "../src/doc/source";
 import { errText, useDoc } from "../src/doc/useDoc";
 import { quoteOf, type Quote } from "./ideaquote";
-import { IdeaChat, ideaDots, type ConvState, type IdeaSessionsEv } from "./IdeaChat";
+import type { ConvState } from "../src/desk";
+import { IdeaChat, ideaDots, type IdeaSessionsEv } from "./IdeaChat";
 import { useNavDrag } from "../src/navdrag";
 import { CombineAsk, DropChooser, PickIdea, RelatedStrip, SplitAsk, type Relation } from "./IdeaRelate";
 import {

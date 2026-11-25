@@ -115,6 +115,11 @@ eq("where: a tab of the same workspace is the same where", H.whereKey(V("plan"))
 eq("…another workspace, Home and a place are not", new Set([V("plan"), V("plan", null, "w2"), HOME, P("a")].map(H.whereKey)).size, 4);
 eq("its label is the workspace's name and the tab", H.label(V("plan"), undefined, () => "Jellyfin"), "Jellyfin · Plan");
 eq("…and never Home", H.label(V("overview")), "A workspace · Overview");
+const C = (tab, chat) => ({ place: null, ws: { id: "w1", tab, chat } });
+eq("a chat beside a tab is another location", H.locKey(C("plan", "c1")) === H.locKey(V("plan")), false);
+eq("…and two chats are two", H.locKey(C("plan", "c1")) === H.locKey(C("plan", "c2")), false);
+eq("…in the same where", H.whereKey(C("plan", "c1")), H.whereKey(V("ideas", "a")));
+eq("its label names the chat", H.label(C("plan", "c1"), undefined, () => "Jellyfin", () => "Release order"), "Jellyfin · Release order · Plan");
 
 if (failed) { console.log(`\n${failed} failed`); process.exit(1); }
 console.log("navhistory-check: all ok");

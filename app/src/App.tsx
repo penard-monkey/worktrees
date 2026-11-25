@@ -50,7 +50,7 @@ import { StatusBody, StatusSheet, type StatusReport } from "./StatusSheet";
 import { installUsage, setSurface, trackChord } from "./usage";
 import { fileInfo } from "./filekind";
 import { fromDevice, instructionLine, instructionTitle, launchedTitle, deviceLabel, type By, type LaunchedBy, type RemoteInstruction } from "./provenance";
-import { canStep as canStepNav, empty as emptyHistory, goTo as goToNav, label as labelNav, locKey, prune as pruneNav, reachable as reachableNav, record as recordNav, whereKey, type History as NavHistory, type Loc, type WsTab } from "./navHistory";
+import { canStep as canStepNav, empty as emptyHistory, goTo as goToNav, label as labelNav, locKey, prune as pruneNav, reachable as reachableNav, record as recordNav, whereKey, WS_TAB_LABEL, type History as NavHistory, type Loc, type WsTab } from "./navHistory";
 import { agentViewFor, applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, lowerFits, lowerFracFor, lowerRange, panelsFor, placeKey, railsMerged, railsWidth, saveSettings, stepMdZoom, stepZoom, upperTab, viewportWidth, withAgentView, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
 import {
   alphaIndex, dropIntent, landingNote, moveBefore, naturalTop, pointerIndex,
@@ -78,6 +78,9 @@ import { PickPlace, StartReview } from "./StartWork";
 import { useGone } from "./useGone";
 import { WorkspaceOverview, type DocLite, type WsParts } from "./WorkspaceOverview";
 import { DocChips, WorkspaceFrame } from "./WorkspaceFrame";
+import { ChatDot, ChatLines, ChatsTab, NavChats, RefusedStart, StartingChat, WorkspaceChatColumn } from "./WorkspaceChat";
+import { useWsChats } from "./useWsChats";
+import { navRows, type ChatRow } from "./wschats";
 import { attentionOf, docChips, rollupOf, tabOr, wsCounts, wsFrameOn, wsTabs, type Rollup } from "./wsview";
 import { MainDocument, type MainDocApi } from "./doc/MainDocument";
 import { ideaDocs as ideaSource, sameDoc, type DocTarget } from "./doc/source";
@@ -1096,7 +1099,9 @@ function TitleEditor({ initial, slug, onCommit, onCancel }: {
  *  each segment is a drop zone (`data-ws-switch`): a project held over
  *  "Workspaces" flips the view to it (spring-load), and a project dragged out
  *  of a workspace onto "All projects" is taken out of that workspace. */
-function NavViewSwitch({ view, onPick, dropOn }: {
+function NavViewSwitch({ view, onPick, dropOn, waits }: {
+  /** A workspace's chat waits on the person (an amber dot on Workspaces). */
+  waits: boolean;
   view: NavView;
   onPick: (v: NavView) => void;
   /** The segment the drag in flight would drop on, lit. */
@@ -1115,7 +1120,7 @@ function NavViewSwitch({ view, onPick, dropOn }: {
           data-testid={`nav-view-${v}`}
           data-track={v === "projects" ? "nav.view.projects" : "nav.view.workspaces"}
           onClick={() => onPick(v)}
-        >{VIEW_LABEL[v]}</button>
+        >{VIEW_LABEL[v]}{v === "workspaces" && waits && <span className="wsc-dot waiting" data-testid="nav-ws-waits" title="a workspace chat is waiting on you" />}</button>
       ))}
     </div>
   );
@@ -1304,6 +1309,8 @@ function InitRepoPrompt({ dir, into, onInit, onCancel }: {
 // show the same places, so any disagreement reads as one of them being broken.
 // Each row prints that clock, for the same reason nav rows do.
 type SwitchItem = { pv: ProjectView; p: Place };
+/** What ⌘K offers beside places: a workspace's chat or document. */
+type SwitchMore = { key: string; name: string; where: string; what: string; dot: React.ReactNode; go: () => void };
 const SWITCH_CAP = 50; // rendered-list cap for big workspaces (perf; query narrows it)
 
 // subsequence test + a small score; higher is better, -1 = no match.
@@ -1382,8 +1389,10 @@ function AgentMark({ agent, model }: { agent: Harness | null; model?: string | n
   );
 }
 
-function QuickSwitch({ open, items, rank, busyPaths, waitingPaths, draftPaths, onPick, onClose }: {
+function QuickSwitch({ open, items, more, rank, busyPaths, waitingPaths, draftPaths, onPick, onClose }: {
   open: boolean;
+  /** A workspace's chats and documents, offered once something is typed. */
+  more: SwitchMore[];
   items: SwitchItem[];
   rank: (p: Place) => number;
   busyPaths: Set<string>;
@@ -1397,14 +1406,19 @@ function QuickSwitch({ open, items, rank, busyPaths, waitingPaths, draftPaths, o
   const inputRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
 
-  const results = useMemo(() => {
+  const results = useMemo((): (SwitchItem | SwitchMore)[] => {
     const q = query.trim().toLowerCase();
     if (!q) {
       return [...items]
         .sort((a, b) => rank(b.p) - rank(a.p))
         .slice(0, SWITCH_CAP);
     }
-    const scored: { it: SwitchItem; score: number }[] = [];
+    const scored: { it: SwitchItem | SwitchMore; score: number; at: number }[] = [];
+    for (const m of more) {
+      const name = m.name.toLowerCase(), where = m.where.toLowerCase();
+      if (fuzzyScore(q, `${name} ${where}`) < 0 && fuzzyScore(q, `${where} ${name}`) < 0) continue;
+      scored.push({ it: m, score: Math.max(fuzzyScore(q, name) + 200, fuzzyScore(q, where), fuzzyScore(q, `${where} ${name}`)), at: 0 });
+    }
     for (const it of items) {
       const { pv, p } = it;
       const slug = p.slug.toLowerCase();
@@ -1426,11 +1440,11 @@ function QuickSwitch({ open, items, rank, busyPaths, waitingPaths, draftPaths, o
         fuzzyScore(q, proj),
         fuzzyScore(q, note),
       );
-      scored.push({ it, score: s });
+      scored.push({ it, score: s, at: rank(p) });
     }
-    scored.sort((a, b) => (b.score - a.score) || (rank(b.it.p) - rank(a.it.p)));
+    scored.sort((a, b) => (b.score - a.score) || (b.at - a.at));
     return scored.slice(0, SWITCH_CAP).map((x) => x.it);
-  }, [items, query, rank]);
+  }, [items, more, query, rank]);
 
   // fresh mount per open (App renders <QuickSwitch> only when open) → autofocus
   // fires and query/highlight reset. Focus the input on mount as a belt-and-braces
@@ -1449,7 +1463,7 @@ function QuickSwitch({ open, items, rank, busyPaths, waitingPaths, draftPaths, o
 
   if (!open) return null;
 
-  const pick = (it: SwitchItem) => onPick(it.pv.root, it.p);
+  const pick = (it: SwitchItem | SwitchMore) => { if ("go" in it) { onClose(); it.go(); } else onPick(it.pv.root, it.p); };
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key === "ArrowDown") {
       e.preventDefault();
@@ -1485,9 +1499,20 @@ function QuickSwitch({ open, items, rank, busyPaths, waitingPaths, draftPaths, o
         />
         <div className="qs-list" ref={listRef}>
           {results.length === 0 ? (
-            <div className="qs-empty">No places match</div>
+            <div className="qs-empty">{more.length ? "Nothing matches" : "No places match"}</div>
           ) : (
             results.map((it, i) => {
+              if ("go" in it) {
+                return (
+                  <div key={it.key} className={"qs-row" + (i === hi ? " hi" : "")} data-track="switch.row" data-testid="switch-more" data-key={it.key}
+                    onMouseEnter={() => setHi(i)} onMouseDown={(e) => { e.preventDefault(); pick(it); }}>
+                    {it.dot}
+                    <span className="qs-slug">{it.name}</span>
+                    <span className="qs-proj">{it.where}</span>
+                    <span className="qs-age">{it.what}</span>
+                  </div>
+                );
+              }
               const { pv, p } = it;
               const act = busyPaths.has(p.path) ? "busy" : waitingPaths.has(p.path) ? "waiting" : "";
               const draft = draftPaths.get(p.path);
@@ -4430,6 +4455,12 @@ function App() {
   const [floated, setFloated] = useState<(DocTarget & { title: string }) | null>(null);
   /** The open document's title while its text is saved nowhere. */
   const [docStuck, setDocStuck] = useState<string | null>(null);
+  /** The chat each workspace has in its middle column, while the app runs. */
+  const [wsChat, setWsChat] = useState<Record<string, string | null>>({});
+  /** A chat being started in a workspace, and why it was refused. */
+  const [wsStart, setWsStart] = useState<{ ws: string; why: string | null } | null>(null);
+  /** With room for one side alone, which one. */
+  const [wsSide, setWsSide] = useState<"chat" | "docs">("docs");
   const [ideasTick, setIdeasTick] = useState(0);
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
   // A persisted Off must suppress even the first usage request at startup.
@@ -6616,6 +6647,9 @@ function App() {
   const wsRun = (cmd: string, args: Record<string, unknown>): Promise<WsList | null> =>
     invoke<WsList>(cmd, args).then((l) => { setWsList(l); return l; }).catch((e) => { fail(e); return null; });
   const wsById = (id: string) => wsList?.workspaces.find((w) => w.id === id) ?? null;
+  // The workspaces' chats (workspace chats' beta), for the nav, ⌘K and the view.
+  const wsChats = useWsChats(wsChatsOn && !!wsList, useMemo(() => (wsList?.workspaces ?? []).map((w) => w.id), [wsList]));
+  const chatWaits = (wsList?.workspaces ?? []).some((w) => wsChats.rows(w.id).some((x) => x.state === "waiting"));
   // Re-read whenever the registry's roots change: "not registered" is the
   // registry's answer, joined in by the row.
   const wsRegKey = (ws?.projects ?? []).map((pv) => pv.root).join("\n");
@@ -6717,6 +6751,8 @@ function App() {
       if (mainDocRef.current?.ws === id && mainDocApi.current && !(await mainDocApi.current.leave())) { void showWsRef.current(id, mainDocRef.current.tab); return; }
       const l = await wsRun("workspace_remove", { id });
       if (!l) return;
+      const moved = (l as WsList & { moved_to?: string | null }).moved_to;
+      if (moved) setNotice(`Its memory and its chats were kept, in ${moved}.`);
       commitHist((h) => pruneNav(h, (x) => x.ws?.id === id));
       setWsOpen((cur) => (cur === id ? null : cur));
     })();
@@ -6780,7 +6816,7 @@ function App() {
   const wsGoSeq = useRef(0);
   const wsOpenRef = useRef(wsOpen);
   wsOpenRef.current = wsOpen;
-  const showWs = async (id: string, tab: WsTab, o: { doc?: string; startIn?: "edit"; here?: boolean } = {}): Promise<boolean> => {
+  const showWs = async (id: string, tab: WsTab, o: { doc?: string; startIn?: "edit"; here?: boolean; chat?: string | null } = {}): Promise<boolean> => {
     if (!frameOn || id === EVERYTHING_ELSE_ID) return false;
     const n = ++wsGoSeq.current;
     const to = tabOr(tab, tabsOn);
@@ -6814,6 +6850,9 @@ function App() {
     setSel(null);
     setWsOpen(id);
     setWsTab(to);
+    // `chat` left out: the one that is there stays, beside another document.
+    if (o.chat !== undefined) { setWsChat((c) => ({ ...c, [id]: o.chat ?? null })); setWsStart(null); }
+    setWsSide(o.chat ? "chat" : "docs");
     if (to === "ideas" && o.doc) setWsPick((p) => ({ ...p, [id]: o.doc! }));
     if (!want || (to !== "plan" && to !== "ideas")) return true;
     if (o.here) setFloated((f) => (sameDoc(f, want) ? null : f));
@@ -6825,7 +6864,20 @@ function App() {
   };
   const showWsRef = useRef(showWs);
   showWsRef.current = showWs;
-  const openWsOverview = (id: string) => { void showWsRef.current(id, "overview"); };
+  /** A workspace's name: its Overview, in the whole room. */
+  const openWsOverview = (id: string) => { void showWsRef.current(id, "overview", { chat: null }); };
+  /** A chat, in the middle. The documents keep their tab. */
+  const openChat = (id: string, conv: string) => void showWs(id, wsShown?.id === id ? wsTabNow : "memory", { chat: conv });
+  const startChat = async (id: string) => {
+    if (wsStart && wsStart.why === null) return;
+    if (!(await showWs(id, wsShown?.id === id ? wsTabNow : "memory", { chat: null }))) return;
+    setWsSide("chat");
+    setWsStart({ ws: id, why: null });
+    const got = await wsChats.start(id);
+    if ("refused" in got) { setWsStart({ ws: id, why: got.refused }); return; }
+    setWsStart(null);
+    setWsChat((c) => ({ ...c, [id]: got.conv }));
+  };
   useEffect(() => { if (sel) setWsOpen(null); }, [sel]);
   useEffect(() => { if (!frameOn) setWsOpen(null); }, [frameOn]);
   // A workspace's plan, or its first idea, arrives or goes while its tab is up.
@@ -8719,7 +8771,9 @@ function App() {
    *  a second implementation of that ordering would be a mirror that drifts.
    *  SELECT only, never enter: it is the keyboard's version of a row click. */
   const enterFirstMatch = () => {
-    const row = navScrollRef.current?.querySelector<HTMLElement>("li.row[data-slug]:not(.pending)");
+    // A filtered list may lead with a workspace's chat whose title matches.
+    const row = navScrollRef.current?.querySelector<HTMLElement>(`li.row[data-slug]:not(.pending)${q ? ", [data-testid=ws-chat-row]" : ""}`);
+    if (row?.dataset.chat) { row.click(); return; }
     const repo = row?.closest<HTMLElement>("[data-project-root]")?.dataset.projectRoot;
     if (repo && row?.dataset.slug) selectSlug(repo, row.dataset.slug);
     hideNav();
@@ -8831,7 +8885,7 @@ function App() {
   const shellHere = stripUp ? frontHere
     : sel ? navSeenFront.current[placeKey(sel.repo, sel.slug)] ?? settings.term_tab_active?.[placeKey(sel.repo, sel.slug)] : undefined;
   // The workspace view is a location too: its tab, and the idea it shows.
-  const wsLoc: Loc["ws"] = !sel && wsShown ? { id: wsShown.id, tab: wsTabNow, ...(wsTabNow === "ideas" ? { doc: tabDoc(wsShown.id, "ideas")?.name } : {}) } : undefined;
+  const wsLoc: Loc["ws"] = !sel && wsShown ? { id: wsShown.id, tab: wsTabNow, ...(wsTabNow === "ideas" ? { doc: tabDoc(wsShown.id, "ideas")?.name } : {}), ...(wsChat[wsShown.id] ? { chat: wsChat[wsShown.id]! } : {}) } : undefined;
   const navLoc: Loc | null = !sel ? { place: null, ...(wsLoc ? { ws: wsLoc } : {}) } : !selected ? null : stripUp && frontHere === undefined ? null : {
     place: { repo: sel.repo, slug: sel.slug },
     dock: {
@@ -8855,7 +8909,8 @@ function App() {
   const wsNavRef = useRef(ws);
   wsNavRef.current = ws;
   const wsAliveRef = useRef((_ws: NonNullable<Loc["ws"]>): boolean => false);
-  wsAliveRef.current = (w) => tabsOn.includes(w.tab) && frameOn && !!wsById(w.id);
+  wsAliveRef.current = (w) => tabsOn.includes(w.tab) && frameOn && !!wsById(w.id)
+    && (!w.chat || (wsChatsOn && (wsChats.of(w.id)?.chats.some((c) => c.id === w.chat) ?? true)));
   const navAlive = useCallback((l: Loc) => !l.place
     ? !l.ws || wsAliveRef.current(l.ws)
     : !!wsNavRef.current?.projects.find((p) => p.root === l.place!.repo)?.snapshot?.places.some((pl) => pl.slug === l.place!.slug), []);
@@ -8924,7 +8979,7 @@ function App() {
     const cur = selRef.current;
     const samePlace = loc.place ? cur?.repo === loc.place.repo && cur?.slug === loc.place.slug : !cur;
     // A new object for the SAME place would re-run every effect keyed on `sel`.
-    if (loc.ws) void showWsRef.current(loc.ws.id, loc.ws.tab, { doc: loc.ws.doc });
+    if (loc.ws) void showWsRef.current(loc.ws.id, loc.ws.tab, { doc: loc.ws.doc, chat: loc.ws.chat ?? null });
     else {
       if (!samePlace) setSel(loc.place ? { repo: loc.place.repo, slug: loc.place.slug } : null);
       if (!loc.place) setWsOpen(null);
@@ -9019,11 +9074,12 @@ function App() {
     const pl = ws?.projects.find((p) => p.root === repo)?.snapshot?.places.find((x) => x.slug === slug);
     return pl ? nameOf(pl) : slug;
   };
+  const chatNavName = (id: string, conv: string) => wsChats.of(id)?.chats.find((c) => c.id === conv)?.title ?? null;
   const wsNavName = (id: string) => wsById(id)?.name ?? null;
   const navTitle = (dir: -1 | 1) => {
     const [i] = reachableNav(hist, dir, navAlive);
     if (i === undefined) return dir < 0 ? "Back" : "Forward";
-    return `${dir < 0 ? "Back" : "Forward"} to ${labelNav(hist.entries[i], navName, wsNavName)} (${dir < 0 ? "⌘[" : "⌘]"})`;
+    return `${dir < 0 ? "Back" : "Forward"} to ${labelNav(hist.entries[i], navName, wsNavName, chatNavName)} (${dir < 0 ? "⌘[" : "⌘]"})`;
   };
   // Right-click on ‹ / ›: up to NAV_MENU_MAX entries that way, nearest first.
   // Disabled buttons fire no contextmenu in WebKit, and an empty list is not
@@ -9043,6 +9099,26 @@ function App() {
     />
   );
 
+  /** ⌘K: every workspace's documents, and its chats. */
+  const switchMore = (): SwitchMore[] => (frameOn ? wsList?.workspaces ?? [] : []).flatMap((w) => [
+    ...docChips({ ideas: ideasOn, chats: wsChatsOn }).map((t) => ({ key: `${w.id}|${t}`, name: WS_TAB_LABEL[t], where: w.name, what: "document", dot: <span className="status-dot" />, go: () => void showWs(w.id, t) })),
+    ...(wsChatsOn ? wsChats.rows(w.id) : []).map((x: ChatRow) => ({ key: x.chat.id, name: x.chat.title, where: w.name, what: "chat", dot: <ChatDot state={x.state} />, go: () => openChat(w.id, x.chat.id) })),
+  ]);
+  /** The chat in the middle of the workspace view, or the start of one. */
+  const wsConv = wsShown ? wsChat[wsShown.id] ?? null : null;
+  const wsMiddle = !wsShown || !wsChatsOn ? null
+    : wsStart?.ws === wsShown.id
+      ? (wsStart.why === null ? <StartingChat name={wsShown.name} />
+        : <RefusedStart why={wsStart.why} busy={wsChats.starting !== null} again={() => { setWsStart(null); void startChat(wsShown.id); }} away={() => { setWsStart(null); setWsSide("docs"); }} />)
+    : wsConv && wsChats.of(wsShown.id)
+      ? (
+        <WorkspaceChatColumn ws={{ id: wsShown.id, name: wsShown.name }} info={wsChats.of(wsShown.id)!} rows={wsChats.rows(wsShown.id)} conv={wsConv} live={wsChats} ago={ago}
+          terminalCmd={settings.terminal_cmd} uiRem={settings.ui_rem} gen={engineGen}
+          open={(conv) => openChat(wsShown.id, conv)}
+          away={() => void showWs(wsShown.id, wsTabNow, { chat: null })}
+          openTerminalApp={(session) => { invoke("open_terminal", { cmd: settings.terminal_cmd, session }).catch((e) => fail(e)); }}
+          onError={fail} />
+      ) : null;
   /** What the workspace view's tabs do with its plan and ideas. */
   const wsHere = wsShown?.id ?? "";
   const wsParts: WsParts = {
@@ -9627,7 +9703,11 @@ function App() {
         {list.map((w) => {
           const open = !settings.ws_collapsed?.[w.id];
           const places = w.projects.flatMap((p) => (pvOf(p.root)?.snapshot?.places ?? []).filter(visiblePlace));
-          const rollup = rollupOf(places, activityOf, (p) => doneOf(p) === 1);
+          const chats = wsChatsOn ? wsChats.rows(w.id) : [];
+          const rollup = rollupOf([
+            ...places.map((p) => ({ a: activityOf(p) as string, done: doneOf(p) === 1 })),
+            ...chats.map((r) => ({ a: r.state === "waiting" || r.state === "fold-failed" ? "waiting" : r.state === "busy" || r.state === "folding" ? "busy" : "", done: false })),
+          ], (x) => x.a, (x) => x.done);
           const dropOn = (drag?.target?.kind === "ws-add" || drag?.target?.kind === "ws-plan" || drag?.target?.kind === "ws-idea") && drag.target.id === w.id;
           const dragged = drag?.item.kind === "workspace" && drag.item.id === w.id;
           return (
@@ -9668,6 +9748,21 @@ function App() {
                           waits: docStuck !== null && mainDoc?.ws === w.id && mainDoc.tab === tab,
                         }))}
                         open={(tab) => { void showWs(w.id, tab); setMenu(null); closeCtx(); hideNav(); }}
+                      />
+                    )}
+                    {wsChatsOn && (
+                      <NavChats
+                        rows={chats}
+                        total={wsChats.of(w.id)?.chats.length ?? 0}
+                        q={q}
+                        on={!guestOpen && wsShown?.id === w.id ? wsChat[w.id] ?? null : null}
+                        starting={wsStart?.ws === w.id && wsStart.why === null}
+                        error={wsChats.error(w.id)}
+                        ago={ago}
+                        open={(conv) => { openChat(w.id, conv); setMenu(null); closeCtx(); hideNav(); }}
+                        start={() => { void startChat(w.id); setMenu(null); closeCtx(); hideNav(); }}
+                        all={() => { void showWs(w.id, "chats"); setMenu(null); closeCtx(); hideNav(); }}
+                        retry={() => void wsChats.refresh(w.id)}
                       />
                     )}
                     {w.projects.length === 0 && (
@@ -9987,6 +10082,7 @@ function App() {
           <NavViewSwitch
             view={navView}
             onPick={setNavView}
+            waits={wsChatsOn && chatWaits}
             dropOn={drag?.target?.kind === "ws-remove" ? "projects" : null}
           />
         )}
@@ -10544,10 +10640,18 @@ function App() {
             {(wsShown || mainDoc) && (
               <WorkspaceFrame
                 shown={wsShown !== null}
-                ws={wsShown && { id: wsShown.id, name: wsShown.name, color: wsColorOf(wsShown), counts: wsCounts(wsShown.projects.length) }}
+                ws={wsShown && { id: wsShown.id, name: wsShown.name, color: wsColorOf(wsShown), counts: wsCounts(wsShown.projects.length, wsChatsOn ? wsChats.rows(wsShown.id).filter((x) => x.live).length : 0) }}
                 tabs={tabsOn}
                 tab={wsTabNow}
-                counts={{ ideas: wsShown?.ideas?.length ?? 0 }}
+                counts={{ ideas: wsShown?.ideas?.length ?? 0, chats: wsShown && wsChatsOn ? wsChats.of(wsShown.id)?.chats.length ?? 0 : 0 }}
+                newChat={wsShown && wsChatsOn ? { busy: wsStart?.ws === wsShown.id && wsStart.why === null, run: () => void startChat(wsShown.id) } : null}
+                middle={wsMiddle}
+                side={wsSide}
+                setSide={setWsSide}
+                chatsTab={wsShown && wsChatsOn && (
+                  <ChatsTab rows={wsChats.rows(wsShown.id)} on={wsChat[wsShown.id] ?? null} starting={wsStart?.why === null} ago={ago}
+                    open={(conv) => openChat(wsShown.id, conv)} start={() => void startChat(wsShown.id)} />
+                )}
                 showTab={(t) => { if (wsShown) void showWs(wsShown.id, t); }}
                 navButtons={navButtons}
                 onMenu={(e) => { if (wsShown) wsMenuAt(e, wsShown.id); }}
@@ -10562,9 +10666,14 @@ function App() {
                       unsaved: docStuck !== null && mainDoc ? { title: docStuck, elsewhere: mainDoc.ws === wsShown.id ? null : wsById(mainDoc.ws)?.name ?? null } : null,
                       problems: ovHere?.plan?.live ? ovHere.problems.map(problemLine) : [],
                       planError: ovHere?.plan && !ovHere.plan.live ? ovHere.plan.error ?? "it is gone" : null,
+                      chats: wsChatsOn ? wsChats.rows(wsShown.id).filter((x) => x.state === "waiting" || x.state === "fold-failed").map((x) => ({ conv: x.chat.id, title: x.chat.title, failed: x.state === "fold-failed" })) : [],
                     })}
-                    goTo={(a) => { if (a.kind === "unsaved" && mainDoc) void showWs(wsById(mainDoc.ws) ? mainDoc.ws : wsShown.id, mainDoc.tab, { doc: mainDoc.name }); else void showWs(wsShown.id, "plan"); }}
+                    goTo={(a) => { if (a.kind === "chat") openChat(wsShown.id, a.conv); else if (a.kind === "unsaved" && mainDoc) void showWs(wsById(mainDoc.ws) ? mainDoc.ws : wsShown.id, mainDoc.tab, { doc: mainDoc.name }); else void showWs(wsShown.id, "plan"); }}
                     showTab={(t) => void showWs(wsShown.id, t)}
+                    chats={wsChatsOn ? <ChatLines rows={navRows(wsChats.rows(wsShown.id)).rows} ago={ago} open={(conv) => openChat(wsShown.id, conv)} /> : null}
+                    chatCount={wsChats.of(wsShown.id)?.chats.length ?? 0}
+                    newChat={() => void startChat(wsShown.id)}
+                    starting={wsStart?.why === null}
                     projects={wsShown.projects.map((p) => {
                       const places = (ws?.projects.find((v) => v.root === p.root)?.snapshot?.places ?? []);
                       return { root: p.root, name: basename(p.root), registered: p.registered, places: places.length,
@@ -11207,7 +11316,7 @@ function App() {
           + highlight reset, autofocus fires). enterPlace bumps termFocus, returning
           focus to the terminal after a pick. */}
       {switchOpen && (
-        <QuickSwitch open items={allPlaces} rank={activityAt} busyPaths={busyPaths} waitingPaths={waitingPaths} draftPaths={draftPaths}
+        <QuickSwitch open items={allPlaces} more={switchMore()} rank={activityAt} busyPaths={busyPaths} waitingPaths={waitingPaths} draftPaths={draftPaths}
           onPick={(root, p) => { setSwitchOpen(false); enterPlace(root, p); }}
           onClose={() => setSwitchOpen(false)} />
       )}
@@ -11416,7 +11525,7 @@ function App() {
           {reachableNav(hist, navMenu.dir, navAlive).slice(0, NAV_MENU_MAX).map((i) => (
             <button key={i} className="pop-item" data-testid="nav-menu-item"
               onClick={() => { setNavMenu(null); navGo(i); }}>
-              {labelNav(hist.entries[i], navName, wsNavName)}
+              {labelNav(hist.entries[i], navName, wsNavName, chatNavName)}
             </button>
           ))}
         </CtxMenu>

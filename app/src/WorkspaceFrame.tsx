@@ -21,6 +21,12 @@ import { useTier } from "./doc/useTier";
  *  this much the Plan tab has its lists there and the Overview is two columns.
  *  Under it a list folds to a line above the document. */
 const ROOM = [720, 900] as const;
+/** Room for a chat (420) and the documents (340) both; under it, one of them. */
+const BOTH = [760] as const;
+const SPLIT_KEY = "wt.workspace.split";
+const splitNow = (): number => {
+  try { const v = Number(window.localStorage.getItem(SPLIT_KEY)); return v >= 0.2 && v <= 0.8 ? v : 0.46; } catch { return 0.46; }
+};
 
 /** A document that was floated: where it went, in its place. */
 export type Floated = { title: string; show(): void; here(): void };
@@ -140,12 +146,29 @@ export function WorkspaceFrame(props: {
   /** Put the tab's document in the pane (it was closed there). */
   openTab(): void;
   doc: ReactNode;
-  /** The chat, when one is open (a later slice): the middle column. */
+  /** The chat, when one is open (or being started): the middle column. */
   middle?: ReactNode;
+  /** Which side is shown where there is room for one. */
+  side: "chat" | "docs";
+  setSide(side: "chat" | "docs"): void;
+  newChat: { busy: boolean; run(): void } | null;
+  chatsTab: ReactNode;
   dockLeft: boolean;
 }) {
   const { ws, tab, parts } = props;
   const [docs, setDocs] = useState<HTMLElement | null>(null);
+  const [body, setBody] = useState<HTMLElement | null>(null);
+  const both = useTier(body, BOTH) === 1;
+  const one = props.middle && !both ? props.side : undefined;
+  // The documents' share of the room beside a chat, this machine's own.
+  const [share, setShare] = useState(splitNow);
+  const drag = (x: number) => {
+    const r = body?.getBoundingClientRect();
+    if (!r?.width) return;
+    const w = props.dockLeft ? x - r.left : r.right - x;
+    setShare(Math.min(1 - 420 / r.width, Math.max(340 / r.width, w / r.width)));
+  };
+  const dropped = () => { try { window.localStorage.setItem(SPLIT_KEY, String(share)); } catch { /* it starts at its default */ } };
   const room = useTier(docs, ROOM);
   const beside = room === 2 || (room === 1 && tab === "ideas");
   const [sideOpen, setSideOpen] = useState(false);
@@ -164,13 +187,33 @@ export function WorkspaceFrame(props: {
           <span className="wsf-name" data-testid="ws-frame-name" title={ws.name}><Icons.Layers size={13} /><span className="wsf-name-t">{ws.name}</span></span>
           <span className="wsf-counts">{ws.counts}</span>
           <span className="controls">
+            {one && (
+              <span className="agent-view" role="group" aria-label="Side">
+                <button className={"agent-view-b" + (one === "chat" ? " on" : "")} aria-pressed={one === "chat"} data-testid="ws-side-chat" onClick={() => props.setSide("chat")}>Chat</button>
+                <button className={"agent-view-b" + (one === "docs" ? " on" : "")} aria-pressed={one === "docs"} data-testid="ws-side-docs" onClick={() => props.setSide("docs")}>Documents</button>
+              </span>
+            )}
+            {props.newChat && <button className="enter-btn sm" data-testid="ws-frame-new-chat" data-track="workspace.chat.new" disabled={props.newChat.busy} onClick={props.newChat.run}>New chat</button>}
             <button className="icon-btn" data-testid="ws-frame-menu" data-track="nav.workspace.menu" title="workspace menu" onClick={props.onMenu}><Icons.Ellipsis size={15} /></button>
           </span>
         </header>
       )}
-      <div className="wsf-body" data-mid={props.middle ? "" : undefined} data-dock={props.dockLeft ? "left" : "right"}>
-        {props.middle && <div className="wsf-mid">{props.middle}</div>}
-        <div className="wsf-docs" ref={setDocs} data-room={room === 2 ? "wide" : "narrow"}>
+      <div className="wsf-body" ref={setBody} data-mid={props.middle ? "" : undefined} data-one={one} data-dock={props.dockLeft ? "left" : "right"}>
+        {props.middle && <div className="wsf-mid" data-testid="ws-mid">{props.middle}</div>}
+        {props.middle && !one && (
+          <div className="wsf-split-bar" role="separator" aria-orientation="vertical" aria-label="Documents width" tabIndex={0} data-testid="ws-split"
+            aria-valuenow={Math.round(share * 100)} aria-valuemin={20} aria-valuemax={80}
+            onPointerDown={(e) => { e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); }}
+            onPointerMove={(e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) drag(e.clientX); }}
+            onPointerUp={dropped}
+            onKeyDown={(e) => {
+              const by = (e.key === "ArrowLeft" ? 0.02 : e.key === "ArrowRight" ? -0.02 : 0) * (props.dockLeft ? -1 : 1);
+              if (!by) return;
+              e.preventDefault();
+              setShare((x) => Math.min(0.8, Math.max(0.2, x + by)));
+            }} onKeyUp={dropped} />
+        )}
+        <div className="wsf-docs" ref={setDocs} style={props.middle && !one ? { flex: `0 0 ${share * 100}%` } : undefined} data-room={room === 2 ? "wide" : "narrow"}>
           {ws && (
             <div className="wsf-tabs" role="tablist" aria-label="The workspace's documents">
               {props.tabs.map((t) => (
@@ -181,8 +224,8 @@ export function WorkspaceFrame(props: {
             </div>
           )}
           {ws && tab === "overview" && <div className="wsf-scroll">{props.overview}</div>}
-          {ws && tab === "memory" && <div className="wsf-scroll"><NoMemory /></div>}
-          {ws && tab === "chats" && <div className="wsf-scroll"><NoChats /></div>}
+          {ws && tab === "memory" && <div className="wsf-scroll"><NoMemory newChat={() => props.newChat?.run()} /></div>}
+          {ws && tab === "chats" && <div className="wsf-scroll">{props.counts.chats ? props.chatsTab : <NoChats newChat={() => props.newChat?.run()} />}</div>}
           <div className="wsf-split" hidden={!pane} data-beside={beside || undefined}>
             {side && !beside && (
               <button className="wsf-side-line" data-testid="ws-side-toggle" aria-expanded={sideOpen} onClick={() => setSideOpen((o) => !o)}>

@@ -11,12 +11,13 @@ export type DockTab = "files" | "terminal" | "docs" | "plan" | "prs";
 export type WsTab = "overview" | "memory" | "plan" | "ideas" | "chats";
 
 /** What the panes show. `place: null` is Home, or the workspace view when `ws`
- *  names one: its id, its tab, and on Ideas the idea picked. `dock.file` only means anything
+ *  names one: its id, its tab, on Ideas the idea picked, and the chat in its
+ *  middle column. `dock.file` only means anything
  *  on the Files tab and `dock.shell` only on Terminal — `normalize` drops the
  *  other, so two locations that LOOK the same compare equal. */
 export type Loc = {
   place: { repo: string; slug: string } | null;
-  ws?: { id: string; tab: WsTab; doc?: string };
+  ws?: { id: string; tab: WsTab; doc?: string; chat?: string };
   agent?: string;
   dock?: { tab: DockTab; file?: { path: string; line?: number; col?: number }; shell?: number };
 };
@@ -35,7 +36,7 @@ export const COALESCE_MS = 600;
 export const empty = (): History => ({ entries: [], index: -1, at: 0 });
 
 export const normalize = (l: Loc): Loc => {
-  if (!l.place) return l.ws ? { place: null, ws: { id: l.ws.id, tab: l.ws.tab, ...(l.ws.tab === "ideas" && l.ws.doc ? { doc: l.ws.doc } : {}) } } : { place: null };
+  if (!l.place) return l.ws ? { place: null, ws: { id: l.ws.id, tab: l.ws.tab, ...(l.ws.tab === "ideas" && l.ws.doc ? { doc: l.ws.doc } : {}), ...(l.ws.chat ? { chat: l.ws.chat } : {}) } } : { place: null };
   const out: Loc = { place: { repo: l.place.repo, slug: l.place.slug } };
   if (l.agent) out.agent = l.agent;
   if (l.dock) {
@@ -143,9 +144,13 @@ export const WS_TAB_LABEL: Record<WsTab, string> = { overview: "Overview", memor
 
 /** One line for a tooltip or the history menu. `nameOf` turns a place into
  *  what the nav calls it (a title, `(main)`); the slug otherwise. `wsName` is
- *  a workspace's name. */
-export const label = (l: Loc, nameOf?: (repo: string, slug: string) => string, wsName?: (id: string) => string | null): string => {
-  if (!l.place) return l.ws ? `${wsName?.(l.ws.id) ?? "A workspace"} · ${WS_TAB_LABEL[l.ws.tab]}` : "Home";
+ *  a workspace's name, `chatName` one of its chats'. */
+export const label = (l: Loc, nameOf?: (repo: string, slug: string) => string, wsName?: (id: string) => string | null, chatName?: (id: string, conv: string) => string | null): string => {
+  if (!l.place) {
+    if (!l.ws) return "Home";
+    const chat = l.ws.chat ? chatName?.(l.ws.id, l.ws.chat) ?? "a chat" : null;
+    return [wsName?.(l.ws.id) ?? "A workspace", chat, WS_TAB_LABEL[l.ws.tab]].filter(Boolean).join(" · ");
+  }
   const parts = [nameOf?.(l.place.repo, l.place.slug) ?? l.place.slug];
   const d = l.dock;
   if (d) {

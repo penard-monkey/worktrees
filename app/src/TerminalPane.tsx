@@ -94,17 +94,19 @@ type Transport = {
   wheel?(lines: number): Promise<unknown>;
 };
 
-/** An idea conversation (the Ideas window), by its idea's id and its own. */
+/** A desk chat (chat.ts: an idea's conversation, or a workspace's chat), by its
+ *  idea's or workspace's id and its own. */
 export type IdeaTerm = { id: string; conv: string };
+export type DeskTerm = { idea: IdeaTerm } | { ws: IdeaTerm };
 
-const tmuxTransport = (session: string, idea?: IdeaTerm): Transport => {
+const tmuxTransport = (session: string, desk?: DeskTerm): Transport => {
   let id: number | null = null;
   return {
     async open(cols, rows, onBytes) {
-      // An idea conversation's session is no place's, so it opens by the
-      // conversation; what it answers is an attach like any other.
-      id = idea
-        ? await invoke<number>("idea_term_open", { id: idea.id, conv: idea.conv, cols, rows, onBytes })
+      // A desk chat's session is no place's, so it opens by the chat; what it
+      // answers is an attach like any other (a workspace's names the session too).
+      id = desk && "idea" in desk ? await invoke<number>("idea_term_open", { id: desk.idea.id, conv: desk.idea.conv, cols, rows, onBytes })
+        : desk ? (await invoke<[string, number]>("workspace_term_open", { id: desk.ws.id, conv: desk.ws.conv, cols, rows, onBytes }))[1]
         : await invoke<number>("term_open", { session, cols, rows, onBytes });
       return { replay: 0, replayCols: null };
     },
@@ -961,12 +963,16 @@ export function TerminalPane({ session, provider = "claude", termVersion = 0, fo
   );
 }
 
-/** An idea conversation's terminal, in the Ideas window. No place is dropped
- *  on it and no path in it opens: there is no place and no file viewer there. */
-export function IdeaTerminalPane({ session, idea, termVersion = 0, focusToken = 0 }: {
-  session: string; idea: IdeaTerm; termVersion?: number; focusToken?: number;
+/** A desk chat's terminal. No place is dropped on it and no path in it opens:
+ *  there is no place and no file viewer behind it. */
+export function DeskTerminalPane({ session, desk, termVersion = 0, focusToken = 0 }: {
+  session: string; desk: DeskTerm; termVersion?: number; focusToken?: number;
 }) {
-  return <TermSurface makeTransport={() => tmuxTransport(session, idea)} tkey={session} termVersion={termVersion} focusToken={focusToken} />;
+  return <TermSurface makeTransport={() => tmuxTransport(session, desk)} tkey={session} termVersion={termVersion} focusToken={focusToken} />;
+}
+/** An idea conversation's, in the Ideas window. */
+export function IdeaTerminalPane({ idea, ...rest }: { session: string; idea: IdeaTerm; termVersion?: number; focusToken?: number }) {
+  return <DeskTerminalPane {...rest} desk={{ idea }} />;
 }
 
 export function ShellPane({ repo, slug, index, termVersion = 0, focusToken = 0, root, onOpenPath, onError, ...find }: {
