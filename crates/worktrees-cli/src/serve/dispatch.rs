@@ -1,4 +1,4 @@
-//! The 290 commands, each with its exposure, capability and objects, in ONE
+//! The 291 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -804,20 +804,22 @@ pub const GLOBAL_OK: &[&str] = &[
 /// widen a guest without a second, deliberate edit here. None may ever reach
 /// an agent.
 #[cfg_attr(not(test), allow(dead_code))]
-pub const GUEST_ROWS: &[&str] = &["shares_list", "share_join", "guest_places", "share_request", "thread_read", "thread_post", "shared_turns", "shared_tool_call"];
+pub const GUEST_ROWS: &[&str] = &["shares_list", "share_join", "guest_places", "share_request", "thread_read", "thread_post", "shared_turns", "shared_tool_call", "shared_image"];
 
 /// The guest rows a client POLLS (§2's trap): exempt from the per-request
 /// audit record and the audit gate, as `read` rows are, or a guest's poll
 /// would write a line each time and spend its device's audit budget. The
 /// later rows (`shared_turns`, `shared_tool_call`, `thread_read`, PRs B and
 /// C) are named now so they join by being added to the table as guest rows.
+/// `shared_image` is a read of the same session: a view asks once a picture.
 /// Every act — a join, a request — is recorded.
-pub const GUEST_READS: &[&str] = &["shares_list", "guest_places", "shared_turns", "shared_tool_call", "thread_read"];
+pub const GUEST_READS: &[&str] = &["shares_list", "guest_places", "shared_turns", "shared_tool_call", "shared_image", "thread_read"];
 
 /// The guest rows the CONSOLE may also make (group chat §2: "an allowed
 /// guest, and the owner"): the owner reads and posts in a thread and reads
 /// the shared session, as the console. A test holds it against the table.
-/// Nothing else widens: a paired owner device is not the console.
+/// Nothing else widens: a paired owner device is not the console. Not
+/// `shared_image`: the owner's chat reads the place's own (`read_place_image`).
 pub const CONSOLE_GUEST_ROWS: &[&str] = &["thread_read", "thread_post", "shared_turns", "shared_tool_call"];
 
 /// The lane a request runs on, or `None` for the concurrent pool.
@@ -1417,6 +1419,10 @@ commands! { cx, a;
     // `n` the share's `ended[n]`.
     shared_turns: Engine [guest, share(share)] => super::history::rows::turns(cx, a.get("share")?, a.get("binding")?, a.get("before")?, a.get("limit")?),
     shared_tool_call: Engine [guest, share(share)] => super::history::rows::tool_call(cx, a.get("share")?, a.get("binding")?, a.get("call_id")?),
+    // A picture the shared session SHOWS (`serve::shareimage`): `path` must be
+    // one that turn `turn` of the bound transcript draws, and is then judged
+    // under the shared place's root exactly as `read_place_image` judges it.
+    shared_image: Engine [guest, share(share)] => super::shareimage::rows::image(cx, a.get("share")?, a.get("binding")?, a.get("turn")?, a.get("path")?, a.get("etag")?),
 
     // ── remote access (§4.1): the host's own acts, never a device's ──────────
     remote_enable: HostConsole => remote(cx)?.enable(&a.get::<String>("address")?, a.get("iface")?, a.get("port")?, a.get("advertise")?),
@@ -1500,7 +1506,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 290 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 291 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1527,14 +1533,14 @@ mod tests {
     /// idea-session console rows (`idea_conversation*`, `idea_*` over the agent bodies, `idea_term_open`), and group
     /// chat's eighteen share rows (fourteen console with PR D's `share_used` and `share_check`, four
     /// `guest`), its thread's two (`thread_read`, `thread_post`, `guest`) and PR C's
-    /// two `guest` history rows (`shared_turns`, `shared_tool_call`), and the host's sleep
+    /// two `guest` history rows (`shared_turns`, `shared_tool_call`), the guest's `shared_image`, and the host's sleep
     /// hold (`get_keep_awake`, `set_keep_awake`); the check scripts
     /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 290, "the table has 290 commands");
+        assert_eq!(TABLE.len(), 291, "the table has 291 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1876,6 +1882,7 @@ mod tests {
         ("workspace_unlink_idea", "id", "a named workspace's id (a console act); `idea` may name an idea that is gone"),
         ("workspace_overview", "id", "a named workspace's id (a console act)"),
         ("read_place_image", "path", "a path in the PLACE (relative to its root, or absolute under it): the body resolves it under `place(repo, slug)`'s own root by `safepath::place_image`, which is not a `file(path)` judged against every project"),
+        ("shared_image", "path", "a path the shared SESSION shows: the body refuses one its turn does not draw, then resolves it under the share's own place (`share(share)`) by the same `safepath::place_image`; a guest names no repo or slug"),
     ];
 
     /// Every `a.get("…")` a body reads that names an object is covered by the
@@ -1955,7 +1962,7 @@ mod tests {
     /// `shares_all`, `guests_list`, `guest_remove`, `owner_set_name`) and the
     /// four `guest` rows (`GUEST_ROWS`), the capability's first, the thread's
     /// two `guest` rows (`thread_read`, `thread_post`) and PR C's two
-    /// (`shared_turns`, `shared_tool_call`). A row that moves group
+    /// (`shared_turns`, `shared_tool_call`), then `shared_image`. A row that moves group
     /// fails here until the count (and the proposal's table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
@@ -1973,7 +1980,7 @@ mod tests {
         }
         let want: BTreeMap<&str, usize> = [
             ("read", 71), ("write", 23), ("admin", 42), ("console", 112), ("stream", 10), ("instruct", 8), ("answer", 2),
-            ("client-local", 6), ("loopback-only", 1), ("own", 7), ("guest", 8),
+            ("client-local", 6), ("loopback-only", 1), ("own", 7), ("guest", 9),
         ]
         .into();
         assert_eq!(groups, want);

@@ -1920,7 +1920,7 @@ ${body}
   const routed = local.filter((c) => guestRows?.includes(c));
   check(local.length > 5 && routed.length === 0, `no guest row is in the engine door's route table${routed.length ? `: ${routed.join(", ")}` : ""}`);
   // Only the guest modules import the guest door.
-  const allowed = new Set(["guest.ts", "guestboot.ts", "guestview.ts", "GuestSession.tsx", "GuestNav.tsx"]);
+  const allowed = new Set(["guest.ts", "guestboot.ts", "guestview.ts", "GuestSession.tsx", "GuestNav.tsx", "GuestImage.tsx"]);
   const importers = [];
   const walkDir = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const f = path.join(d, e.name); if (e.isDirectory()) { if (e.name !== "mock") walkDir(f); } else if (/\.(ts|tsx)$/.test(e.name) && /from "\.\.?\/(?:[^"]*\/)?guestdoor"/.test(read(f))) importers.push(path.relative(SRC.appsrc, f)); } };
   walkDir(SRC.appsrc);

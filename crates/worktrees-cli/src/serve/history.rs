@@ -278,7 +278,7 @@ fn shrink(seq: usize, mut t: turns::Turn, chars: usize) -> Value {
 
 /// The binding a read names: `binding` absent is the share's current one;
 /// `n` is `ended[n]`, as `shares_list` lists them (oldest first).
-fn binding_of(s: &Share, binding: Option<usize>) -> Result<&Binding, String> {
+pub(crate) fn binding_of(s: &Share, binding: Option<usize>) -> Result<&Binding, String> {
     match binding {
         None => s.binding.as_ref().ok_or_else(|| "nothing is bound on this share".to_string()),
         Some(n) => s.ended.get(n).ok_or_else(|| format!("this share has no ended binding {n}")),
@@ -327,6 +327,19 @@ pub fn page(config: &Path, b: &Binding, before: Option<usize>, limit: Option<usi
     }))
 }
 
+/// Turn `seq` of binding `b` as a page carries it (several turns can share
+/// one seq), read from its own bytes below the binding's limit. Empty when
+/// the shared session has no such turn.
+pub(crate) fn turns_at(config: &Path, b: &Binding, seq: usize) -> Result<Vec<turns::Turn>, String> {
+    let (ix, f, to) = INDEXES.read_to(config, &b.harness, &b.transcript, limit_of(b))?;
+    let ix = ix.lock().unwrap();
+    if seq >= ix.visible(to) {
+        return Ok(Vec::new());
+    }
+    let lines = ix.lines(&f, seq, to)?;
+    Ok(turns::history_turns(&b.harness, &lines, turns::TURN_TEXT_MAX).into_iter().map(|(t, _)| t).collect())
+}
+
 /// `shared_tool_call`'s answer for binding `b`: the call's input as
 /// `agent_tool_call` gives it, read from the turn the index found it in and
 /// only below the binding's limit.
@@ -351,7 +364,7 @@ pub mod rows {
     use crate::serve::dispatch::Call;
     use crate::serve::shares::{Admission, Shares};
 
-    fn share(cx: &Call, id: &str) -> Result<Share, String> {
+    pub(crate) fn share(cx: &Call, id: &str) -> Result<Share, String> {
         let f = Shares::at(&cx.ctx.config_dir).read()?;
         INDEXES.keep_only(&cx.ctx.config_dir, &f.shares);
         let s = f.shares.into_iter().find(|s| s.id == id).ok_or_else(|| format!("no share {id}"))?;

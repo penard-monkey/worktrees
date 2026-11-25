@@ -14,6 +14,10 @@
 //     carries its etag, `unchanged` keeps the pixels the client holds, a
 //     changed file replaces them, one call per image is in flight, and the
 //     cache is bounded;
+//   - a GUEST's view of a shared session: `shared_image` over the guest
+//     connection, naming the share, turn and path and no repo or slug; one
+//     picture in flight per connection; the agent's bubble alone; nothing
+//     through the engine door;
 //   - ChatPane gives BOTH bubbles the hook and a Read of an image its thumb.
 //
 // CHATIMAGE_ROOT points the check at another app/ (to show it red).
@@ -152,6 +156,69 @@ try {
   check(/fallbackCall=\{c\.call_id \?/.test(fs.readFileSync(path.join(ROOT, "src/ChatPane.tsx"), "utf8")), "a Read with a call id hands ImageView the call to fall back to");
   const ivsrc = fs.readFileSync(path.join(ROOT, "src/ImageView.tsx"), "utf8");
   check(/fallbackCall/.test(ivsrc) && /\^outside this place/.test(ivsrc), "ImageView falls back only on the host's `outside this place`");
+
+  // ── a guest's view of a shared session ──────────────────────────────────
+  {
+    const G = await load("/src/GuestImage.tsx");
+    let door = 0;
+    globalThis.__invoke = async () => { door += 1; throw "the engine door"; };
+    const fake = (answer) => {
+      const l = { sent: [], most: 0, now: 0, kind: "up", state: () => ({ kind: l.kind }) };
+      l.call = async (cmd, args) => {
+        l.sent.push({ cmd, ...args });
+        l.most = Math.max(l.most, ++l.now);
+        await new Promise((r) => setTimeout(r, 1));
+        l.now -= 1;
+        return answer(args);
+      };
+      return l;
+    };
+    const png = (args) => (args.etag === "1-9" ? { b64: "", size: 9, truncated: false, mtime: 1, mime: "image/png", etag: "1-9", unchanged: true } : { b64: "AAAA", size: 9, truncated: false, mtime: 1, mime: "image/png", etag: "1-9", unchanged: false });
+    const link = fake(png);
+    const at = { link, host: "h1", share: "s_1", binding: undefined, isMain: false, up: true };
+    const ghtml = (src, a = at) => renderToStaticMarkup(createElement(Markdown, { src, renderImage: (s, alt) => G.sharedImageNode(s, alt, a, 7) }));
+    const asks = (md, a) => /loading image…/.test(ghtml(md, a));
+    check(asks("![Home](.worktrees-attachments/agent/disk-home.png)") && asks("![Abs](/Users/david/x/.worktrees/lane/a.png)"), "guest: a relative path and an absolute one are asked for (the host alone knows the place's root)");
+    for (const [md, needle] of [["![L](https://e.com/l.png)", "remote image not loaded"], ["![x](data:image/png;base64,AA)", "data: sources are never loaded"], ["![u](../o/s.png)", "outside this place"], ["![u](/a/../s.png)", "outside this place"], ["![n](n.txt)", "[n]"]])
+      check(ghtml(md).includes(needle) && !/<img|loading image/.test(ghtml(md)), `guest: ${md} is a note, never asked for`);
+    check(!asks("![w](.Worktrees/x/a.png)", { ...at, isMain: true }) && asks("![w](.worktrees/x/a.png)"), "guest: (main)'s .worktrees/ is a note there too");
+
+    IV.clearPlaceImages();
+    const g1 = await G.loadSharedImage(at, 7, "a.png", t0);
+    check(JSON.stringify(link.sent) === JSON.stringify([{ cmd: "shared_image", share: "s_1", turn: 7, path: "a.png" }]) && g1.b64 === "AAAA", "guest: one shared_image names the share, the turn and the path, and no repo, slug or etag");
+    await G.loadSharedImage(at, 7, "a.png", t0 + 500);
+    const g2 = await G.loadSharedImage(at, 7, "a.png", t0 + 10_000);
+    check(link.sent.length === 2 && link.sent[1].etag === "1-9" && g2.b64 === "AAAA", "guest: fresh costs no call, stale sends its etag and `unchanged` keeps the pixels");
+    check(IV.peekPlaceImage(placeRef, "a.png") === null && G.peekSharedImage({ ...at, share: "s_2" }, "a.png") === null && G.peekSharedImage({ ...at, host: "h2" }, "a.png") === null && G.peekSharedImage({ ...at, binding: 0 }, "a.png") === null, "guest: the cache is per host, share and binding, and never the owner's chat's");
+    await G.loadSharedImage({ ...at, binding: 0 }, 7, "a.png", t0);
+    check(link.sent[2].binding === 0, "guest: an earlier session is named by its binding");
+    link.sent = [];
+    await Promise.all(["1", "2", "3", "3"].map((n) => G.loadSharedImage(at, 7, `${n}.png`, t0)));
+    check(link.sent.length === 3 && link.most === 1, `guest: one picture in flight per connection (${link.most}), and one call per picture (${link.sent.length})`);
+    const bad = fake((a) => { if (a.path === "x.png") throw "not found: x.png"; return png(a); });
+    const badAt = { ...at, host: "h3", link: bad };
+    const [r1, r2] = await Promise.allSettled([G.loadSharedImage(badAt, 1, "x.png", t0), G.loadSharedImage(badAt, 1, "y.png", t0)]);
+    check(r1.reason === "not found: x.png" && r2.value?.b64 === "AAAA" && G.peekSharedImage(badAt, "x.png") === null, "guest: a refusal is the host's words, not cached, and does not hold up the next picture");
+    check(G.refusalShows("unknown command: shared_image", false) === "plain" && G.refusalShows("unknown command: shared_image", true) === "plain", "guest: a host from before the row looks as it did: alt text, no thumbnail");
+    check(G.refusalShows("outside this place: /tmp/a.png", true) === "plain" && G.refusalShows("outside this place: a.png", false) === "words" && G.refusalShows("not found: a.png", true) === "words", "guest: a Read outside the place has no thumbnail; every other refusal is said");
+    check(door === 0, "guest: nothing went through the engine door");
+    const gs = fs.readFileSync(path.join(ROOT, "src/GuestSession.tsx"), "utf8");
+    check((gs.match(/<Markdown [^>]*renderImage=/g) ?? []).length === 1 && /chat-bubble-agent"><Markdown [^>]*renderImage=/.test(gs), "guest: the agent's bubble draws pictures, a person's does not (a guest's own words reach it)");
+    check(/<SharedThumb [^>]*readImagePath\(props\.name, props\.summary, props\.failed\)/.test(gs), "guest: a Read of an image draws its thumbnail");
+    // `marked` hands the path as the host's `image_paths` reads it (the Rust
+    // test's own table): the two must agree or a picture is refused.
+    const rs = fs.readFileSync(path.join(ROOT, "../crates/worktrees-cli/src/serve/shareimage.rs"), "utf8");
+    const body = /for \(md, want\) in \[([\s\S]*?)\n\s*\] \{/.exec(rs)?.[1] ?? "";
+    const pairs = [...body.matchAll(/\("((?:[^"\\]|\\.)*)", "((?:[^"\\]|\\.)*)"\)/g)].map((m) => [JSON.parse(`"${m[1]}"`), JSON.parse(`"${m[2]}"`)]);
+    const wrong = [];
+    for (const [md, want] of pairs) {
+      let got = null;
+      renderToStaticMarkup(createElement(Markdown, { src: md, renderImage: (s) => { const r = chatImageSrc(s, "", null); got = r.kind === "show" ? r.path : r.text; return null; } }));
+      if (got !== want) wrong.push(`${JSON.stringify(md)}: marked ${JSON.stringify(got)}, host ${JSON.stringify(want)}`);
+    }
+    check(pairs.length >= 12 && wrong.length === 0, `guest: marked draws each of the host's ${pairs.length} image forms at the path the host reads${wrong.length ? ` — ${wrong.join("; ")}` : ""}`);
+    IV.clearPlaceImages();
+  }
 
   // ── the wiring ───────────────────────────────────────────────────────────
   const pane = fs.readFileSync(path.join(ROOT, "src/ChatPane.tsx"), "utf8");

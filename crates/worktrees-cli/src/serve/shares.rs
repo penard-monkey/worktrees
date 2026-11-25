@@ -895,7 +895,7 @@ pub mod rows {
 
     /// Every registered root, whatever the caller's scope: a guest's scope is
     /// empty by definition, and `guest_places` is about the HOST's projects.
-    fn all_roots(cx: &Call) -> Vec<String> {
+    pub(crate) fn all_roots(cx: &Call) -> Vec<String> {
         match &cx.world {
             Some(w) => w.roots(),
             None => worktrees_core::registry::read_lenient().roots(),
