@@ -22,6 +22,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ### Fixed
 
+- **A click on a place is not lost.** The tree drew every row again whenever anything in the window changed, and a click that fell in that moment did nothing.
 - **A workspace changed in the Ideas window shows in the main one.** Linking an idea to a workspace, or making a plan its, left the main window's list as it was until the app was opened again.
 - **Ideas: the window's first open is not over the main one.** With no remembered position it opened exactly on top; it opens beside it now, or lower when there is no room.
 - **Ideas: an open idea's title follows a heading changed elsewhere.** When another window or editor changed the first heading, the text was reloaded but the header kept the old title until the idea was opened again.

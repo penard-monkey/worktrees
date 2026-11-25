@@ -48,6 +48,12 @@ async function which(page, tag) {
   await rowIn(page, "Everything", root).click();
   ok(await isCrumb(page, "Everything"), `${tag} a place clicked in a card has its workspace in the bar`);
   ok(await page.evaluate(() => { const c = document.querySelector("[data-testid=place-ws]").getBoundingClientRect(), p = document.querySelector(".topbar-proj")?.getBoundingClientRect(); return !p || c.right <= p.left; }), `${tag} …before its project`);
+  // A render in the middle of a press must not replace the row under it, or the
+  // click goes to nothing: the row is the same node after one.
+  const held = await rowIn(page, "Everything", root).elementHandle();
+  await page.evaluate((id) => window.__mock.memoryEdit(id, "MEMORY.md", "# Memory\n\nAnother line.\n"), all.id);
+  await page.waitForTimeout(600);
+  ok(await held.evaluate((e) => e.isConnected), `${tag} a row is the same element after a render`);
   // All projects: the only one that holds it.
   await page.click("[data-testid=nav-view-projects]");
   const inAll = page.locator(`[data-project-root='${root}'] li.row[data-slug]`).nth(2);

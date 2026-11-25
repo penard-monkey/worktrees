@@ -6122,7 +6122,7 @@ function App() {
   // speaks only when the branch differs from the directory. `worktrees new
   // <branch>` makes those two equal, and the chip then printed the slug straight
   // back — twice over on a renamed place, once beside the alias and once beside
-  // the name. This is the nav row's `divergent` rule (PlaceRow), which the
+  // the name. This is the nav row's `divergent` rule (placeRow), which the
   // topbar never adopted. A detached HEAD needs no case of its own: `branch` is
   // None there (project.rs `status_v2`), so the chip has never rendered for it.
   const showBranch = !!selected?.branch && (selected.is_main || selected.branch !== selected.slug);
@@ -9533,14 +9533,13 @@ function App() {
   };
 
   // ── row ──
-  // ⚠ Defined inside App() against CLAUDE.md's own rule. It is safe ONLY because
-  // it holds no local state and takes no focus — the drift glyph rides in on the
-  // `drift` prop-by-closure and its tooltip is a plain `title` attribute. The
-  // moment this needs useState (a hover card, an inline editor), hoist it to
-  // module scope with props FIRST.
+  // A function that draws a row, NOT a component: as one defined inside App() it
+  // was a new type every render, so each render replaced every row's element, and
+  // one that landed between a press and its click lost the click. It must hold no
+  // state of its own; the moment it needs some, hoist it to module scope with props.
   // No age override any more: every list this row appears in sorts by
   // `activityAt`, so the row can just print it.
-  const PlaceRow = ({ repo, p }: { repo: string; p: Place }) => {
+  const placeRow = (repo: string, p: Place) => {
     const divergent = !p.is_main && !p.detached && p.branch && p.branch !== p.slug;
     // The main worktree is not in any tier group and cannot leave one, so it is
     // the one row that never arms a drag.
@@ -9686,7 +9685,7 @@ function App() {
         {(buckets[g] ?? []).map((p) => (
           <Fragment key={p.slug}>
             {gapAt(pv.root, g, p.slug) && <li className="drop-gap" />}
-            <PlaceRow repo={pv.root} p={p} />
+            {placeRow(pv.root, p)}
           </Fragment>
         ))}
         {gapAt(pv.root, g, null) && <li className="drop-gap" />}
@@ -9807,7 +9806,7 @@ function App() {
             {(pv.snapshot?.strays?.length ?? 0) > 0 && (
               <StrayBanner count={pv.snapshot!.strays!.length} onOpen={() => setProjSheet(pv.root)} />
             )}
-            {main && <ul className="places"><PlaceRow repo={pv.root} p={main} /></ul>}
+            {main && <ul className="places">{placeRow(pv.root, main)}</ul>}
             {/* above the tier groups, not inside one: which tier it lands in is
                 not known until it exists */}
             {ghosts.length > 0 && (
