@@ -16,6 +16,12 @@ export const wsFrameOn = (b: WsBetas): boolean => b.ideas || b.chats;
 export function wsTabs(b: WsBetas): WsTab[] {
   return ["overview", ...(b.chats ? ["memory" as const] : []), ...(b.ideas ? ["plan" as const, "ideas" as const] : []), ...(b.chats ? ["chats" as const] : [])];
 }
+/** The tabs of workspace `id`'s view: those of the betas, and the tab of a document of
+ *  it whose text can be saved nowhere, whatever the betas say. */
+export function tabsWith(base: readonly WsTab[], id: string, stuck: { ws: string; tab: WsTab } | null): readonly WsTab[] {
+  if (!stuck || stuck.ws !== id || base.includes(stuck.tab)) return base;
+  return wsTabs({ ideas: true, chats: true }).filter((t) => t === stuck.tab || base.includes(t));
+}
 /** The tab to show when `t` is asked for: itself, or Overview when it is not drawn. */
 export const tabOr = (t: WsTab, tabs: readonly WsTab[]): WsTab => (tabs.includes(t) ? t : "overview");
 

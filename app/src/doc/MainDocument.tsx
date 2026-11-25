@@ -138,7 +138,12 @@ export function MainDocument(props: {
   const { setHistory } = doc;
   useEffect(() => { if (props.historyAsk) setHistory(true); }, [props.historyAsk, setHistory]);
 
-  const stuck = open && (save.kind === "conflict" || save.kind === "removed" || save.kind === "error") && session.current?.dirty() ? open.title || "Untitled" : null;
+  // Stuck until it IS saved: another try is not yet an end of it.
+  const stuckKey = useRef<string | null>(null);
+  const held = save.kind === "conflict" || save.kind === "removed" || save.kind === "error";
+  if (!open || !session.current?.dirty() || (stuckKey.current !== open.key && !held)) stuckKey.current = null;
+  else stuckKey.current = open.key;
+  const stuck = open && stuckKey.current === open.key ? open.title || "Untitled" : null;
   // "Not saved, keep yours or reload" is answered by its being saved.
   useEffect(() => { at.current.stuck(stuck); if (!stuck && refusedNow.current) { refusedNow.current = false; setNotice(null); } }, [stuck]);
   useEffect(() => () => { at.current.stuck(null); }, []);

@@ -46,6 +46,10 @@ eq("a tab that is not drawn is Overview", [V.tabOr("plan", ["overview", "memory"
 eq("a chat that waits is first, one line each", V.attentionOf({ ...none, unsaved: { title: "P", elsewhere: null }, chats: [{ conv: "c1", title: "Who", failed: false }, { conv: "c2", title: "Sub", failed: true }] }).map((a) => a.text),
   ["“Who” is waiting for an answer.", "The fold of “Sub” did not finish.", "“P” has text that is not saved."]);
 eq("live chats are counted", [V.wsCounts(3, 2), V.wsCounts(1, 1), V.wsCounts(2, 0)], ["3 projects · 2 chats live", "1 project · 1 chat live", "2 projects"]);
+// ── a text that is not saved keeps its tab ──
+const none = V.wsTabs({ ideas: false, chats: false }), chats = V.wsTabs({ ideas: false, chats: true });
+eq("its workspace's, in its place, and no other's", [V.tabsWith(none, "A", { ws: "A", tab: "memory" }), V.tabsWith(chats, "A", { ws: "A", tab: "ideas" }), V.tabsWith(chats, "B", { ws: "A", tab: "ideas" }), V.tabsWith(chats, "A", { ws: "A", tab: "memory" }), V.tabsWith(none, "A", null)],
+  [["overview", "memory"], ["overview", "memory", "ideas", "chats"], chats, chats, ["overview"]]);
 // ── a place's workspace ──
 const WS = [{ id: "a", projects: [{ root: "/p" }, { root: "/q" }] }, { id: "b", projects: [{ root: "/p" }] }, { id: "c", projects: [] }];
 const holds = (r) => V.placeWorkspaces(WS, r);
