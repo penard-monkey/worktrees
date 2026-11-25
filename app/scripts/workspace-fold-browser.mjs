@@ -58,12 +58,21 @@ async function land(page, tag, name) {
   ok(await until(page, () => !!document.querySelector("[data-testid=chat-list] [data-testid=ws-chat-receipt]")) && /Folded into memory.*2 files \+\d+( −[1-9]\d*)?Show/.test(await text(page, "ws-chat-receipt")), `${tag} the receipt ends the chat (${await text(page, "ws-chat-receipt")})`);
   ok(await page.evaluate(() => { const l = document.querySelector("[data-testid=chat-list]"); return l.lastElementChild.contains(document.querySelector("[data-testid=ws-chat-receipt]")); }), `${tag} …after its turns`);
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/wsf-landed-${name}.png` });
+  // ── the note: named by the fold, called by its heading, its path the hover text ──
+  const note = (await call(page, "workspace_chats", { id: ws })).chats.find((c) => c.id === rel).note.replace(/^memory\//, "");
+  const cf = await page.locator(`[data-testid=memory-change-file][data-path='${note}']`).evaluate((b) => [b.querySelector(".wsm-cfile-n").textContent, b.title]);
+  ok(/^notes\/\d{4}-\d\d-\d\d-release-order-\w{6}\.md$/.test(note) && cf[1] === note && !/^notes\//.test(cf[0]) && cf[0].length > 0, `${tag} the diff's file list says the note's heading (${cf.join(" | ")})`);
+  await page.click(`[data-testid=memory-change-file][data-path='${note}']`);
+  ok(await page.evaluate((n) => { const s = document.querySelector(".wsm-one-h span"); return s.title === n && !s.textContent.startsWith("notes/"); }, note), `${tag} …and so does its diff`);
+  await page.click("[data-testid=memory-hist-back]");
+  ok(!(await page.locator("[data-testid=memory-history]").innerText()).includes(note), `${tag} …and History`);
   // ── the receipt's acts ──
   await tab(page, "plan");
   await page.click("[data-testid=ws-receipt-diff]");
   ok(await isTab(page, "memory") && await until(page, () => !!document.querySelector("[data-testid=memory-change]")), `${tag} Show the diff`);
   await page.click("[data-testid=ws-receipt-note]");
   ok(await until(page, (c) => document.querySelector("[data-testid=main-doc]")?.dataset.doc === c, (await call(page, "workspace_chats", { id: ws })).chats.find((c) => c.id === rel).note.replace(/^memory\//, "")), `${tag} Open the note`);
+  ok(!(await page.locator("[data-testid=main-doc] .ix-title").first().innerText()).includes(note.slice(6)) && (await page.locator("[data-testid=main-doc] .ix-title").first().innerText()) === cf[0], `${tag} …under its heading`);
   // ── Undo, Redo ──
   const undo = page.locator("[data-testid=ws-chat-receipt] [data-testid=memory-revert]");
   await undo.click();

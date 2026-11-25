@@ -54,6 +54,15 @@ eq("back, and forward", [b.paths[b.at], M.trailStep(b, 1), M.trailStep(t, 1), M.
 eq("a new file after Back drops what was forward", M.trailTo(b, "x.md").paths, ["MEMORY.md", "topics/a.md", "x.md"]);
 eq("a chat's note, in the memory", M.notePath("memory/notes/2026-11-24-x.md"), "notes/2026-11-24-x.md");
 
+// ── what a note is called ──
+{
+  const view = { folders: [folder("notes", f("notes/2026-11-24-release-order-000904.md", { title: "Release order: the role first" }), f("notes/2026-11-24-x.md"))] };
+  eq("a note by its heading, anything else by its path", ["notes/2026-11-24-release-order-000904.md", "topics/nas.md", "MEMORY.md"].map((p) => M.nameAt(view, p)), ["Release order: the role first", "topics/nas.md", "MEMORY.md"]);
+  eq("one that is gone, or has no heading, by its words; never its path or an id", ["notes/2026-11-24-who-can-see-what-000905.md", "notes/2026-11-24-x.md", "notes/2026-11-24-01JC8Z4K3M9QX2T7VB00000905.md"].map((p) => M.nameAt(view, p)), ["Who can see what", "X", "A note"]);
+  eq("with no view yet too", M.nameAt(null, "notes/2026-11-24-storage-layout-000903.md"), "Storage layout");
+  eq("a chat has a note once its first fold wrote it", [{ note: "", note_exists: false }, { note: "", note_exists: true }, { note: "memory/notes/a.md", note_exists: false }, { note: "memory/notes/a.md", note_exists: true }].map(M.chatNote), [null, null, null, "notes/a.md"]);
+}
+
 // ── editing ──
 const link = (from, to) => `${from}->${to}`;
 const v = { folders: [folder("", f("MEMORY.md", { title: "Memory" })), folder("topics", f("topics/nas.md", { title: "NAS [layout]" }), f("topics/audiences.md")), folder("notes", f("notes/2026-11-24-a.md", { title: "Storage layout" })), folder("files", f("files/rack.png", { kind: "image" }))] };

@@ -18,7 +18,7 @@ import {
 } from "./wschats";
 import type { WsChatsLive } from "./useWsChats";
 import { RevertButton, useRevert } from "./WorkspaceMemory";
-import { notePath } from "./wsmemory";
+import { chatNote } from "./wsmemory";
 import "./WorkspaceChat.css";
 
 const DOT_TITLE: Record<RowState, string> = {
@@ -118,6 +118,8 @@ export function WorkspaceChatColumn(props: {
   /** This workspace's memory, as a fold's receipt and its failure reach it. */
   showChange(commit: string): void;
   openMemory(path: string | null): void;
+  /** How a memory file is called in a sentence. */
+  nameOf(path: string): string;
   memoryTick: number;
   memoryChanged(): void;
   onError(msg: string): void;
@@ -260,7 +262,7 @@ export function WorkspaceChatColumn(props: {
             onTerminal={() => setView("terminal")} onOpenPath={() => {}} reloadToken={0} onError={props.onError}
             insert={c.fold?.state === "done" && c.fold.commit && !running ? {
               at: change?.at ?? Number.MAX_SAFE_INTEGER,
-              node: <Receipt ws={ws.id} chat={c} change={change} show={props.showChange} openNote={() => props.openMemory(notePath(c.note))} changed={() => { props.memoryChanged(); void live.refresh(ws.id); }} />,
+              node: <Receipt ws={ws.id} chat={c} change={change} show={props.showChange} note={chatNote(c)} openNote={props.openMemory} nameOf={props.nameOf} changed={() => { props.memoryChanged(); void live.refresh(ws.id); }} />,
             } : null}
             readOnly={running && now ? (
               <div className="wsc-ended" data-testid="ws-chat-folding" data-fold={now.state} role="status">
@@ -314,17 +316,17 @@ export function WorkspaceChatColumn(props: {
 
 /** What a fold left, in its chat for good: how much it changed, and the way to
  *  see it, undo it and put it back. */
-function Receipt(props: { ws: string; chat: WsChat; change: MemoryChange | null; show(commit: string): void; openNote(): void; changed(): void }) {
+function Receipt(props: { ws: string; chat: WsChat; change: MemoryChange | null; show(commit: string): void; note: string | null; openNote(path: string | null): void; nameOf(path: string): string; changed(): void }) {
   const { chat } = props;
   const f = chat.fold!;
   const { change } = props;
-  const rv = useRevert(props.ws, props.changed);
+  const rv = useRevert(props.ws, props.changed, props.nameOf);
   return (
     <div className={"wsc-receipt" + (change?.reverted_by ? " undone" : "")} data-testid="ws-chat-receipt" data-commit={f.commit}>
       <p><b>{change?.reverted_by ? "Folded into memory, and undone" : "Folded into memory"}</b> <span className="wsm-change-d">{change ? whenWords(new Date(change.at * 1000).toISOString()) : ""} · {f.files ?? 0} file{f.files === 1 ? "" : "s"}{f.lines?.added ? ` +${f.lines.added}` : ""}{f.lines?.removed ? ` −${f.lines.removed}` : ""}</span></p>
       <div className="ws-ov-line">
         <button className="ctrl sm" data-testid="ws-receipt-diff" onClick={() => props.show(f.commit!)}>Show the diff</button>
-        {chat.note_exists && <button className="ctrl sm" data-testid="ws-receipt-note" onClick={props.openNote}>Open the note</button>}
+        {props.note && <button className="ctrl sm" data-testid="ws-receipt-note" title={props.note} onClick={() => props.openNote(props.note)}>Open the note</button>}
         {change && <RevertButton c={change} rv={rv} what="this fold" />}
       </div>
       {rv.said && <p className="wsm-err" role="alert" data-testid="memory-conflict">{rv.said.text}</p>}
@@ -419,7 +421,7 @@ export function ChatsTab(props: { note(path: string): void; rows: readonly ChatR
                     <span className="ws-ov-detail">{stateWords(r)}</span>
                   </span>
                 </button>
-                {r.chat.note_exists && <button className="wsf-link" data-testid="ws-chats-note" title={r.chat.note} onClick={() => props.note(r.chat.note)}>note</button>}
+                {chatNote(r.chat) && <button className="wsf-link" data-testid="ws-chats-note" title={r.chat.note} onClick={() => props.note(chatNote(r.chat)!)}>note</button>}
                 <span className="wsc-when" title={`Last active ${whenWords(r.chat.last_activity || r.chat.started)}`}>started {whenWords(r.chat.started)}{props.ago(activeAt(r.chat)) ? ` · active ${props.ago(activeAt(r.chat))}` : ""}</span>
               </li>
             ))}

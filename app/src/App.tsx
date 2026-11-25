@@ -83,7 +83,7 @@ import { PickPlaceWs, WorkspaceDock, type DockDoc } from "./WorkspaceDock";
 import { useWsChats } from "./useWsChats";
 import { keepFiles, MemoryCard, MemoryFiles, MemoryHistory, MemoryPreview, MemoryStrips, MemoryUnread } from "./WorkspaceMemory";
 import { useWsMemory } from "./useWsMemory";
-import { fileOf, longIndex, memoryPicks, notePath, sizeWords, trailStart, trailStep, trailTo, type Trail } from "./wsmemory";
+import { fileOf, longIndex, memoryPicks, nameAt, sizeWords, trailStart, trailStep, trailTo, type Trail } from "./wsmemory";
 import { memoryDocs, type MemoryView } from "./doc/memory";
 import { linkTo, memoryLink } from "./doc/memorypath";
 import { navRows, type ChatRow } from "./wschats";
@@ -9262,7 +9262,7 @@ function App() {
           // dot says it.
           landed={(commit) => { if (!mainDocApi.current?.editing()) void showChange(wsShown.id, commit).then(() => setWsSide("chat")); }}
           showChange={(commit) => void showChange(wsShown.id, commit)}
-          openMemory={(path) => openMemory(wsShown.id, path)}
+          openMemory={(path) => openMemory(wsShown.id, path)} nameOf={(p) => nameAt(memView, p)}
           memoryTick={wsMem.tick(wsShown.id)}
           memoryChanged={() => void wsMem.refresh(wsShown.id)}
           openTerminalApp={(session) => { invoke("open_terminal", { cmd: settings.terminal_cmd, session }).catch((e) => fail(e)); }}
@@ -10850,7 +10850,7 @@ function App() {
                 setSide={setWsSide}
                 firstChat={() => { if (wsShown) void startChat(wsShown.id); }}
                 chatsTab={wsShown && wsChatsOn && (
-                  <ChatsTab note={(n) => openMemory(wsShown.id, notePath(n))} rows={wsChats.rows(wsShown.id)} on={wsChat[wsShown.id] ?? null} starting={wsStart?.why === null} ago={ago}
+                  <ChatsTab note={(path) => openMemory(wsShown.id, path)} rows={wsChats.rows(wsShown.id)} on={wsChat[wsShown.id] ?? null} starting={wsStart?.why === null} ago={ago}
                     open={(conv) => openChat(wsShown.id, conv)} start={() => void startChat(wsShown.id)} />
                 )}
                 showTab={(t) => { if (wsShown) void showWs(wsShown.id, t); }}
@@ -10936,7 +10936,8 @@ function App() {
                     // hand-off to it yet, so it does not float.
                     float={mainDoc.source === ideaSource ? (to, title) => { setMainDoc(null); setFloated({ ...to, title }); openIdeaDoc(to.name); } : undefined}
                     {...(mainDoc.tab === "memory" ? {
-                      title: mainDoc.name.slice(mainDoc.name.lastIndexOf("/") + 1),
+                      // A note is its heading, as the open document has it.
+                      title: mainDoc.name.startsWith("notes/") ? undefined : mainDoc.name.slice(mainDoc.name.lastIndexOf("/") + 1),
                       lead: (
                         <>
                           <span className="wsm-trail" role="group" aria-label="Files read">
@@ -10949,7 +10950,7 @@ function App() {
                       linkNote: memLinkNote,
                       historyAsk: memAt?.ws === mainDoc.ws ? memAt.n : 0,
                       history: (close: () => void) => (
-                        <MemoryHistory chat={(c) => chatNavName(mainDoc.ws, c)} key={`${mainDoc.ws}|${mainDoc.name}|${memAt?.ws === mainDoc.ws ? memAt.n : 0}`} ws={mainDoc.ws} path={mainDoc.name} at={memAt?.ws === mainDoc.ws ? memAt.commit : null} tick={wsMem.tick(mainDoc.ws)}
+                        <MemoryHistory view={memView} chat={(c) => chatNavName(mainDoc.ws, c)} key={`${mainDoc.ws}|${mainDoc.name}|${memAt?.ws === mainDoc.ws ? memAt.n : 0}`} ws={mainDoc.ws} path={mainDoc.name} at={memAt?.ws === mainDoc.ws ? memAt.commit : null} tick={wsMem.tick(mainDoc.ws)}
                           open={(path) => { close(); setMemAt(null); openMemory(mainDoc.ws, path); }} close={() => { close(); setMemAt(null); }} />
                       ),
                       strips: (mode: "edit" | "read") => (

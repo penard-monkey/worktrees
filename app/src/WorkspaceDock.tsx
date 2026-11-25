@@ -9,7 +9,7 @@ import type { Doc, DocTarget } from "./doc/source";
 import * as Icons from "./icons";
 import { WS_TAB_LABEL } from "./navHistory";
 import { MemoryFiles, MemoryPreview, MemoryUnread } from "./WorkspaceMemory";
-import { fileOf } from "./wsmemory";
+import { fileOf, nameAt } from "./wsmemory";
 
 const errText = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : String(e));
 export type DockDoc = "memory" | "plan" | "ideas";
@@ -57,7 +57,7 @@ export function WorkspaceDock(props: {
   const target: DocTarget | null = tab === "plan" ? props.plan
     : tab === "ideas" ? (props.idea ? props.ideaTarget(props.idea) : null)
     : memory.view?.made && !picture ? { source: memoryDocs(ws.id), name: memory.path } : null;
-  const name = tab === "memory" ? memory.path.slice(memory.path.lastIndexOf("/") + 1)
+  const name = tab === "memory" ? memory.path.startsWith("notes/") ? nameAt(memory.view, memory.path) : memory.path.slice(memory.path.lastIndexOf("/") + 1)
     : tab === "plan" ? "Plan" : props.ideas.find((i) => i.id === props.idea)?.title ?? (props.idea ? "Idea" : "");
   return (
     <div className="wsd" data-testid="dock-ws" data-ws={ws.id} data-tab={tab}>

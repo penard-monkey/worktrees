@@ -12,7 +12,7 @@ import { Markdown } from "./markdown";
 import { useArmed } from "./useArmed";
 import { useEscape } from "./useEscape";
 import {
-  changeFiles, changedBy, changedUnderWords, changeWords, conflictWords, fileGroups, fileName, filesWords, lineDiff, linkText, mayEdit, newFilePath, putName,
+  changeFiles, changedBy, changedUnderWords, changeWords, conflictWords, fileGroups, fileName, filesWords, lineDiff, linkText, mayEdit, nameAt, newFilePath, putName,
   revertOf, sizeWords, STATUS_WORDS, titleOf, tooBig, whileLive,
 } from "./wsmemory";
 import { whenWords } from "./wschats";
@@ -222,7 +222,7 @@ const Lines = ({ added, removed }: { added: number | null; removed: number | nul
 
 /** Undo a change, or Redo one that was undone: two presses, and a refusal names
  *  the files. Shared by History, the Overview's line and a chat's receipt. */
-export function useRevert(ws: string, done: (r: MemoryChange) => void) {
+export function useRevert(ws: string, done: (r: MemoryChange) => void, name: (path: string) => string) {
   const arm = useArmed<string>();
   const [busy, setBusy] = useState(false);
   const [said, setSaid] = useState<{ commit: string; text: string } | null>(null);
@@ -231,7 +231,7 @@ export function useRevert(ws: string, done: (r: MemoryChange) => void) {
     setSaid(null);
     try {
       const r = await memoryDocs(ws).revert(c.revert);
-      if (r.conflicts.length) setSaid({ commit: c.commit, text: conflictWords(r.conflicts) });
+      if (r.conflicts.length) setSaid({ commit: c.commit, text: conflictWords(r.conflicts.map(name)) });
       else if (r.change) done(r.change);
     } catch (e) { setSaid({ commit: c.commit, text: errText(e) }); }
     finally { setBusy(false); }
@@ -254,6 +254,8 @@ export function RevertButton({ c, rv, what }: { c: MemoryChange; rv: ReturnType<
  *  change, one file of it at a time. */
 export function MemoryHistory(props: {
   ws: string;
+  /** The folder as it is now: how its notes are called. */
+  view: MemoryView | null | undefined;
   /** The open file; `null` asks for all. */
   path: string | null;
   /** A change to show first, by its commit. */
@@ -274,7 +276,8 @@ export function MemoryHistory(props: {
   const [cur, setCur] = useState<MemoryChange | null>(null);
   const [file, setFile] = useState<string | null>(null);
   const [diff, setDiff] = useState<MemoryFileDiff | null>(null);
-  const rv = useRevert(ws, (c) => { setCur(c); setFile(null); });
+  const named = (p: string) => nameAt(props.view, p);
+  const rv = useRevert(ws, (c) => { setCur(c); setFile(null); }, named);
   const want = all ? undefined : path ?? undefined;
   const pick = useCallback((c: MemoryChange) => {
     setCur(c);
@@ -317,7 +320,7 @@ export function MemoryHistory(props: {
 
   const head = (
     <div className="wsm-hist-h">
-      {cur ? <button className="wsf-link" data-testid="memory-hist-back" onClick={() => setCur(null)}>‹ {all ? "All changes" : "History"}</button> : <span className="wsm-hist-t">{all ? "All changes" : `Changes to ${path}`}</span>}
+      {cur ? <button className="wsf-link" data-testid="memory-hist-back" onClick={() => setCur(null)}>‹ {all ? "All changes" : "History"}</button> : <span className="wsm-hist-t" title={all ? undefined : path ?? undefined}>{all ? "All changes" : `Changes to ${named(path ?? "")}`}</span>}
       {!cur && path !== null && (
         <span className="agent-view" role="group" aria-label="Which changes">
           <button className={"agent-view-b" + (all ? "" : " on")} aria-pressed={!all} data-testid="memory-hist-file" onClick={() => setAll(false)}>This file</button>
@@ -341,15 +344,15 @@ export function MemoryHistory(props: {
           <ul className="wsm-cfiles">
             {changeFiles(cur).map((f) => (
               <li key={f.path}>
-                <button className={"wsm-cfile" + (f.path === file ? " on" : "")} data-testid="memory-change-file" data-path={f.path} aria-current={f.path === file || undefined} onClick={() => setFile(f.path)}>
-                  <span className="wsm-file-in"><span className="wsm-cfile-n">{f.path}</span><span className="wsm-cfile-s">{STATUS_WORDS[f.status] ?? ""}</span><Lines added={f.added} removed={f.removed} /></span>
+                <button className={"wsm-cfile" + (f.path === file ? " on" : "")} data-testid="memory-change-file" data-path={f.path} title={f.path} aria-current={f.path === file || undefined} onClick={() => setFile(f.path)}>
+                  <span className="wsm-file-in"><span className="wsm-cfile-n">{named(f.path)}</span><span className="wsm-cfile-s">{STATUS_WORDS[f.status] ?? ""}</span><Lines added={f.added} removed={f.removed} /></span>
                 </button>
               </li>
             ))}
           </ul>
           {file && (
             <div className="wsm-one">
-              <div className="wsm-one-h"><span>{file}</span><button className="wsf-link" data-testid="memory-change-open" onClick={() => props.open(file)}>Open</button></div>
+              <div className="wsm-one-h"><span title={file}>{named(file)}</span><button className="wsf-link" data-testid="memory-change-open" onClick={() => props.open(file)}>Open</button></div>
               {diff ? <MemoryDiff d={diff} /> : <p className="ws-ov-none wsm-pad">Reading…</p>}
             </div>
           )}
@@ -387,7 +390,7 @@ export function MemoryCard(props: {
 }) {
   const { view } = props;
   const last = view.last && view.last.kind !== "made" ? view.last : null;
-  const rv = useRevert(props.ws, props.changed);
+  const rv = useRevert(props.ws, props.changed, (p) => nameAt(props.view, p));
   const [box, setBox] = useState<HTMLElement | null>(null);
   const [cut, setCut] = useState(false);
   useEffect(() => {
