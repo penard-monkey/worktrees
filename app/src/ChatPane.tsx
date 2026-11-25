@@ -109,6 +109,11 @@ export type ChatPaneProps = {
   intro?: ReactNode;
   /** Whom a message is for, when it is not the agent by name. */
   to?: string;
+  /** A message that is not the person's (what the engine starts a chat with):
+   *  the quiet line to draw for it. */
+  quiet?: (text: string) => string | null;
+  /** What to say above a prompt, when there is something. */
+  promptNote?: (lines: readonly string[]) => ReactNode;
   /** The folder a reply's relative paths are under, when it is not `path`
    *  (an idea conversation's: the ideas folder). */
   root?: string;
@@ -254,7 +259,7 @@ export function ChatPane(props: ChatPaneProps) {
         </p>
         {items.length === 0 && !prompt && <p className="chat-note" data-testid="chat-empty">No messages in this session yet.</p>}
         <ol className="chat-list" data-testid="chat-list">
-          {items.map((it) => <ChatItem key={it.key} it={it} agent={agent} target={target} root={root} reveal={reveal} fullOff={v.fullOff} full={v.full} onLink={onLink} pathLinks={pathLinks} />)}
+          {items.map((it) => it.k === "user" && props.quiet?.(it.text) ? <li key={it.key} className="chat-note" data-testid="chat-quiet">{props.quiet(it.text)}</li> : <ChatItem key={it.key} it={it} agent={agent} target={target} root={root} reveal={reveal} fullOff={v.fullOff} full={v.full} onLink={onLink} pathLinks={pathLinks} />)}
         </ol>
       </>
     );
@@ -288,6 +293,7 @@ export function ChatPane(props: ChatPaneProps) {
               {agent} is working
             </p>
           )}
+          {prompt && props.promptNote?.(prompt.lines ?? [])}
           {prompt && (
             prompt.readable
               ? <PromptCard p={prompt} target={target} agent={agent} keyboard={{ card: cardRef, field: fieldRef, tookAt }} onTerminal={props.onTerminal} onLink={onLink} />

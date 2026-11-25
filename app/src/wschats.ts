@@ -103,10 +103,10 @@ export const isDefaultTitle = (t: string): boolean => /^Chat \d+$/.test(t);
 export function titleFrom(message: string): string | null {
   const line = message.split(/\r?\n/).map((l) => l.trim()).find(Boolean)?.replace(/\s+/g, " ") ?? "";
   if (!line) return null;
-  if (line.length <= 60) return line;
-  const cut = line.slice(0, 60);
+  if (line.length <= 40) return line;
+  const cut = line.slice(0, 40);
   const sp = cut.lastIndexOf(" ");
-  return `${(sp > 30 ? cut.slice(0, sp) : cut).replace(/[\s.,;:—-]+$/, "")}…`;
+  return `${(sp > 20 ? cut.slice(0, sp) : cut).replace(/[\s.,;:—-]+$/, "")}…`;
 }
 /** The person's first message among a chat's turns: the first that is theirs.
  *  The opener is the engine's, and a notice is Claude's own entry. */
@@ -114,6 +114,17 @@ export function firstMessage(turns: readonly { user: string | null; notice?: unk
   const t = turns.find((x) => x.user && !x.notice && !x.user.startsWith(`Read chats/${conv}/`));
   return t?.user ?? null;
 }
+
+/** What the engine said to start a chat (or a fold), which is not the person's:
+ *  a quiet line in the transcript. `null`: a message like any other. */
+export function engineLine(text: string, conv: string): string | null {
+  const t = text.trim();
+  if (t === `Read chats/${conv}/start.md and begin.`) return "The chat was started.";
+  return t === `Read chats/${conv}/fold.md and do what it says.` || t === `Read chats/${conv}/fold.md and begin.` ? "The chat was asked to fold into memory." : null;
+}
+/** A prompt that asks whether the workspace's own folder is trusted. */
+export const asksTrust = (lines: readonly string[] | undefined): boolean => !!lines && /\btrust\b/i.test(lines.join(" ")) && /\bfolder\b|workspaces\//i.test(lines.join(" "));
+export const TRUST_WORDS = "This is the workspace's own folder. Worktrees made it, and it holds this workspace's chats and memory. Claude asks once.";
 
 /** The months the Chats tab groups by: "November 2026". */
 export function monthOf(c: WsChat): string {

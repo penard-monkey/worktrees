@@ -36,7 +36,7 @@
 .wsc-name-in > svg { flex: none; }
 .wsc-name-t { min-width: 2ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wsc-rename { flex: 1 1 auto; min-width: 0; }
-.wsc-readsb { flex: 0 1 auto; min-width: 0; border: 0; background: transparent; padding: 3px 4px; border-radius: var(--r-sm); color: var(--txt); font-size: var(--fs-meta); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wsc-readsb { flex: none; border: 0; background: transparent; padding: 3px 4px; border-radius: var(--r-sm); color: var(--txt); font-size: var(--fs-meta); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wsc-acts { flex: none; margin-left: auto; display: flex; align-items: center; gap: var(--s2); }
 .wsc-close { display: inline-flex; }
 .wsc-close > .ctrl:first-child { border-radius: var(--r-sm) 0 0 var(--r-sm); }
@@ -55,6 +55,7 @@
 .wsc-reads li { display: flex; flex-wrap: wrap; gap: 0 var(--s2); }
 .wsc-reads-n { color: var(--txt-hi); font-weight: var(--fw-med); }
 .wsc-reads-w { color: var(--txt); }
+.wsc-trust { margin: var(--s2) 0 0; padding: var(--s2) var(--s3); border-left: 3px solid var(--done); background: var(--bg-panel); color: var(--txt-hi); font-size: var(--fs-label); }
 .chat-intro { color: var(--txt); }
 /* ── lists ── */
 .wsc-line, .wsc-item-b { display: block; width: 100%; border: 0; background: transparent; padding: 6px var(--s3); color: var(--txt-hi); font: inherit; font-size: var(--fs-meta); text-align: left; }

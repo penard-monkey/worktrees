@@ -12,7 +12,7 @@ import * as Icons from "./icons";
 import { DeskTerminalPane } from "./TerminalPane";
 import { useArmed } from "./useArmed";
 import {
-  activeAt, ageWords, firstMessage, introWords, isDefaultTitle, monthOf, navRows, readsWords, stateWords, titleFrom, whenWords,
+  activeAt, ageWords, asksTrust, engineLine, firstMessage, introWords, isDefaultTitle, monthOf, navRows, readsWords, stateWords, titleFrom, TRUST_WORDS, whenWords,
   type ChatRow, type ProjectRead, type RowState, type WsChat, type WsChats,
 } from "./wschats";
 import type { WsChatsLive } from "./useWsChats";
@@ -198,7 +198,8 @@ export function WorkspaceChatColumn(props: {
         ) : (
           <ChatPane key={conv} repo="" slug="" path={key} root={info.folder} ws={{ id: ws.id, conv }} provider="claude" session={c.session}
             activity={row.state === "busy" ? "busy" : row.state === "waiting" ? "waiting" : ""}
-            doneAt={activeAt(c)} paneDraft={null} uiRem={props.uiRem} to={c.title}
+            doneAt={activeAt(c)} paneDraft={null} uiRem={props.uiRem} to="this chat" quiet={(t) => engineLine(t, conv)}
+            promptNote={(lines) => (asksTrust(lines) ? <p className="wsc-trust" data-testid="ws-chat-trust">{TRUST_WORDS}</p> : null)}
             intro={<>A chat of <b>{ws.name}</b>. {introWords(info.projects)}</>}
             onTerminal={() => setView("terminal")} onOpenPath={() => {}} reloadToken={0} onError={props.onError}
             readOnly={row.live ? undefined : (

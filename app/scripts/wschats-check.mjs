@@ -58,7 +58,10 @@ eq("a read the engine does not call `yes` is not one", W.readsCount([p("partly")
 // ── its name ──
 eq("the engine's own names", ["Chat 3", "Chat three", "Chat 3b", "Release order"].map(W.isDefaultTitle), [true, false, false, false]);
 eq("from the first line, whole", W.titleFrom("\n  Which   ships first?\nand why"), "Which ships first?");
-eq("cut at a word", W.titleFrom("What order should we ship the Jellyfin role and the config repository in, please?"), "What order should we ship the Jellyfin role and the config…");
+eq("cut at a word", W.titleFrom("What order should we ship the Jellyfin role and the config repository in, please?"), "What order should we ship the Jellyfin…");
+eq("forty characters is whole", W.titleFrom("x".repeat(40)).length, 40);
+eq("the engine's own words are a quiet line, and only this chat's", [W.engineLine("Read chats/c1/start.md and begin.", "c1"), W.engineLine("Read chats/c2/start.md and begin.", "c1"), W.engineLine("Read chats/c1/start.md and begin. Please.", "c1")], ["The chat was started.", null, null]);
+eq("the folder-trust question", [W.asksTrust(["Accessing workspace:", "/x/workspaces/01M", "Yes, I trust this folder"]), W.asksTrust(["Edit file", "memory/MEMORY.md"]), W.asksTrust(undefined)], [true, false, false]);
 eq("a blank message names nothing", W.titleFrom(" \n "), null);
 const t = (user, notice) => ({ user, ...(notice ? { notice } : {}) });
 eq("the person's first: not the opener, not Claude's notice, not a turn of its own", W.firstMessage([t(null), t("Read chats/c1/start.md and begin."), t("x", { kind: "task" }), t("Hello"), t("Later")], "c1"), "Hello");

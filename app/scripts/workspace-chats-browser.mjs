@@ -107,8 +107,14 @@ async function chat(page, tag, name) {
   ok(/not read: not registered/.test(await page.locator("[data-testid=ws-chat-reads]").innerText()), `${tag} …and names which, and why not`);
   await page.keyboard.press("Escape");
   ok(await until(page, () => /Which ships first\?/.test(document.querySelector("[data-testid=chat-list]")?.textContent ?? "")), `${tag} its transcript`);
-  ok(!(await page.$("[data-testid=ws-chat-col] .chat-attach")) && !/for a command|\/ for/.test(await page.locator("[data-testid=ws-chat-col]").innerText()) && (await draft(page).getAttribute("placeholder")) === "Message Release order", `${tag} no attachments, no slash commands, and the composer names the chat`);
+  ok(!(await page.$("[data-testid=ws-chat-col] .chat-attach")) && !/for a command|\/ for/.test(await page.locator("[data-testid=ws-chat-col]").innerText()) && (await draft(page).getAttribute("placeholder")) === "Message this chat", `${tag} no attachments and no slash commands in the composer`);
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/wsc-chat-${name}.png` });
+  await call(page, "workspace_chat_rename", { id: ws, conv: await row(page, "Release order").getAttribute("data-chat"), title: "Release order, a name much too long for any header there is to hold whole" });
+  await page.locator("[data-testid=ws-chat-menu]").waitFor();
+  await page.evaluate(() => window.__mock.wsFold && window.dispatchEvent(new Event("focus")));
+  await row(page, "Who can see what").click(); await row(page, "Release order").click();
+  ok(await page.evaluate(() => { const r = document.querySelector("[data-testid=ws-chat-readsb]"); return r.scrollWidth <= r.clientWidth + 1; }), `${tag} "reads n of m" stays whole beside a long name`);
+  await call(page, "workspace_chat_rename", { id: ws, conv: await row(page, "Release order").getAttribute("data-chat"), title: "Release order" });
 
   // ── a draft in each ──
   await draft(page).fill("half a thought");
@@ -196,14 +202,15 @@ async function start(page, tag) {
   ok(await until(page, () => [...document.querySelectorAll("[data-testid=ws-chat-row] .wsc-title")].some((e) => /^Chat \d+$/.test(e.textContent))), `${tag} …and its row is there`);
   await until(page, () => /What would you like to settle/.test(document.querySelector("[data-testid=chat-list]")?.textContent ?? ""), null, 10000);
   ok(/^Chat \d+$/.test(await page.locator("[data-testid=ws-chat-col] .wsc-name-t").innerText()), `${tag} the engine's opener names nothing`);
+  ok((await page.locator("[data-testid=chat-quiet]").innerText()) === "The chat was started." && await page.locator("[data-testid=chat-user]").count() === 0, `${tag} …and is a quiet line, not something the person said`);
   await draft(page).fill("Which box should the media server run on?");
   await draft(page).press("Enter");
-  ok(await colOf(page, "Which box should the media server run on?"), `${tag} the first message names it`);
+  ok(await colOf(page, "Which box should the media server run…"), `${tag} the first message names it, cut at a word`);
   await until(page, () => document.querySelector("[data-testid=ws-chat-col]")?.dataset.state === "running", null, 8000);
   await draft(page).fill("And the second?");
   await draft(page).press("Enter");
   await page.waitForTimeout(1500);
-  ok(await colOf(page, "Which box should the media server run on?"), `${tag} …once`);
+  ok(await colOf(page, "Which box should the media server run…"), `${tag} …once`);
 
   // ── a refusal ──
   await page.evaluate(() => { const t = window.__TAURI_INTERNALS__, i = t.invoke; window.__refuse = true; t.invoke = (c, a) => (c === "workspace_chat_start" && window.__refuse ? Promise.reject("5 agents are running and the limit is 5") : i(c, a)); });
@@ -297,6 +304,7 @@ async function trust(page, tag, name) {
   await row(page, "Who can see what").click();
   await page.waitForSelector("[data-testid=ws-chat-col] .chat-card");
   await page.waitForTimeout(300);
+  ok(/This is the workspace's own folder\. Worktrees made it/.test(await page.locator("[data-testid=ws-chat-trust]").innerText()), `${tag} the folder-trust question says what the folder is`);
   const tall = await page.evaluate(() => document.querySelector(".chat-card").getBoundingClientRect().height > document.querySelector(".chat-scroll").getBoundingClientRect().height);
   ok(tall, `${tag} the card is taller than the pane`);
   await page.locator(".chat-scroll").evaluate((e) => { e.scrollTop = e.scrollTop - 60; });
