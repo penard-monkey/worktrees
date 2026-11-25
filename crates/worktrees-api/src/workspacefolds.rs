@@ -816,6 +816,8 @@ mod tests {
         dumb: AtomicBool,
         /// It has no server once nothing is up.
         no_server: AtomicBool,
+        /// Called as a fold is admitted, before it reserves anything: once.
+        admitted: Mutex<Option<Box<dyn FnOnce() + Send>>>,
         /// Where the engine dies.
         fatal: Mutex<Option<&'static str>>,
     }
@@ -844,6 +846,10 @@ mod tests {
             *self.fatal.lock().unwrap() == Some(at)
         }
         fn admit(&self, _: &Path, _: &Path, _: &Workspace, _: &str) -> Result<(), String> {
+            let hook = self.admitted.lock().unwrap().take();
+            if let Some(f) = hook {
+                f();
+            }
             self.refuse.lock().unwrap().0.clone().map_or(Ok(()), Err)
         }
         fn close(&self, conv: &str) -> Result<bool, String> {
@@ -1419,6 +1425,57 @@ mod tests {
         }
         assert_eq!(n.iter().filter(|n| n.event == "landed").count(), 1, "{n:?}");
         assert_eq!(d.log().iter().filter(|c| c.subject.starts_with("fold:")).count(), 1);
+    }
+
+    /// The reservation is asked for and made under one lock: another engine's,
+    /// made between this one's first look and its own, is seen.
+    #[test]
+    fn a_reservation_made_meanwhile_is_waited_for_and_seen() {
+        use std::sync::mpsc;
+        let d = Desk::new("race");
+        let (a, b) = (d.chat("A", true), d.chat("B", true));
+        let root = d.ctx.workspaces_dir();
+        let (admitted, at_admit) = mpsc::channel();
+        let (go, gone) = mpsc::channel::<()>();
+        *d.io.admitted.lock().unwrap() = Some(Box::new(move || {
+            admitted.send(()).unwrap();
+            let _ = gone.recv();
+        }));
+        std::thread::scope(|s| {
+            let (done, said) = mpsc::channel();
+            let (ctx, ws, chat) = (&d.ctx, d.ws.clone(), b.clone());
+            s.spawn(move || done.send(workspace_chat_fold(ctx, ws, chat).map(|_| ())));
+            at_admit.recv().unwrap();
+            let held = wslock::take(root, &d.ws).unwrap();
+            go.send(()).unwrap();
+            // It waits for the lock: without it this answers at once.
+            assert!(said.recv_timeout(Duration::from_millis(400)).is_err(), "it did not wait for the lock");
+            chats::update_at(root, &d.ws, &a, |c| {
+                c.fold = Some(Fold { state: chats::FOLDING.into(), attempt: Some(ulid::new()), ..Fold::default() })
+            })
+            .unwrap();
+            drop(held);
+            assert_eq!(said.recv().unwrap().unwrap_err(), "“A” is folding. Close this one after.");
+        });
+        assert!(d.rec(&b).fold.is_none() && d.acts().is_empty(), "nothing ended, nothing launched");
+    }
+
+    /// A landing looks again under the lock: a fold another engine has finished,
+    /// or asked again, since this one's tick read it is not landed here.
+    #[test]
+    fn a_landing_asks_again_under_the_lock() {
+        let d = Desk::new("again");
+        let a = d.chat("A", true);
+        d.fold(&a).unwrap();
+        d.note(&a, "note\n", 5);
+        let other = ulid::new();
+        let before = d.log().len();
+        assert!(land(&d.ctx, &d.ws, &a, &other, true).is_none(), "another attempt's landing");
+        let mine = d.rec(&a).fold.unwrap().attempt.unwrap();
+        chats::update_at(d.ctx.workspaces_dir(), &d.ws, &a, |c| c.fold.as_mut().unwrap().state = chats::FOLDED.into()).unwrap();
+        assert!(land(&d.ctx, &d.ws, &a, &mine, true).is_none(), "landed twice");
+        assert_eq!(d.log().len(), before);
+        assert!(d.up(&a), "and nothing is ended");
     }
 
     /// A record that cannot be read says nothing: at a start its workspace is
