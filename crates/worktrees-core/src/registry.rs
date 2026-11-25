@@ -171,6 +171,12 @@ pub fn read_lenient_at(p: &Path) -> Registry {
     fs::read(p).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
+/// For a reader that must not take an unreadable registry for an empty one: a
+/// rule made from it would be missing, not loose.
+pub fn read_strict_at(p: &Path) -> Result<Registry, String> {
+    read_strict(p)
+}
+
 fn read_strict(p: &Path) -> Result<Registry, String> {
     match fs::read(p) {
         // An EMPTY file is an empty registry, as `read_lenient` already reads

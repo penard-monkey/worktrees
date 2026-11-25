@@ -214,6 +214,9 @@ pub struct Chat {
     /// good. Named here, never by the agent.
     #[serde(default)]
     pub note: String,
+    /// What it was last launched with; none from a build before this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<Access>,
     /// Its last fold, or none asked yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fold: Option<Fold>,
@@ -428,6 +431,7 @@ pub fn prepare_at(root: &Path, ws: &str, context: impl FnOnce(&str) -> String) -
             title: next_title(rec),
             last_activity: started.clone(),
             started,
+            access: None,
             fold: None,
             extra: Map::new(),
         };
@@ -510,6 +514,7 @@ pub const WHY_PRIVATE_PATH: &str = "private, by instruction only: its path has a
 pub const WHY_PRIVATE_GONE: &str = "private, by instruction only: its folder is not there";
 pub const WHY_WITHIN: &str = "it is inside a private project of this workspace";
 pub const WHY_GONE: &str = "its folder is not there";
+pub const WHY_UNREAD: &str = "the list of projects could not be read";
 pub const WHY_PATH: &str = "its path has a character a permission rule cannot hold";
 pub const WHY_INSIDE: &str = "a private project inside it has a path a permission rule cannot hold";
 
@@ -551,6 +556,12 @@ fn denied_private(w: &crate::workspaces::Workspace, reg: &crate::registry::Regis
     w.projects.iter().filter(|p| reg.by_root(&p.root).is_some_and(|e| e.private)).filter_map(|p| rule_root(&p.root).ok()).collect()
 }
 
+/// [`project_reads`] where the registry could not be read: each is named, and
+/// none is read.
+pub fn project_reads_unknown(w: &crate::workspaces::Workspace) -> Vec<ProjectRead> {
+    w.projects.iter().map(|p| ProjectRead { root: p.root.clone(), name: None, registered: false, private: false, reads: Reads::No, why: Some(WHY_UNREAD) }).collect()
+}
+
 /// What a chat of `w` reads: each project, in the workspace's order. The
 /// registry decides which, and [`settings`] says it to Claude. A project
 /// inside a private one of `w` is not read: that one's deny beats any allow.
@@ -587,6 +598,134 @@ pub fn project_reads(w: &crate::workspaces::Workspace, reg: &crate::registry::Re
             }
         })
         .collect()
+}
+
+/// What stops a chat and what does not, as the app says it beside what it
+/// reads. Fixed text: it is the same for every chat.
+pub const LIMITS: &str = "The rules are set when the chat starts. They stop Claude's file tools, not every program it runs.";
+
+/// The registry a chat's rules are made from, or why none is started. One that
+/// cannot be read is not an empty one, and neither is one that is missing or
+/// blank under a workspace that has projects: with no registry there is no
+/// private project to deny, and the chat would be launched with no rules.
+pub fn policy(w: &crate::workspaces::Workspace) -> Result<crate::registry::Registry, String> {
+    policy_at(&crate::registry::path(), w)
+}
+
+fn policy_at(p: &Path, w: &crate::workspaces::Workspace) -> Result<crate::registry::Registry, String> {
+    let refuse = |why: String| Err(format!("the list of projects {why}, and what a chat may read comes from it: no chat is started"));
+    match fs::read(p) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound && !w.projects.is_empty() => return refuse(format!("is missing ({})", p.display())),
+        Ok(b) if b.iter().all(u8::is_ascii_whitespace) && !w.projects.is_empty() => return refuse(format!("is empty ({})", p.display())),
+        // serde reads `[]` and `{}` as a registry with nothing in it.
+        Ok(b) if !b.iter().all(u8::is_ascii_whitespace) && !serde_json::from_slice::<Value>(&b).is_ok_and(|v| v["projects"].is_array()) => {
+            return refuse(format!("could not be read ({} holds no list)", p.display()));
+        }
+        _ => {}
+    }
+    crate::registry::read_strict_at(p).or_else(|e| refuse(format!("could not be read ({e})")))
+}
+
+/// What a chat was launched with, as its record keeps it: the rules are its
+/// launch's for as long as it lives, whatever the registry or the workspace
+/// says since.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct Access {
+    /// When, `YYYY-MM-DDTHH:MM:SSZ`.
+    pub at: String,
+    /// A digest of the rules, whole: equal text, equal digest.
+    pub digest: String,
+    #[serde(default)]
+    pub projects: Vec<AccessProject>,
+    #[serde(default)]
+    pub documents: Vec<AccessDoc>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AccessProject {
+    pub root: String,
+    pub name: String,
+    pub read: bool,
+    /// Why it was not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AccessDoc {
+    pub id: String,
+    pub title: String,
+    pub path: String,
+}
+
+/// One thing a launch now would do differently.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct AccessChange {
+    /// `project`, `document`, or `rules` for anything else in them.
+    pub kind: &'static str,
+    pub name: String,
+    pub path: String,
+    /// A project: `private`, `removed` (from the workspace), `unregistered`,
+    /// `unreadable`, `readable`, `added`. A document: `unlinked`, `gone`,
+    /// `moved`, `linked`. `other` for the rules.
+    pub change: &'static str,
+}
+
+/// What a launch of a chat of `w` would get now.
+pub fn access(w: &crate::workspaces::Workspace, src: &Sources) -> Result<Access, String> {
+    Ok(Access {
+        at: desk::now_iso(),
+        digest: crate::guidance::text_hash(&settings(w, src)?),
+        projects: project_reads(w, src.reg)
+            .into_iter()
+            .map(|p| AccessProject { name: p.name.clone().unwrap_or_else(|| last_part(&p.root)), read: p.reads == Reads::Yes, why: p.why.map(String::from), root: p.root })
+            .collect(),
+        documents: doc_reads(w, src)
+            .into_iter()
+            .filter(|d| d.reads == Reads::Yes)
+            .filter_map(|d| Some(AccessDoc { id: d.live?, title: d.title.unwrap_or_default(), path: d.path? }))
+            .collect(),
+    })
+}
+
+fn last_part(p: &str) -> String {
+    p.rsplit('/').next().unwrap_or(p).to_string()
+}
+
+/// What changed between what a chat was launched with and what it would get
+/// now. Nothing in it, and the same rules, is `current`.
+pub fn access_changes(then: &Access, now: &Access) -> Vec<AccessChange> {
+    let mut out = Vec::new();
+    let project = |p: &AccessProject, change| AccessChange { kind: "project", name: p.name.clone(), path: p.root.clone(), change };
+    for p in &then.projects {
+        match now.projects.iter().find(|n| n.root == p.root) {
+            None => out.push(project(p, "removed")),
+            Some(n) if n.read == p.read && n.why == p.why => {}
+            Some(n) if n.read => out.push(project(n, "readable")),
+            Some(n) => out.push(project(
+                p,
+                match n.why.as_deref() {
+                    Some(w) if w.starts_with(WHY_PRIVATE) => "private",
+                    Some(WHY_UNREGISTERED) => "unregistered",
+                    _ => "unreadable",
+                },
+            )),
+        }
+    }
+    out.extend(now.projects.iter().filter(|n| !then.projects.iter().any(|p| p.root == n.root)).map(|n| project(n, "added")));
+    let doc = |d: &AccessDoc, change| AccessChange { kind: "document", name: d.title.clone(), path: d.path.clone(), change };
+    for d in &then.documents {
+        match now.documents.iter().find(|n| n.id == d.id) {
+            None => out.push(doc(d, if Path::new(&d.path).exists() { "unlinked" } else { "gone" })),
+            Some(n) if n.path != d.path => out.push(doc(n, "moved")),
+            Some(_) => {}
+        }
+    }
+    out.extend(now.documents.iter().filter(|n| !then.documents.iter().any(|d| d.id == n.id)).map(|n| doc(n, "linked")));
+    if out.is_empty() && then.digest != now.digest {
+        out.push(AccessChange { kind: "rules", name: String::new(), path: String::new(), change: "other" });
+    }
+    out
 }
 
 /// What a chat's rules and lists are made from.
@@ -977,15 +1116,20 @@ fn launch<'a>(cwd: &'a Path, c: &'a Chat, session: &'a str, how: Start, opener: 
 pub fn launch_at(root: &Path, ideas: &Path, w: &crate::workspaces::Workspace, conv: &str, how: Start, resume_opener: Option<String>) -> Result<String, String> {
     check_conv(conv)?;
     let cwd = folder_at(root, &w.id)?;
-    let reg = crate::registry::read_lenient();
+    let reg = policy(w)?;
     check_root(root, &reg.roots())?;
-    let settings = settings(w, &Sources { root, ideas, reg: &reg })?;
+    let src = Sources { root, ideas, reg: &reg };
+    let settings = settings(w, &src)?;
+    let given = access(w, &src)?;
     let c = find_at(root, &w.id, conv)?;
     let session = session_name(&c.id);
     let opener = match how {
         Start::Fresh => Some(opener(&c.id)),
         Start::Resume => resume_opener,
     };
+    // Recorded before it runs: a chat is never live under rules its record
+    // does not name.
+    update_at(root, &w.id, conv, |c| c.access = Some(given))?;
     launch(&cwd, &c, &session, how, opener, settings).run()?;
     Ok(session)
 }
@@ -995,7 +1139,7 @@ pub fn launch_at(root: &Path, ideas: &Path, w: &crate::workspaces::Workspace, co
 pub fn may_relaunch_at(root: &Path, ideas: &Path, w: &crate::workspaces::Workspace, conv: &str) -> Result<(), String> {
     check_conv(conv)?;
     let cwd = folder_at(root, &w.id)?;
-    let reg = crate::registry::read_lenient();
+    let reg = policy(w)?;
     check_root(root, &reg.roots())?;
     let c = find_at(root, &w.id, conv)?;
     let session = session_name(&c.id);
@@ -1008,7 +1152,7 @@ pub fn may_relaunch_at(root: &Path, ideas: &Path, w: &crate::workspaces::Workspa
 pub fn start_at(root: &Path, ideas: &Path, w: &crate::workspaces::Workspace, context: impl FnOnce(&str) -> String) -> Result<(Chat, String), String> {
     let ws = w.id.as_str();
     let dir = folder_at(root, ws)?;
-    check_root(root, &crate::registry::read_lenient().roots())?;
+    check_root(root, &policy(w)?.roots())?;
     let had_folder = fs::symlink_metadata(&dir).is_ok();
     let c = prepare_at(root, ws, context)?;
     match launch_at(root, ideas, w, &c.id, Start::Fresh, None) {
@@ -1112,6 +1256,7 @@ mod tests {
             started: "2026-11-24T10:00:00Z".into(),
             last_activity: String::new(),
             note: String::new(),
+            access: None,
             fold: None,
             extra: Map::new(),
         }
@@ -1199,6 +1344,73 @@ mod tests {
             .unwrap()
             .contains(&format!("Edit(/{}/.engine/**)", fs::canonicalize(&root).unwrap().display())));
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A registry that cannot be read is never an empty one, and one that is
+    /// lost under a workspace with projects is not "no private projects".
+    #[test]
+    fn a_registry_that_cannot_be_read_is_no_policy() {
+        use std::os::unix::fs::PermissionsExt;
+        let top = tmp("policy");
+        let p = top.join("projects.json");
+        let (some, none) = (workspace(&[Path::new("/r/a")]), workspace(&[]));
+        assert!(policy_at(&p, &some).unwrap_err().contains("is missing"));
+        assert!(policy_at(&p, &none).is_ok(), "nobody has registered anything yet");
+        for (text, why) in [("", "is empty"), (" \n", "is empty"), ("{", "could not be read"), ("[]", "could not be read"), ("{}", "could not be read"), (r#"{"projects":{}}"#, "could not be read")] {
+            fs::write(&p, text).unwrap();
+            assert!(policy_at(&p, &some).unwrap_err().contains(why), "{text:?}");
+        }
+        fs::write(&p, "{").unwrap();
+        assert!(policy_at(&p, &none).is_err(), "broken is broken");
+        fs::write(&p, r#"{"version":1,"projects":[]}"#).unwrap();
+        assert!(policy_at(&p, &some).is_ok(), "every project taken out, on purpose");
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o000)).unwrap();
+        // Root reads through the mode.
+        if fs::read(&p).is_err() {
+            assert!(policy_at(&p, &some).is_err() && policy_at(&p, &none).is_err());
+        }
+        let _ = fs::remove_dir_all(&top);
+    }
+
+    /// Each way a launch now would differ, and nothing when it would not.
+    #[test]
+    fn what_changed_since_a_chat_was_launched_is_said_one_by_one() {
+        let pr = |root: &str, why: Option<&str>| AccessProject { root: root.into(), name: last_part(root), read: why.is_none(), why: why.map(String::from) };
+        let d = |id: &str, path: &str| AccessDoc { id: id.into(), title: id.to_lowercase(), path: path.into() };
+        let top = tmp("access");
+        let kept = top.join("kept.md");
+        fs::write(&kept, "").unwrap();
+        let kept = kept.to_string_lossy().into_owned();
+        let then = Access {
+            digest: "1".into(),
+            projects: vec![pr("/r/same", None), pr("/r/priv", None), pr("/r/out", None), pr("/r/unreg", None), pr("/r/gone", None), pr("/r/opened", Some(WHY_PRIVATE)), pr("/r/stays", Some(WHY_PRIVATE))],
+            documents: vec![d("SAME", "/i/same.md"), d("UNLINKED", &kept), d("GONE", "/i/gone.md"), d("MOVED", "/i/old.md")],
+            ..Access::default()
+        };
+        assert!(access_changes(&then, &then).is_empty());
+        let now = Access {
+            digest: "2".into(),
+            projects: vec![pr("/r/same", None), pr("/r/priv", Some(WHY_PRIVATE_PATH)), pr("/r/unreg", Some(WHY_UNREGISTERED)), pr("/r/gone", Some(WHY_GONE)), pr("/r/opened", None), pr("/r/stays", Some(WHY_PRIVATE)), pr("/r/new", None)],
+            documents: vec![d("SAME", "/i/same.md"), d("MOVED", "/i/new.md"), d("LINKED", "/i/l.md")],
+            ..Access::default()
+        };
+        let got: Vec<(&str, String, &str)> = access_changes(&then, &now).into_iter().map(|c| (c.kind, c.name, c.change)).collect();
+        let want = [
+            ("project", "priv", "private"),
+            ("project", "out", "removed"),
+            ("project", "unreg", "unregistered"),
+            ("project", "gone", "unreadable"),
+            ("project", "opened", "readable"),
+            ("project", "new", "added"),
+            ("document", "unlinked", "unlinked"),
+            ("document", "gone", "gone"),
+            ("document", "moved", "moved"),
+            ("document", "linked", "linked"),
+        ];
+        assert_eq!(got, want.map(|(k, n, c)| (k, n.to_string(), c)));
+        let rules = access_changes(&then, &Access { digest: "2".into(), ..then.clone() });
+        assert_eq!((rules.len(), rules[0].kind, rules[0].change), (1, "rules", "other"), "a private project nested in one that is read");
+        let _ = fs::remove_dir_all(&top);
     }
 
     #[test]

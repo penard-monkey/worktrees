@@ -367,6 +367,8 @@ fn begin(ctx: &Ctx, w: &Workspace, c: &Chat, live: bool) -> Result<(String, Fold
     let mut named = c.clone();
     chats::name_note(&mut named, &io.today());
     let opener = chats::write_fold_at(root, &w.id, &named)?;
+    // A relaunch is a launch: what it is told is as fresh as its rules.
+    chats::write_context_at(root, &w.id, &c.id, &chats::context_text(&crate::workspacechats::context(ctx, w, &chats::policy(w)?, &c.id)))?;
     let asked = io.now_ms();
     let fold = Fold { asked: desksessions::now_iso(), asked_ms: Some(asked), state: chats::FOLDING.into(), ..Fold::default() };
     let before = c.fold.clone();

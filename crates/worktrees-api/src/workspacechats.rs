@@ -68,6 +68,13 @@ pub struct Listed {
     /// How its fold stands now, when there is something to say: the event's
     /// entry for it (`WorkspaceSessions::fold`). `fold` is the record's.
     pub fold_now: Option<crate::watch::FoldOf>,
+    /// Whether a LIVE chat still has what a launch now would give it:
+    /// `current`, `stale` (it keeps its launch's rules until it is resumed; it
+    /// is never ended for this), or `unknown` (launched by an earlier build,
+    /// or the list of projects cannot be read). Null for an ended one.
+    pub access: Option<&'static str>,
+    /// What would be different, with `stale`.
+    pub access_changes: Vec<chats::AccessChange>,
 }
 
 /// `workspace_chats`' answer.
@@ -85,6 +92,8 @@ pub struct Chats {
     /// The workspace's plan and linked ideas, with where each is and whether a
     /// chat reads it: also what `context.md` is written from.
     pub documents: Vec<DocRead>,
+    /// What the rules stop and what they do not, to show beside these lists.
+    pub limits: &'static str,
 }
 
 fn state_of(live: bool, a: &activity::Activity) -> &'static str {
@@ -96,11 +105,23 @@ fn state_of(live: bool, a: &activity::Activity) -> &'static str {
     }
 }
 
-fn listed(ctx: &Ctx, id: &str, c: Chat, live: &std::collections::HashSet<String>) -> Result<Listed, String> {
+fn listed(ctx: &Ctx, id: &str, mut c: Chat, live: &std::collections::HashSet<String>, given: Option<&chats::Access>) -> Result<Listed, String> {
     let session = chats::session_name(&c.id);
     let up = live.contains(&session);
     let a = if up { ctx.agents.io().activity(&locus_of(ctx, id, &c)?) } else { activity::Activity::none() };
-    Ok(Listed { state: state_of(up, &a), session, note_exists: chats::note_exists(ctx.workspaces_dir(), id, &c), fold_now: ctx.folds.of(&c.id), chat: c })
+    // The snapshot is the record's; a client is told what it comes to.
+    let was = c.access.take();
+    let changes = match (up, &was, given) {
+        (true, Some(then), Some(now)) => Some(chats::access_changes(then, now)),
+        _ => None,
+    };
+    let access = match (up, &changes) {
+        (false, _) => None,
+        (true, None) => Some("unknown"),
+        (true, Some(c)) if c.is_empty() => Some("current"),
+        (true, Some(_)) => Some("stale"),
+    };
+    Ok(Listed { access, access_changes: changes.unwrap_or_default(), state: state_of(up, &a), session, note_exists: chats::note_exists(ctx.workspaces_dir(), id, &c), fold_now: ctx.folds.of(&c.id), chat: c })
 }
 
 /// `workspace_chats`: the workspace's chats, newest first, each with its
@@ -109,12 +130,17 @@ pub fn workspace_chats(ctx: &Ctx, id: String) -> Result<Chats, String> {
     crate::workspacefolds::ensure(ctx);
     let w = workspace(ctx, &id)?;
     let root = ctx.workspaces_dir();
-    let reg = registry::read_lenient();
+    let reg = chats::policy(&w);
+    let none = registry::Registry::default();
+    let src = chats::Sources { root, ideas: ctx.ideas_dir(), reg: reg.as_ref().unwrap_or(&none) };
+    // What a launch would get now: what each live chat is compared with.
+    let given = reg.as_ref().ok().and_then(|_| chats::access(&w, &src).ok());
     let live: std::collections::HashSet<String> = tmux::session_names().into_iter().collect();
     Ok(Chats {
-        chats: chats::list_at(root, &id)?.into_iter().map(|c| listed(ctx, &id, c, &live)).collect::<Result<_, _>>()?,
-        projects: chats::project_reads(&w, &reg),
-        documents: chats::doc_reads(&w, &chats::Sources { root, ideas: ctx.ideas_dir(), reg: &reg }),
+        chats: chats::list_at(root, &id)?.into_iter().map(|c| listed(ctx, &id, c, &live, given.as_ref())).collect::<Result<_, _>>()?,
+        projects: if reg.is_ok() { chats::project_reads(&w, src.reg) } else { chats::project_reads_unknown(&w) },
+        documents: chats::doc_reads(&w, &src),
+        limits: chats::LIMITS,
         folder: wsfolder::folder_at(root, &id)?.to_string_lossy().into_owned(),
         name: w.name,
         id,
@@ -163,11 +189,10 @@ fn places(root: &str, panes: Option<&tmux::PaneList>, probes: &[agent::ClaudePro
 
 /// The workspace as its chat `conv` is told it (`context.md`). A project that
 /// is not read is named, and nothing more is said of it.
-fn context(ctx: &Ctx, w: &Workspace, conv: &str) -> Context {
+pub(crate) fn context(ctx: &Ctx, w: &Workspace, reg: &registry::Registry, conv: &str) -> Context {
     let panes = tmux::PaneList::fetch();
     let probes = agent::live_probes_in(panes.as_ref());
-    let reg = registry::read_lenient();
-    let projects = chats::project_reads(w, &reg)
+    let projects = chats::project_reads(w, reg)
         .into_iter()
         .map(|read| {
             let places = if read.reads == Reads::No { Ok(Vec::new()) } else { places(&read.root, panes.as_ref(), &probes) };
@@ -178,7 +203,7 @@ fn context(ctx: &Ctx, w: &Workspace, conv: &str) -> Context {
         workspace: w.name.clone(),
         written: desksessions::now_iso(),
         projects,
-        docs: chats::doc_reads(w, &chats::Sources { root: ctx.workspaces_dir(), ideas: ctx.ideas_dir(), reg: &reg }),
+        docs: chats::doc_reads(w, &chats::Sources { root: ctx.workspaces_dir(), ideas: ctx.ideas_dir(), reg }),
         notes: chats::earlier_notes(ctx.workspaces_dir(), &w.id, Some(conv)),
     }
 }
@@ -193,9 +218,11 @@ pub fn workspace_chat_start(ctx: &Ctx, id: String) -> Result<Value, String> {
     let lock = life_lock(ctx, &id);
     let _life = lock.lock().unwrap_or_else(|e| e.into_inner());
     let w = workspace(ctx, &id)?;
+    // Before anything is made: a chat is not started without its rules.
+    let reg = chats::policy(&w)?;
     crate::workspacefolds::ensure(ctx);
     crate::memory::before_launch(ctx, &w)?;
-    let (c, session) = chats::start_at(ctx.workspaces_dir(), ctx.ideas_dir(), &w, |conv| chats::context_text(&context(ctx, &w, conv)))?;
+    let (c, session) = chats::start_at(ctx.workspaces_dir(), ctx.ideas_dir(), &w, |conv| chats::context_text(&context(ctx, &w, &reg, conv)))?;
     Ok(json!({ "id": id, "chat": c, "session": session }))
 }
 
@@ -208,6 +235,7 @@ pub fn workspace_chat_resume(ctx: &Ctx, id: String, conv: String) -> Result<Valu
     let w = workspace(ctx, &id)?;
     let root = ctx.workspaces_dir();
     chats::find_at(root, &id, &conv)?;
+    let reg = chats::policy(&w)?;
     crate::workspacefolds::ensure(ctx);
     if ctx.folds.is_folding(&conv) {
         return Err(crate::workspacefolds::ERR_ALREADY.into());
@@ -216,7 +244,7 @@ pub fn workspace_chat_resume(ctx: &Ctx, id: String, conv: String) -> Result<Valu
         return Err(format!("chat {conv} is already running (tmux session {})", chats::session_name(&conv)));
     }
     crate::memory::before_launch(ctx, &w)?;
-    chats::write_context_at(root, &id, &conv, &chats::context_text(&context(ctx, &w, &conv)))?;
+    chats::write_context_at(root, &id, &conv, &chats::context_text(&context(ctx, &w, &reg, &conv)))?;
     let session = chats::launch_at(root, ctx.ideas_dir(), &w, &conv, Start::Resume, None)?;
     touched(ctx, &id, &conv);
     Ok(json!({ "id": id, "conv": conv, "session": session }))

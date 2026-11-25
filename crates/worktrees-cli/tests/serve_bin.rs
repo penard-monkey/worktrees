@@ -768,6 +768,100 @@ fn fake_chat_claude(dir: &Path) {
     assert!(c.wait().unwrap().success());
 }
 
+/// What a chat may read is the registry's to say. One that cannot be read
+/// launches nothing, fresh, resumed or folding, rather than a chat with no
+/// rules; and a chat that is live under rules a launch would no longer get
+/// says so, with what changed.
+#[test]
+fn a_chat_is_not_launched_on_a_registry_that_cannot_be_read_and_stale_access_is_said() {
+    if !PrivateTmux::available() {
+        eprintln!("skipped: no tmux on PATH");
+        return;
+    }
+    let mut sb = Sandbox::new("wsaccess");
+    let tmux = PrivateTmux::new("wsaccess");
+    let fake = sb.root.join("fake");
+    fake_chat_claude(&fake);
+    let folder = sb.root.join("wsdir");
+    let ideas = sb.root.join("ideas");
+    let idea = worktrees_core::ideas::create_at(&ideas, "Jellyfin sharing").unwrap().idea;
+    let (a, b) = (sb.project("alpha"), sb.project("beta"));
+    let reg = sb.root.join("xdg/worktrees/projects.json");
+    let path = format!("{}:{}", fake.display(), std::env::var("PATH").unwrap_or_default());
+    let sf = sb.launch_env(
+        &["--allow-origin", "http://localhost:1420"],
+        &[
+            ("TMUX", &tmux.env()),
+            ("WORKTREES_WORKSPACES_DIR", folder.to_str().unwrap()),
+            ("WORKTREES_IDEAS_DIR", ideas.to_str().unwrap()),
+            ("PATH", &path),
+            ("WORKTREES_USAGE_PROBE", "off"),
+            ("DISABLE_AUTOUPDATER", "1"),
+        ],
+    );
+    let mut ws = connect(&sf, "http://localhost:1420");
+    let mut n = 0;
+    let mut call = |cmd: &str, args: Value| -> Result<Value, String> {
+        n += 1;
+        let r = rpc(&mut ws, n, cmd, args);
+        match r.get("err") {
+            Some(e) => Err(e.as_str().map(str::to_string).unwrap_or_else(|| e.to_string())),
+            None => Ok(r["ok"].clone()),
+        }
+    };
+    let id = call("workspace_create", json!({ "name": "Home" })).unwrap()["workspaces"][0]["id"].as_str().unwrap().to_string();
+    call("workspace_set_projects", json!({ "id": id, "roots": [a, b] })).unwrap();
+    call("workspace_link_idea", json!({ "id": id, "idea": idea.id })).unwrap();
+    let conv = call("workspace_chat_start", json!({ "id": id })).unwrap()["chat"]["id"].as_str().unwrap().to_string();
+    let l = call("workspace_chats", json!({ "id": id })).unwrap();
+    assert_eq!((&l["chats"][0]["access"], &l["chats"][0]["access_changes"]), (&json!("current"), &json!([])), "{l}");
+    assert!(l["limits"].as_str().is_some_and(|s| s.contains("file tools") && s.contains("not every program")), "{l}");
+
+    // Private, taken out, and a document unlinked: said of the LIVE chat, one
+    // by one, and it is not ended.
+    call("set_project_private", json!({ "root": b, "private": true })).unwrap();
+    call("workspace_unlink_idea", json!({ "id": id, "idea": idea.id })).unwrap();
+    let l = call("workspace_chats", json!({ "id": id })).unwrap();
+    assert_eq!((l["chats"][0]["access"].as_str(), l["chats"][0]["state"].as_str()), (Some("stale"), Some("running")), "{l}");
+    let what: Vec<(&str, &str, &str)> = l["chats"][0]["access_changes"].as_array().unwrap().iter().map(|c| (c["kind"].as_str().unwrap(), c["name"].as_str().unwrap(), c["change"].as_str().unwrap())).collect();
+    assert_eq!(what, [("project", "beta", "private"), ("document", "Jellyfin sharing", "unlinked")]);
+    // A relaunch takes the rules of now.
+    call("workspace_chat_close", json!({ "id": id, "conv": conv })).unwrap();
+    let l = call("workspace_chats", json!({ "id": id })).unwrap();
+    assert_eq!(l["chats"][0]["access"], Value::Null, "an ended chat has none: {l}");
+    call("workspace_chat_resume", json!({ "id": id, "conv": conv })).unwrap();
+    assert_eq!(call("workspace_chats", json!({ "id": id })).unwrap()["chats"][0]["access"], json!("current"));
+    call("workspace_set_projects", json!({ "id": id, "roots": [b] })).unwrap();
+    let l = call("workspace_chats", json!({ "id": id })).unwrap();
+    assert_eq!(l["chats"][0]["access_changes"], json!([{ "kind": "project", "name": "alpha", "path": a, "change": "removed" }]), "{l}");
+    call("workspace_chat_close", json!({ "id": id, "conv": conv })).unwrap();
+
+    // The registry lost, three ways: nothing is launched, and it is said.
+    let good = std::fs::read(&reg).unwrap();
+    for (how, text) in [("broken", Some(&b"{ not json"[..])), ("empty", Some(&b""[..])), ("gone", None)] {
+        match text {
+            Some(t) => std::fs::write(&reg, t).unwrap(),
+            None => std::fs::remove_file(&reg).unwrap(),
+        }
+        for (cmd, args) in [
+            ("workspace_chat_start", json!({ "id": id })),
+            ("workspace_chat_resume", json!({ "id": id, "conv": conv })),
+            ("workspace_chat_fold", json!({ "id": id, "conv": conv })),
+        ] {
+            let e = call(cmd, args).err().unwrap_or_else(|| panic!("{how}: {cmd} launched a chat with no rules"));
+            assert!(e.contains("list of projects"), "{how}: {cmd}: {e}");
+        }
+        let l = call("workspace_chats", json!({ "id": id })).unwrap();
+        assert_eq!(l["chats"].as_array().unwrap().len(), 1, "{how}: a refused start left its chat: {l}");
+        assert_eq!((l["projects"][0]["reads"].as_str(), l["projects"][0]["why"].as_str()), (Some("no"), Some("the list of projects could not be read")), "{how}: {l}");
+        let live = tmux.try_run(&["list-sessions", "-F", "#{session_name}"]).map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+        assert!(!live.contains("~ws~"), "{how}: {live}");
+        std::fs::write(&reg, &good).unwrap();
+    }
+    call("workspace_chat_resume", json!({ "id": id, "conv": conv })).unwrap();
+    assert_eq!(sb.terminate().code(), Some(0));
+}
+
 /// A workspace chat's whole life through the binary, with a fake Claude and a
 /// tmux server of its own: the launch (folder, argv, files), the list and the
 /// event, the terminal, close and resume, a refused start that leaves nothing,
