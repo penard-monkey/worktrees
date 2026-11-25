@@ -77,6 +77,10 @@ export function DocumentPane(props: {
   float?: { title: string; run(): void };
   /** In the menu, after History (when it is folded there) and Rename. */
   acts?: readonly DocAct[];
+  /** The acts are the header's own buttons, on as many rows as they take, and
+   *  fold into the menu only under `NARROW`: the Ideas window, which stays as it
+   *  is (the owner, 2026-11-24). `acts[].first`: before History. */
+  buttons?: boolean;
   /** What History shows, when the source's own is not it: a source whose
    *  history is its folder's. Absent: the document's versions. */
   history?: (close: () => void) => ReactNode;
@@ -101,10 +105,16 @@ export function DocumentPane(props: {
   const noun = nounOf(open);
   const armed = arm.armed as string | null;
   const hasHistory = !!props.history || !!source.versions;
+  const buttons = !!props.buttons && tier > 0;
+  const renameAct: DocAct[] = source.rename ? [{ testId: "ideas-rename", keeps: true, label: buttons ? "Rename" : "Rename…", disabled: doc.busy, run: () => doc.setRenaming(open.title) }] : [];
+  const inlineActs = (first: boolean) => (buttons ? [...(first ? [] : renameAct), ...(props.acts ?? []).filter((a) => !!a.first === first)] : []).map((a) => (
+    <button key={a.testId} className={`ix-btn${a.armed ? " ix-btn-armed" : ""}`} data-testid={a.testId} title={a.title} disabled={a.disabled}
+      onMouseDown={a.keeps ? (e) => e.preventDefault() : undefined} onClick={a.run}>{a.label}</button>
+  ));
   const toggleHistory = () => doc.setHistory((h) => !h);
-  const acts: DocAct[] = [
+  const acts: DocAct[] = buttons ? [] : [
     ...(hasHistory && tier < 2 ? [{ testId: "doc-menu-history", label: doc.history ? "Hide History" : "History", run: toggleHistory }] : []),
-    ...(source.rename ? [{ testId: "ideas-rename", label: "Rename…", disabled: doc.busy, run: () => doc.setRenaming(open.title) }] : []),
+    ...renameAct,
     ...(props.acts ?? []),
   ];
   const openMenu = (e: React.MouseEvent<HTMLButtonElement>) => {
@@ -114,7 +124,7 @@ export function DocumentPane(props: {
   const state = saveWords(save);
   return (
     <>
-      <header className="ix-head" ref={setHead} data-tier={tier}>
+      <header className={"ix-head" + (buttons ? " ix-head-buttons" : "")} ref={setHead} data-tier={tier}>
         {props.lead}
         {doc.renaming !== null ? (
           <input
@@ -138,10 +148,12 @@ export function DocumentPane(props: {
             <button className={mode === "edit" ? "on" : ""} data-testid="ideas-mode-edit" aria-pressed={mode === "edit"} onClick={() => doc.switchMode("edit")}>Edit</button>
             <button className={mode === "read" ? "on" : ""} data-testid="ideas-mode-read" aria-pressed={mode === "read"} onClick={() => doc.switchMode("read")}>Read</button>
           </span>
-          {props.tool?.(tier < 2)}
-          {hasHistory && tier === 2 && (
+          {props.tool?.(tier < 2 && !buttons)}
+          {inlineActs(true)}
+          {hasHistory && (tier === 2 || buttons) && (
             <button className={`ix-btn${doc.history ? " on" : ""}`} data-testid="ideas-versions-toggle" aria-pressed={doc.history} onClick={toggleHistory}>History</button>
           )}
+          {inlineActs(false)}
           {props.float && (
             <button className="ix-btn ix-btn-icon" data-testid="main-doc-float" title={props.float.title} aria-label={props.float.title} onClick={props.float.run}>
               <Icons.ExternalLink size={13} />
