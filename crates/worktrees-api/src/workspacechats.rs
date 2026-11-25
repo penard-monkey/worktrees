@@ -265,10 +265,11 @@ pub fn workspace_chat_rename(ctx: &Ctx, id: String, conv: String, title: String)
 /// does not read cannot leave one running. The caller holds [`life_lock`].
 pub fn close_all(ctx: &Ctx, id: &str) -> Result<(), String> {
     let root = ctx.workspaces_dir();
+    let of = chats::workspaces_of_convs(root);
     let mut convs: Vec<String> = tmux::session_names()
         .iter()
         .filter_map(|s| chats::conv_of_session(s).map(str::to_string))
-        .filter(|c| chats::workspace_of_conv(root, c).as_deref() == Some(id))
+        .filter(|c| of.get(c).is_some_and(|w| w == id))
         .collect();
     crate::workspacefolds::ensure(ctx);
     let recorded = chats::list_at(root, id).unwrap_or_default();
@@ -530,7 +531,7 @@ mod tests {
         mode(0o755);
         // Root (a container) writes through the mode, so there it succeeds.
         if r.is_err() {
-            assert!(dir.join(&id).join("chats.json").exists(), "the folder is back");
+            assert!(dir.join(&id).join("chats").exists() && dir.join(".engine").join(&id).join("chats.json").exists(), "both halves are back");
             assert_eq!(store::read_at(&file).unwrap().workspaces.len(), 1);
             let r = crate::workspaces::workspace_remove(&ctx, id.clone()).unwrap();
             assert_eq!(r.moved_to.as_deref(), dir.join(".removed").join(&id).to_str());

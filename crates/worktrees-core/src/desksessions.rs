@@ -69,9 +69,9 @@ pub struct Desk {
     pub dirs: Vec<PathBuf>,
     /// The record's file name.
     pub file: &'static str,
-    /// The folder, under the record's, that holds the conversations' own
-    /// folders (`""`: the record's folder itself).
-    pub convs: &'static str,
+    /// The folders down to the conversations' own, outermost first; the last
+    /// holds them. Empty: the record's folder does. Real directories too.
+    pub convs: Vec<PathBuf>,
     /// Whose conversations these are, for a refusal: `the idea <id>`.
     pub owner: String,
     /// What one is called: `conversation`, `chat`.
@@ -98,7 +98,7 @@ impl Desk {
 
     /// Conversation `conv`'s own folder. The caller checked the id.
     pub fn conv_dir(&self, conv: &str) -> PathBuf {
-        if self.convs.is_empty() { self.dir().join(conv) } else { self.dir().join(self.convs).join(conv) }
+        self.convs.last().map_or(self.dir(), PathBuf::as_path).join(conv)
     }
 
     /// Make the folders down to the record, refusing a link in any of them.
@@ -115,9 +115,8 @@ impl Desk {
         check_conv(self.noun, conv)?;
         self.make_dirs()?;
         let dir = self.conv_dir(conv);
-        if !self.convs.is_empty() {
-            let parent = self.dir().join(self.convs);
-            crate::fsx::make_dir(&parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        for d in &self.convs {
+            crate::fsx::make_dir(d).map_err(|e| format!("{}: {e}", d.display()))?;
         }
         crate::fsx::make_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         Ok(dir)
@@ -180,8 +179,7 @@ impl Desk {
         Ok(out)
     }
 
-    /// The lock file, held until it is dropped. Never through a link: the
-    /// record's folder may be a Claude's working directory.
+    /// The lock file, held until it is dropped. Never through a link.
     fn flock(&self, name: &str) -> Result<fs::File, String> {
         use std::os::unix::fs::OpenOptionsExt;
         self.make_dirs()?;

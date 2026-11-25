@@ -882,7 +882,7 @@ fn a_workspace_chat_from_start_to_the_workspaces_removal() {
     assert_eq!(std::fs::read_to_string(fake.join("index")).unwrap().lines().next(), Some("# Memory: Home"), "the memory is there when Claude starts");
     assert_eq!(&got[1..5], ["--name", &session, "--session-id", sid]);
     assert_eq!(got.last().unwrap(), &format!("Read chats/{conv}/start.md and begin."));
-    let rules = format!(r#"{{"autoMemoryEnabled":false,"permissions":{{"allow":["Read(/{a}/**)","Read(/{})"],"deny":["Edit(/{a}/**)","Edit(/{}/**)","Read(/{private}/**)"]}}}}"#, doc.display(), ideas.display());
+    let rules = format!(r#"{{"autoMemoryEnabled":false,"permissions":{{"allow":["Read(/{a}/**)","Read(/{})"],"deny":["Edit(/{a}/**)","Edit(/{}/**)","Edit(/{}/.engine/**)","Read(/{private}/**)"]}}}}"#, doc.display(), ideas.display(), std::fs::canonicalize(&folder).unwrap().display());
     assert!(got.windows(2).any(|w| w == ["--settings", rules.as_str()]), "{got:?}");
     assert!(!got.iter().any(|w| w.starts_with("--add-dir")), "{got:?}");
     let own = folder.join(&id).join("chats").join(&conv);
