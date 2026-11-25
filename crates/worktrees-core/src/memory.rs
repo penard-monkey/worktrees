@@ -1355,6 +1355,8 @@ mod tests {
         assert_eq!(told, Some(s.log()[1].at), "the commit before it");
         assert_eq!((c.subject.as_str(), c.kind, c.live.clone()), ("Edited: topics/t.md", ChangeKind::Edit, vec![a, b]));
         assert_eq!(s.log()[0].live, c.live, "as History reads it");
+        let raw = Repo { mem: s.mem(), off: Vec::new() }.text(&["log", "-1", "--format=%B"]).unwrap();
+        assert!(!raw.contains("forged"), "what is not an id is not written either: {raw}");
         // Nobody live is no body; and nothing else carries one.
         s.put("topics/t.md", "two\n");
         assert!(commit_quiet_at(&s.root, &s.id, |_| vec![]).unwrap().unwrap().live.is_empty());
