@@ -1,4 +1,7 @@
-// The document pane's small surfaces: the `[[` picker and the Versions list.
+// The document pane's small surfaces: the `[[` picker, the header's menu and an
+// idea's or a plan's History.
+import { useEffect, useRef } from "react";
+import { useEscape } from "../useEscape";
 import { versionWhen, type Row } from "./ideasrelate";
 import type { Version } from "./source";
 
@@ -24,12 +27,48 @@ export function LinkPicker<T extends Row>(props: { x: number; y: number; rows: T
   );
 }
 
-/** The open idea's history, newest first, each with Restore (armed). */
+/** One of the header's acts, in its menu. */
+export type DocAct = {
+  testId: string;
+  label: string;
+  title?: string;
+  disabled?: boolean;
+  /** The first press of two. */
+  armed?: boolean;
+  /** The menu stays up after it (an act that asks first). */
+  stays?: boolean;
+  run(): void;
+};
+
+/** The header's menu. A press in it keeps the editor's focus and selection,
+ *  which some of the acts are about (Split…). `x` is the menu's RIGHT edge. */
+export function DocMenu(props: { x: number; y: number; byKey: boolean; acts: readonly DocAct[]; close(): void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEscape(props.close);
+  // Opened with a key: the first act takes the focus.
+  useEffect(() => {
+    if (props.byKey) ref.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+  }, [props.byKey]);
+  return (
+    <>
+      <div className="ix-catch" onPointerDown={props.close} onContextMenu={(e) => { e.preventDefault(); props.close(); }} />
+      <div ref={ref} className="ix-pop ix-menu" role="menu" data-testid="doc-menu" style={place(props.x - 220, props.y, 220, 40 + props.acts.length * 28)}
+        onMouseDown={(e) => e.preventDefault()}>
+        {props.acts.map((a) => (
+          <button key={a.testId} className={`ix-pop-item${a.armed ? " ix-btn-armed" : ""}`} role="menuitem" data-testid={a.testId} title={a.title} disabled={a.disabled}
+            onClick={() => { if (!a.stays) props.close(); a.run(); }}>{a.label}</button>
+        ))}
+      </div>
+    </>
+  );
+}
+
+/** The open document's history, newest first, each with Restore (armed). */
 export function VersionsPanel(props: { versions: Version[] | null; armed: string | null; restore(v: Version): void; close(): void }) {
   return (
-    <section className="ix-versions" data-testid="ideas-versions" aria-label="Versions">
+    <section className="ix-versions" data-testid="ideas-versions" aria-label="History">
       <div className="ix-versions-head">
-        <span>Versions</span>
+        <span>History</span>
         <button className="ix-btn ix-btn-quiet ix-btn-small" onClick={props.close}>Close</button>
       </div>
       {props.versions === null ? <p className="ix-quiet">Reading…</p> : props.versions.length === 0 ? (
@@ -42,7 +81,7 @@ export function VersionsPanel(props: { versions: Version[] | null; armed: string
               <span className="ix-version-title">{v.title ?? "(no title)"}</span>
               <span className="ix-version-size">{v.size === undefined ? "" : v.size < 1024 ? `${v.size} B` : `${(v.size / 1024).toFixed(1)} KB`}</span>
               <button className={`ix-btn ix-btn-small${props.armed === v.version ? " ix-btn-armed" : ""}`} data-testid="ideas-version-restore"
-                title="Puts this version back. The current text is kept in Versions first." onClick={() => props.restore(v)}>
+                title="Puts this version back. The current text is kept in History first." onClick={() => props.restore(v)}>
                 {props.armed === v.version ? "Restore? Current kept" : "Restore"}
               </button>
             </li>

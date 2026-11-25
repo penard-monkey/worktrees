@@ -18,6 +18,10 @@
 .ix-btn:disabled { color: var(--txt-mute); cursor: default; }
 .ix-btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: var(--fw-bold); }
 .ix-btn-small { font-size: var(--fs-meta); padding: 1px 8px; }
+.ix-btn.on { border-color: var(--accent); }
+/* An icon alone, as tall as a word's button. */
+.ix-btn-icon { padding: 3px 7px; }
+.ix-btn-icon svg { display: inline-block; vertical-align: -2px; }
 .ix-btn-quiet { background: transparent; border-color: transparent; color: var(--txt); }
 .ix-btn-quiet:hover { color: var(--txt-hi); border-color: var(--line-strong); }
 /* Armed: the hue is the border and a tint; the words stay --txt-hi. */
@@ -26,12 +30,16 @@
 
 /* ── the document ── */
 .ix-doc { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-.ix-head { display: flex; align-items: center; gap: var(--s3); padding: var(--s2) var(--s4); border-bottom: 1px solid var(--line); min-height: 44px; flex-wrap: wrap; }
-.ix-title { margin: 0; font-size: var(--fs-h); font-weight: var(--fw-bold); color: var(--txt-hi); flex: 1 1 12rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ix-rename { flex: 1 1 12rem; min-width: 0; font-size: var(--fs-h); font-weight: var(--fw-bold); padding: 2px 6px; border: 1px solid var(--accent); border-radius: 5px; background: var(--bg-panel); color: var(--txt-hi); }
+/* One row at every width (DocumentPane.tsx folds what does not fit): the title
+   is the one thing that shrinks. */
+.ix-head { display: flex; flex: none; align-items: center; gap: var(--s3); padding: var(--s1) var(--s4); border-bottom: 1px solid var(--line); min-height: 41px; box-sizing: border-box; }
+.ix-title { margin: 0; font-size: var(--fs-h); font-weight: var(--fw-bold); color: var(--txt-hi); flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ix-rename { flex: 1 1 0; min-width: 0; font-size: var(--fs-h); font-weight: var(--fw-bold); padding: 2px 6px; border: 1px solid var(--accent); border-radius: 5px; background: var(--bg-panel); color: var(--txt-hi); }
 .ix-rename:focus { outline: none; }
-.ix-tools { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
-.ix-state { color: var(--txt); font-size: var(--fs-meta); min-width: 5.5em; text-align: right; }
+.ix-tools { display: flex; align-items: center; gap: var(--s2); flex: none; }
+.ix-head[data-tier="0"] { padding: var(--s1) var(--s3); gap: var(--s2); }
+.ix-state[hidden] { display: none; }
+.ix-state { white-space: nowrap; color: var(--txt); font-size: var(--fs-meta); min-width: 5.5em; text-align: right; }
 /* Edit | Read: a segmented pair. Not `.seg` — App.css's `.seg` is Settings'. */
 .ix-seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 5px; overflow: hidden; flex: none; }
 .ix-seg > button { display: inline-block; border: 0; background: transparent; color: var(--txt); font-size: var(--fs-label); padding: 3px 10px; line-height: 1.4; }
@@ -56,6 +64,7 @@
 /* In the main window: the main area's own column, under its header. */
 .ix-doc.ix-in-main { flex: 1 1 auto; background: var(--bg-abyss); color: var(--txt); font-size: var(--fs-body); }
 .ix-doc.ix-in-main[hidden] { display: none; }
+.ix-doc.ix-in-main[data-wait] { pointer-events: none; opacity: 0; transition: opacity 0s 150ms; }
 
 /* ── small surfaces ── */
 .ix-pop {
@@ -69,6 +78,10 @@
 }
 .ix-pop-item:hover, .ix-pop-item:focus-visible, .ix-pop-item.on { background: var(--bg-elev); outline: none; }
 .ix-pop-key { float: right; color: var(--txt); font-size: var(--fs-meta); margin-left: var(--s3); }
+.ix-pop-item:disabled { color: var(--txt-mute); background: transparent; }
+.ix-menu { width: 220px; box-sizing: border-box; }
+.ix-catch { position: fixed; inset: 0; z-index: 20; }
+body.dragging .ix-catch { pointer-events: none; }
 .ix-linkpick { max-height: 220px; overflow-y: auto; }
 .ix-versions { border-bottom: 1px solid var(--line); background: var(--bg-panel); max-height: 34vh; overflow-y: auto; padding: var(--s1) var(--s4) var(--s2); }
 .ix-versions-head { display: flex; align-items: center; justify-content: space-between; color: var(--txt-hi); font-weight: var(--fw-bold); font-size: var(--fs-body); }

@@ -161,8 +161,8 @@ ok("no MCP tool reaches a workspace", !/workspace_(create|rename|remove|set_proj
     ok(`${m[2] ?? "tokyo-night (:root)"} defines its own shade of every color${missing.length ? `: missing ${missing}` : ""}`, missing.length === 0);
   }
   const css = read("../src/App.css");
-  const unmapped = page.filter((c) => !css.includes(`.ws-group[data-ws-color="${c}"] { --ws-hue: var(--hue-${c}); }`));
-  ok(`App.css maps every color onto the card${unmapped.length ? `: missing ${unmapped}` : ""}`, unmapped.length === 0);
+  const unmapped = page.filter((c) => !css.includes(`.ws-group[data-ws-color="${c}"], .wsf[data-ws-color="${c}"] { --ws-hue: var(--hue-${c}); }`));
+  ok(`App.css maps every color onto the card and its view${unmapped.length ? `: missing ${unmapped}` : ""}`, unmapped.length === 0);
   eq("wsColorOf draws a palette name", W.wsColorOf({ color: "teal" }), "teal");
   eq("…and the accent for none or a name it does not know", [W.wsColorOf({ color: null }), W.wsColorOf({}), W.wsColorOf({ color: "pink" })], [null, null, null]);
   ok("the workspace menu offers Color ▸, with Default and every color", /<SubMenu label="Color" testId="ws-color"/.test(app0) && /WS_COLORS\.map\(\(c\) =>/.test(app0) && /wsSetColor\(id, null\)/.test(app0));

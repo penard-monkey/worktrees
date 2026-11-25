@@ -1,16 +1,18 @@
 // The document pane: one open document (useDoc.ts) drawn the same way in both
-// windows. Its header, the banners for a save that was refused, its versions,
+// windows. Its header, the banners for a save that was refused, its history,
 // the editor and Read. What only one window has (the Ideas window's acts and
-// strips, the main window's Back and Float) comes in through the slots.
-import { useMemo, type ReactNode } from "react";
+// strips, the main window's Float) comes in through the slots.
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import * as Icons from "../icons";
 import { Markdown } from "../markdown";
 import "./doc.css";
-import { LinkPicker, VersionsPanel } from "./DocParts";
+import { DocMenu, LinkPicker, VersionsPanel, type DocAct } from "./DocParts";
 import { EditorHost } from "./EditorHost";
 import type { SaveState } from "./ideasave";
-import { ideaHref, readableLinks } from "./ideasrelate";
-import { bodyOf, commentOnly } from "./ideatext";
-import type { DocHandle } from "./useDoc";
+import { commentOnly } from "./ideatext";
+import type { DocTarget } from "./source";
+import { nounOf, type DocHandle, type Open } from "./useDoc";
+import { useTier } from "./useTier";
 
 function saveWords(s: SaveState): string {
   switch (s.kind) {
@@ -29,17 +31,18 @@ function saveWords(s: SaveState): string {
   }
 }
 
-/** Read: the dock's markdown renderer on the body (the frontmatter is the
- *  file's, not the prose). HTML comments draw as nothing — later phases'
- *  anchors are comments (§4.4); other raw HTML stays literal, inert text. A
- *  mermaid fence is code here: mermaid lives in the docs viewer's bundle
- *  alone. Links do nothing in phase 1. */
-function ReadView({ text, follow }: { text: string; follow(id: string): void }) {
-  // `idea:` links become `#idea:` ones, which the shared renderer links.
-  const body = useMemo(() => readableLinks(bodyOf(text)), [text]);
+/** Read: the dock's markdown renderer on the source's body. HTML comments draw
+ *  as nothing — later phases' anchors are comments (§4.4); other raw HTML stays
+ *  literal, inert text. A mermaid fence is code here: mermaid lives in the docs
+ *  viewer's bundle alone. What a link or an image is, the source says. */
+function ReadView({ open, text, follow }: { open: Open; text: string; follow(to: DocTarget): void }) {
+  const { source, id } = open;
+  const body = useMemo(() => source.readBody(text), [source, text]);
   return (
     <div className="ix-read" data-testid="ideas-read">
-      <Markdown src={body} renderHtml={(raw) => (commentOnly(raw) ? "" : null)} onLink={(href) => { const id = ideaHref(href); if (id) follow(id); }} />
+      <Markdown src={body} renderHtml={(raw) => (commentOnly(raw) ? "" : null)}
+        renderImage={source.image && ((src, alt) => source.image!(src, alt, id))}
+        onLink={(href) => { const to = source.link(href, id); if (to) follow(to); }} />
     </div>
   );
 }
@@ -55,26 +58,63 @@ export function DocNotice(props: { text: string; act?: ReactNode; dismiss(): voi
   );
 }
 
+/** The header by the pane's own width (workspace-view-design.md §4.1), each one
+ *  row: from `FULL` everything; under it History is in the menu; under
+ *  `NARROW` the state is on hover too, unless it says the text is not saved. */
+export const NARROW = 420;
+export const FULL = 640;
+const BREAKS = [NARROW, FULL] as const;
+const bad = (s: SaveState) => s.kind === "conflict" || s.kind === "removed" || s.kind === "error";
+
 export function DocumentPane(props: {
   doc: DocHandle;
   /** Before the title. */
   lead?: ReactNode;
-  /** Between Edit | Read and Versions. */
-  tools?: ReactNode;
-  /** After Rename. */
-  after?: ReactNode;
+  /** Between Edit | Read and History, at every width: one control. `small`:
+   *  there is room for its icon alone. */
+  tool?: (small: boolean) => ReactNode;
+  /** After History: the document's move to another window. */
+  float?: { title: string; run(): void };
+  /** In the menu, after History (when it is folded there) and Rename. */
+  acts?: readonly DocAct[];
+  /** What History shows, when the source's own is not it: a source whose
+   *  history is its folder's. Absent: the document's versions. */
+  history?: (close: () => void) => ReactNode;
   /** Under the header, over the document. */
   strips?: ReactNode;
   textDrag?(on: boolean): void;
-  follow(id: string): void;
+  follow(to: DocTarget): void;
 }) {
   const { doc } = props;
-  const { open, save, mode, source, arm, session } = doc;
+  const { open, save, mode, arm, session } = doc;
+  const [head, setHead] = useState<HTMLElement | null>(null);
+  const tier = useTier(head, BREAKS);
+  const [menu, setMenu] = useState<{ x: number; y: number; byKey: boolean } | null>(null);
+  // The editor is mounted on the first Edit and stays for the pane's life: a
+  // document that is only read fetches none.
+  const [edited, setEdited] = useState(false);
+  useEffect(() => { if (open && mode === "edit") setEdited(true); }, [open, mode]);
+  const openId = open?.id;
+  useEffect(() => setMenu(null), [openId, tier]);
   if (!open) return null;
+  const { source } = open;
+  const noun = nounOf(open);
   const armed = arm.armed as string | null;
+  const hasHistory = !!props.history || !!source.versions;
+  const toggleHistory = () => doc.setHistory((h) => !h);
+  const acts: DocAct[] = [
+    ...(hasHistory && tier < 2 ? [{ testId: "doc-menu-history", label: doc.history ? "Hide History" : "History", run: toggleHistory }] : []),
+    ...(source.rename ? [{ testId: "ideas-rename", label: "Rename…", disabled: doc.busy, run: () => doc.setRenaming(open.title) }] : []),
+    ...(props.acts ?? []),
+  ];
+  const openMenu = (e: React.MouseEvent<HTMLButtonElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    setMenu((m) => (m ? null : { x: r.right, y: r.bottom + 4, byKey: e.detail === 0 }));
+  };
+  const state = saveWords(save);
   return (
     <>
-      <header className="ix-head">
+      <header className="ix-head" ref={setHead} data-tier={tier}>
         {props.lead}
         {doc.renaming !== null ? (
           <input
@@ -90,32 +130,39 @@ export function DocumentPane(props: {
             onBlur={() => doc.setRenaming(null)}
           />
         ) : (
-          <h1 className="ix-title" title={open.file}>{open.title || "Untitled"}</h1>
+          <h1 className="ix-title" title={`${open.file} · ${state}`}>{open.title || "Untitled"}</h1>
         )}
         <div className="ix-tools">
-          <span className="ix-state" data-testid="ideas-save" data-state={save.kind}>{saveWords(save)}</span>
-          <span className="ix-seg" role="group" aria-label="View">
+          <span className="ix-state" data-testid="ideas-save" data-state={save.kind} hidden={tier === 0 && !bad(save)}>{state}</span>
+          <span className="ix-seg" role="group" aria-label="View" title={tier === 0 ? state : undefined}>
             <button className={mode === "edit" ? "on" : ""} data-testid="ideas-mode-edit" aria-pressed={mode === "edit"} onClick={() => doc.switchMode("edit")}>Edit</button>
             <button className={mode === "read" ? "on" : ""} data-testid="ideas-mode-read" aria-pressed={mode === "read"} onClick={() => doc.switchMode("read")}>Read</button>
           </span>
-          {props.tools}
-          <button className={`ix-btn${doc.versions !== false ? " on" : ""}`} data-testid="ideas-versions-toggle" aria-pressed={doc.versions !== false}
-            onClick={() => doc.setVersions((v) => (v === false ? null : false))}>Versions</button>
-          {source.rename && (
-            <button className="ix-btn" data-testid="ideas-rename" disabled={doc.busy} onMouseDown={(e) => e.preventDefault()} onClick={() => doc.setRenaming(open.title)}>Rename</button>
+          {props.tool?.(tier < 2)}
+          {hasHistory && tier === 2 && (
+            <button className={`ix-btn${doc.history ? " on" : ""}`} data-testid="ideas-versions-toggle" aria-pressed={doc.history} onClick={toggleHistory}>History</button>
           )}
-          {props.after}
+          {props.float && (
+            <button className="ix-btn ix-btn-icon" data-testid="main-doc-float" title={props.float.title} aria-label={props.float.title} onClick={props.float.run}>
+              <Icons.ExternalLink size={13} />
+            </button>
+          )}
+          {acts.length > 0 && (
+            <button className={`ix-btn ix-btn-icon${menu ? " on" : ""}`} data-testid="doc-menu-open" title="More" aria-label="More" aria-haspopup="menu" aria-expanded={!!menu}
+              onMouseDown={(e) => e.preventDefault()} onClick={openMenu}><Icons.Ellipsis size={13} /></button>
+          )}
         </div>
       </header>
+      {menu && <DocMenu {...menu} acts={acts} close={() => setMenu(null)} />}
       {props.strips}
-      {doc.versions !== false && (
-        <VersionsPanel versions={doc.versions} armed={armed?.startsWith("restore:") ? armed.slice(8) : null} restore={doc.restore} close={() => doc.setVersions(false)} />
-      )}
+      {doc.history && (props.history
+        ? props.history(() => doc.setHistory(false))
+        : <VersionsPanel versions={doc.versions} armed={armed?.startsWith("restore:") ? armed.slice(8) : null} restore={doc.restore} close={() => doc.setHistory(false)} />)}
       {save.kind === "conflict" && (
         <div className="ix-banner" data-testid="ideas-conflict" data-why={save.why} role="alert">
           <span>{save.why === "refused"
-            ? `This ${source.noun} changed on disk, so your edit was not saved. Your text is still here.`
-            : `This ${source.noun} was changed in another editor while you had unsaved text. Your text is still here.`}</span>
+            ? `This ${noun} changed on disk, so your edit was not saved. Your text is still here.`
+            : `This ${noun} was changed in another editor while you had unsaved text. Your text is still here.`}</span>
           <button className="ix-btn" data-testid="ideas-keep-mine" onClick={() => void session.current?.keepMine()}
             title="Saves your text. The other version is copied to the folder's .history first.">Keep mine (theirs goes to .history)</button>
           <button className={`ix-btn${armed === "reload" ? " ix-btn-armed" : ""}`} data-testid="ideas-reload"
@@ -126,7 +173,7 @@ export function DocumentPane(props: {
       )}
       {save.kind === "removed" && (
         <div className="ix-banner" data-testid="ideas-removed" role="alert">
-          <span>This {source.noun} was removed from the folder. Your text is still here until you close it.</span>
+          <span>This {noun} was removed from the folder. Your text is still here until you close it.</span>
           {source.keepAsNew && <button className="ix-btn" data-testid="ideas-save-as-new" onClick={() => void doc.saveAsNew()}>Save as a new {source.noun}</button>}
           <button className="ix-btn" data-testid="ideas-close" onClick={doc.closeOpen}>Close</button>
         </div>
@@ -138,8 +185,10 @@ export function DocumentPane(props: {
         </div>
       )}
       <div className="ix-body">
-        <EditorHost open={open} handle={doc.handle} held={doc.held} hooks={doc.hooks} replaced={doc.replaced} hidden={mode !== "edit"} textDrag={props.textDrag} />
-        {mode === "read" && <ReadView text={doc.readBody} follow={props.follow} />}
+        {(edited || mode === "edit") && (
+          <EditorHost open={open} handle={doc.handle} held={doc.held} hooks={doc.hooks} cursorNext={doc.cursorNext} replaced={doc.replaced} hidden={mode !== "edit"} textDrag={props.textDrag} />
+        )}
+        {mode === "read" && <ReadView open={open} text={doc.readBody} follow={props.follow} />}
         {doc.picker && mode === "edit" && <LinkPicker x={doc.picker.x} y={doc.picker.y} rows={doc.pickRows} index={doc.pickIdx} pick={doc.insertLink} />}
       </div>
     </>

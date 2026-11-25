@@ -1,118 +1,153 @@
-// A document open in the main window (workspace-chats.md §4.5, the documents
-// lane): the shared pane under a plain header, with a way back to the
-// workspace's overview and Float, which opens the same document in the Ideas
-// window. Opened from the overview's plan and idea chips, behind Ideas' beta
-// as the overview is.
+// A document open in the main window (workspace-chats.md §4.5, the workspace
+// view's slices 0 and 1): the shared pane under its own header, in the
+// workspace view's Plan and Ideas tabs (WorkspaceFrame.tsx), whose tabs are the
+// way back. Float MOVES it to the Ideas window.
 //
-// **Its text outlives its place on screen.** The main area shows something
-// else the moment a place is picked in the nav, with nothing to ask first. So
-// the pane stays mounted, hidden, until its text is saved, and only then goes:
-// `shown` false is a save point, and a document whose text cannot be saved (a
-// conflict, a removal) waits there with its banner until the person is back.
-import { useEffect, useRef, useState } from "react";
+// **It outlives its place on screen.** The main area shows something else the
+// moment a place is picked in the nav, with nothing to ask first. So the pane
+// stays mounted and is hidden: `shown` false is a save point, and a text that
+// cannot be saved (a conflict, a removal) waits there with its banner until the
+// person is back.
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "../ipc";
 import { DocNotice, DocumentPane } from "./DocumentPane";
-import { ideaDocs, type DocRows } from "./source";
+import { sameDoc, type DocRows, type DocTarget } from "./source";
 import { useDoc } from "./useDoc";
 
 export type MainDocApi = {
   /** Save and say whether it may be left: false while its text is nowhere else. */
   leave(): Promise<boolean>;
+  /** Show the open one in Edit. */
+  edit(): void;
 };
 
 export function MainDocument(props: {
-  id: string;
+  target: DocTarget;
+  /** Open in Edit, whatever its kind opens in ("Edit the plan"). */
+  startIn?: "edit";
   shown: boolean;
-  /** Where Back goes, by name. */
-  backTo: string;
   rows: DocRows;
   api: React.RefObject<MainDocApi | null>;
-  /** Another document is the open one (a followed link, a merged id, a refusal). */
-  opened(id: string): void;
-  /** Saved, or never opened, and not on screen: let it go. */
-  close(): void;
+  /** The open one is another than the one asked for: a merged id landed on it. */
+  opened(to: DocTarget): void;
+  /** The one asked for did not open, because this one's text is not saved. */
+  refused(to: DocTarget): void;
+  follow(to: DocTarget): void;
+  /** Its text is nowhere else (`null`: it is, or it can still be saved). */
+  stuck(title: string | null): void;
   /** Off screen with text that is not saved: it waits here. */
   waits(title: string): void;
-  back(): void;
-  float(id: string): void;
+  /** It is open no more: closed from its banner. */
+  closed(): void;
+  /** Saved and closed here: the other window opens it. */
+  float(to: DocTarget, title: string): void;
+  /** History, when it is not the document's own versions. */
+  history?: (close: () => void) => ReactNode;
 }) {
+  const { target } = props;
   const [notice, setNotice] = useState<string | null>(null);
-  const [reading, setReading] = useState(true);
+  const [failed, setFailed] = useState(false);
+  const [again, setAgain] = useState(0);
   const at = useRef(props);
   at.current = props;
   const doc = useDoc({
-    source: ideaDocs,
+    source: target.source,
     notice: setNotice,
     trace: (m) => { invoke("log_event", { level: "info", msg: `document: ${m}` }).catch(() => {}); },
     listed: () => {},
     rows: props.rows,
-    follow: (id) => void go(id),
+    follow: (to) => at.current.follow(to),
   });
-  const { open, openDoc, leave, session, closeOpen } = doc;
+  const refusedNow = useRef(false);
+  const { open, openDoc, session, closeOpen, save, current, switchMode } = doc;
+  const leaveDoc = doc.leave;
+  const leave = useCallback(async (before: string) => {
+    const ok = await leaveDoc(before);
+    refusedNow.current = !ok;
+    return ok;
+  }, [leaveDoc]);
   const openRef = useRef(open);
   openRef.current = open;
+  const had = useRef(false);
 
-  /** Open one, and tell the window which it is now: a merged id lands on
-   *  another, and a refused or failed open stays where it was. */
-  const go = async (id: string) => {
-    const ok = await openDoc(id);
-    if (ok) at.current.opened(doc.current() ?? id);
-    else { const cur = doc.current(); if (cur && cur !== at.current.id) at.current.opened(cur); }
-  };
+  // Open what is asked for, and tell the window when it is another: a merged id
+  // lands on the one that took it. One that cannot be opened leaves nothing on
+  // screen in its place, least of all the document of the tab before.
   useEffect(() => {
     let gone = false;
-    setReading(true);
-    void go(props.id).finally(() => { if (!gone) setReading(false); });
+    setFailed(false);
+    void openDoc(target.name).then(async (ok) => {
+      if (gone) return;
+      const cur = current();
+      if (ok) {
+        if (cur && cur.name !== target.name) at.current.opened(cur);
+        if (at.current.startIn === "edit") switchMode("edit", false);
+        return;
+      }
+      if (cur && !(await leave("before you open another"))) { if (!gone) at.current.refused(cur); return; }
+      if (gone) return;
+      had.current = false;
+      closeOpen();
+      setFailed(true);
+    });
     return () => { gone = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- the id asked for is the trigger
-  }, [props.id]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the one asked for is the trigger
+  }, [target.source, target.name, again]);
 
   useEffect(() => {
     const api = props.api;
-    api.current = { leave };
+    api.current = { leave: () => leave("before you leave it"), edit: () => switchMode("edit", false) };
     return () => { api.current = null; };
-  }, [props.api, leave]);
+  }, [props.api, leave, switchMode]);
 
-  // Off screen: a save point, then gone, unless its text has nowhere to go.
+  // Off screen: a save point. A text with nowhere to go waits here.
   useEffect(() => {
     if (props.shown) return;
     let back = false;
-    void leave().then((ok) => {
-      if (back) return;
-      if (ok) at.current.close();
-      else at.current.waits(openRef.current?.title || "Untitled");
+    void leave("before you leave it").then((ok) => {
+      if (!ok && !back) at.current.waits(openRef.current?.title || "Untitled");
     });
     return () => { back = true; };
   }, [props.shown, leave]);
 
+  const stuck = open && (save.kind === "conflict" || save.kind === "removed" || save.kind === "error") && session.current?.dirty() ? open.title || "Untitled" : null;
+  // "Not saved, keep yours or reload" is answered by its being saved.
+  useEffect(() => { at.current.stuck(stuck); if (!stuck && refusedNow.current) { refusedNow.current = false; setNotice(null); } }, [stuck]);
+  useEffect(() => () => { at.current.stuck(null); }, []);
+
   // The last thing open was closed from its banner (it had been removed).
-  const had = useRef(false);
   useEffect(() => {
     if (open) had.current = true;
-    else if (had.current) at.current.back();
+    else if (had.current) { had.current = false; at.current.closed(); }
   }, [open]);
 
-  const goBack = async () => { if (await leave()) { had.current = false; closeOpen(); props.back(); } };
+  /** Float is a MOVE: saved, then closed here, then opened there. If it cannot
+   *  be saved nothing moves, and its banner says why. */
   const float = async () => {
-    const id = doc.current();
-    if (!id) return;
-    // The other window reads the file: what was typed here goes there first.
-    await session.current?.flush();
-    props.float(id);
+    const to = current();
+    if (!to || !(await leave("before you float it"))) return;
+    // Typed while the save was out: this is not the moment.
+    if (current()?.name !== to.name || session.current?.dirty()) return;
+    const title = openRef.current?.title || "Untitled";
+    had.current = false;
+    closeOpen();
+    props.float(to, title);
   };
-  const lead = (
-    <button className="ix-btn" data-testid="main-doc-back" onClick={() => void goBack()} title={`Back to ${props.backTo}`}>‹ {props.backTo}</button>
-  );
+  // The document before, until the one asked for is here: kept mounted (the
+  // editor with it), out of reach, and gone from sight if the read is slow.
+  const wait = !!open && !sameDoc(target, { source: open.source, name: open.id });
   return (
-    <section className="ix-doc ix-in-main" data-testid="main-doc" data-doc={open?.id} hidden={!props.shown}>
+    <section className="ix-doc ix-in-main" data-testid="main-doc" data-doc={wait ? undefined : open?.id} data-wait={wait || undefined} hidden={!props.shown}>
       {notice && <DocNotice text={notice} dismiss={() => setNotice(null)} />}
       {open ? (
-        <DocumentPane doc={doc} follow={(id) => void go(id)} lead={lead}
-          after={<button className="ix-btn" data-testid="main-doc-float" onClick={() => void float()} title="Open it in the Ideas window">Float</button>} />
+        <DocumentPane doc={doc} follow={props.follow} history={props.history}
+          float={{ title: "Float: move it to the Ideas window", run: () => void float() }} />
       ) : (
         <header className="ix-head">
-          {lead}
-          <h1 className="ix-title">{reading ? "Opening…" : "Not open"}</h1>
+          <h1 className="ix-title">{failed ? "Not open" : "Opening…"}</h1>
+          {failed && (
+            <div className="ix-tools"><button className="ix-btn" data-testid="main-doc-again" onClick={() => setAgain((n) => n + 1)}>Try again</button></div>
+          )}
         </header>
       )}
     </section>

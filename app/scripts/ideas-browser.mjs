@@ -156,6 +156,7 @@ async function run(engine, name) {
   ok(/^---\nid: [0-9A-Z]{26}\ncreated: \d{4}-\d\d-\d\d\n---\n\n# Untitled\nHello from a new idea$/.test(created), `${tag} New idea is listed, takes typing at once at the end of its text, and saves (${JSON.stringify(created.slice(-40))})`);
 
   // ── rename ──
+  await page.click("[data-testid=doc-menu-open]");
   await page.click("[data-testid=ideas-rename]");
   await page.fill("[data-testid=ideas-rename-input]", "Greetings plan");
   await page.keyboard.press("Enter");
@@ -180,6 +181,7 @@ async function run(engine, name) {
     `${tag} the renamed file's next save goes through: no conflict, no error`);
 
   // ── remove ──
+  await page.click("[data-testid=doc-menu-open]");
   await page.click("[data-testid=ideas-remove]");
   ok((await page.locator("[data-testid=ideas-remove]").textContent()).includes(".history") && (await file(page, newId)) !== null, `${tag} Remove asks first and says the text is kept in .history`);
   await page.click("[data-testid=ideas-remove]");
@@ -277,6 +279,23 @@ async function run(engine, name) {
     ok(miss.length === 0, `${tag} at ${w}px every header and list control is reachable${miss.length ? `: missing ${miss.join(", ")}` : ""}`);
   }
   await page.setViewportSize({ width: 1200, height: 800 });
+  // The header is one row at any width of the pane (DocumentPane.tsx).
+  for (const w of [1052, 640, 484, 419, 340]) {
+    const m = await page.evaluate(async (w) => {
+      const root = document.querySelector("[data-testid=ideas-doc]");
+      Object.assign(root.style, { width: `${w}px`, minWidth: `${w}px` });
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const head = root.querySelector(".ix-head"), hb = head.getBoundingClientRect();
+      const out = [...head.querySelectorAll("button, .ix-title")].filter((e) => { const q = e.getBoundingClientRect(); return q.width > 0 && q.right > hb.right + 0.5; }).length;
+      const r = { w: hb.width, h: hb.height, out, title: head.querySelector(".ix-title").getBoundingClientRect().width, hist: !!head.querySelector("[data-testid=ideas-versions-toggle]"), chat: !!head.querySelector("[data-testid=ideas-chat-toggle]"), more: !!head.querySelector("[data-testid=doc-menu-open]") };
+      Object.assign(root.style, { width: "", minWidth: "" });
+      return r;
+    }, w);
+    ok(Math.abs(m.w - w) < 2 && m.h <= 45 && m.out === 0 && m.title > 30 && m.hist === (w >= 640) && m.chat && m.more, `${tag} at ${w}px of pane the header is one row (${JSON.stringify(m)})`);
+  }
+  await page.click("[data-testid=doc-menu-open]");
+  ok(await page.locator("[data-testid=doc-menu] button").evaluateAll((b) => b.map((x) => x.textContent).join()) === "Rename…,Relate…,Merge into…,Split…,Show in Finder,Remove", `${tag} its menu has the rest`);
+  await page.keyboard.press("Escape");
 
   // ── the six themes ──
   await openIdea(page, reborn);

@@ -212,7 +212,7 @@ export const SECTIONS: readonly SectionDef[] = [
   // (group chat start design S2, the owner's pick): a person invited into a
   // beta is not an advanced user by being invited. It was Advanced and
   // Expert only from 2026-11-08.
-  { id: "beta", page: "general", tier: "beginner", label: "Beta features", keywords: ["beta", "experimental", "preview", "early access", "feature flag", "ideas", "group chat"], keys: ["beta_ideas", "beta_group_chat"], localOnly: true },
+  { id: "beta", page: "general", tier: "beginner", label: "Beta features", keywords: ["beta", "experimental", "preview", "early access", "feature flag", "ideas", "group chat", "workspace chats", "memory"], keys: ["beta_ideas", "beta_group_chat", "beta_workspace_chats"], localOnly: true },
   // ── Appearance
   { id: "zoom", page: "appearance", tier: "beginner", label: "Overall size", keywords: ["zoom", "scale", "bigger", "smaller", "text size", "magnify"], keys: ["app_zoom"] },
   { id: "ui-font", page: "appearance", tier: "advanced", label: "UI font size", keywords: ["font", "font size", "text size", "interface font", "rem"], keys: ["ui_rem"] },
