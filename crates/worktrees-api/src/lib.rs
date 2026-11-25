@@ -69,6 +69,7 @@ pub mod harness_updates;
 pub mod keepawake;
 pub mod log;
 pub mod macprivacy;
+pub mod memory;
 pub mod meta;
 pub mod project;
 pub mod projects;
@@ -193,6 +194,8 @@ pub struct Ctx {
     /// `workspaces.json`, which says which workspaces there are. A test
     /// moves it with [`Ctx::with_workspaces_file`].
     workspaces_file: Arc<PathBuf>,
+    /// Which workspaces' memory is someone's to commit (`memory`).
+    pub memory: Arc<memory::Memory>,
     /// The hold on this host's idle sleep (`keepawake`). One per engine.
     pub keep_awake: Arc<keepawake::KeepAwake>,
 }
@@ -216,6 +219,7 @@ impl Ctx {
             acting: Arc::new(None),
             ideas_dir: Arc::new(worktrees_core::ideas::dir()),
             workspaces_dir: Arc::new(worktrees_core::wsfolder::root()),
+            memory: Arc::new(memory::Memory::default()),
             workspaces_file: Arc::new(worktrees_core::workspaces::path()),
         }
     }

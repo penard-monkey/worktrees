@@ -11,6 +11,7 @@ import { GUEST_HOST, guestHelpers, guestInvoke } from "./guest";
 import { agentSessions, initialWorkspace, sessionName, type Place, type Workspace } from "./fixtures";
 import { isHarness, type Harness } from "../harness";
 import { cloneSource, type CloneErrorKind, type CloneProgress } from "../clone";
+import { memoryMock } from "./memory";
 import { mockProjectPrs } from "./prs";
 import type { PlaceBranch } from "../prs";
 import type { By } from "../provenance";
@@ -420,6 +421,9 @@ const mockWsGet = (id: unknown) => {
   if (!w) throw `no workspace ${id}`;
   return w;
 };
+/** A workspace's memory (`worktrees_api::memory`): ./memory.ts. */
+const mockMemory = memoryMock((e, p) => emitEvent(e, p), (id) => { mockWsView(); return mockWsGet(id).name; },
+  (id, title) => mockChats.get(id)?.find((c) => c.title === title && c.fold)?.note.replace(/^memory\//, "") ?? null);
 // The launch gate's `[quota]` policy (`quota_settings`): `?quota=off` starts
 // with the gate off, `?quotapct=<n>` with a weekly threshold, and
 // `?quotapct=bad` with a hand-edit the gate ignored (so the problems line shows).
@@ -2171,12 +2175,15 @@ function chatReply(c: MockChat, user: string | null, reply: string) {
     chatSessionsPush();
   }, CHAT_REPLY_MS);
 }
+/** The workspace that has chat `c`. */
+const chatWs = (c: MockChat) => [...mockChats].find(([, cs]) => cs.includes(c))?.[0] ?? "";
 const mockChatRecord = (c: MockChat) => ({
   id: c.id, harness: c.harness, session_id: c.session_id, title: c.title, started: c.started, last_activity: c.last_activity, note: c.note,
-  ...(c.fold ? { fold: c.fold } : {}),
+  // A fold's numbers are its commit's, in the memory (./memory.ts).
+  ...(c.fold ? { fold: { ...c.fold, ...(c.fold.state === "done" ? mockMemory.fold(chatWs(c), c.title) : null) } } : {}),
 });
 const mockChatRow = (c: MockChat) => ({
-  ...mockChatRecord(c), session: chatSession(c), state: !c.live ? "ended" : c.state === "idle" ? "running" : c.state, note_exists: c.note_exists,
+  ...mockChatRecord(c), session: chatSession(c), state: !c.live ? "ended" : c.state === "idle" ? "running" : c.state, note_exists: mockMemory.has(chatWs(c), c.note),
 });
 /** What a chat reads of each project (`workspacechats::project_reads`): a
  *  private or unregistered one, not at all. */
@@ -3026,6 +3033,17 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       emitEvent("places:changed", null);
       return mockCrossProject();
     }
+    // ── a workspace's memory (`worktrees_api::memory`): ./memory.ts ──
+    case "workspace_memory":
+    case "workspace_memory_make":
+    case "workspace_memory_file":
+    case "workspace_memory_image":
+    case "workspace_memory_write":
+    case "workspace_memory_put":
+    case "workspace_memory_log":
+    case "workspace_memory_diff":
+    case "workspace_memory_revert":
+      return mockMemory.call(cmd, args);
     // ── named workspaces (core `workspaces`, api `workspaces.rs`) ──
     case "workspaces_list":
       return mockWsView();
@@ -3042,7 +3060,8 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "workspace_remove": {
       mockWsView();
       const id = String(args.id);
-      const held = mockWsDefs!.some((w) => w.id === id) && (mockChats.get(id)?.length ?? 0) > 0;
+      const memory = mockMemory.remove(id);
+      const held = mockWsDefs!.some((w) => w.id === id) && ((mockChats.get(id)?.length ?? 0) > 0 || memory);
       mockWsDefs = mockWsDefs!.filter((w) => w.id !== id);
       // Its live chats end and its folder is moved, never deleted.
       mockChats.delete(id);
@@ -4785,6 +4804,7 @@ Phase 3: Frontend pane and mock harness
       mockWsView();
       const w = mockWsGet(args.id);
       const list = mockChats.get(w.id) ?? [];
+      mockMemory.beforeLaunch(w.id);
       const c = mockChatNew(ideaId(), `Chat ${list.length + 1}`, 0, 0, { live: true });
       list.push(c); mockChats.set(w.id, list);
       chatReply(c, `Read chats/${c.id}/start.md and begin.`, "I read the memory's index and the list of projects. What would you like to settle?");
@@ -4793,6 +4813,7 @@ Phase 3: Frontend pane and mock harness
     case "workspace_chat_resume": {
       const c = chatOf(args.id as string, args.conv as string);
       if (c.live) throw `chat ${c.id} is already running (tmux session ${chatSession(c)})`;
+      mockMemory.beforeLaunch(args.id as string);
       c.live = true; c.state = "idle"; c.last_activity = isoAgo(0); chatSessionsPush();
       return { id: args.id, conv: c.id, session: chatSession(c) };
     }
@@ -7071,6 +7092,9 @@ let mockNotifyGranted = new URLSearchParams(location.search).get("notify") === "
 };
 (window as any).__mock = {
   ...guestHelpers,
+  // ── a workspace's memory: what an agent does to it, and what the page sent ──
+  memoryEdit: (id: string, path: string, text: string | null) => mockMemory.edit(id, path, text),
+  memoryWrites: () => mockMemory.writes(),
   // ── ideas: what another editor, Finder or a person does to the folder ──
   /** Every idea_write the page sent, in order. */
   ideaWrites: () => mockIdeaWrites.slice(),

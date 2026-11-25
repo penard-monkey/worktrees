@@ -180,13 +180,13 @@ fn context(ctx: &Ctx, w: &Workspace, conv: &str) -> Context {
 
 /// `workspace_chat_start`: a new chat. Its folder, `start.md`, `context.md`,
 /// the record (with the session id), then the launch. A refused launch (the
-/// live-agent limit, a spent window, a Claude below the floor) leaves nothing.
+/// live-agent limit, a spent window, a Claude below the floor) leaves nothing
+/// of the chat; the memory it made stays (a memory is never deleted here).
 pub fn workspace_chat_start(ctx: &Ctx, id: String) -> Result<Value, String> {
     let lock = life_lock(ctx, &id);
     let _life = lock.lock().unwrap_or_else(|e| e.into_inner());
     let w = workspace(ctx, &id)?;
-    // MERGE SEAM (the memory lane): `memory::init_at` and the commit of a
-    // dirty tree go here, before the chat is prepared.
+    crate::memory::before_launch(ctx, &w)?;
     let (c, session) = chats::start_at(ctx.workspaces_dir(), &w, |conv| chats::context_text(&context(ctx, &w, conv)))?;
     Ok(json!({ "id": id, "chat": c, "session": session }))
 }
@@ -203,6 +203,7 @@ pub fn workspace_chat_resume(ctx: &Ctx, id: String, conv: String) -> Result<Valu
     if tmux::session_exists(&chats::session_name(&conv)) {
         return Err(format!("chat {conv} is already running (tmux session {})", chats::session_name(&conv)));
     }
+    crate::memory::before_launch(ctx, &w)?;
     chats::write_context_at(root, &id, &conv, &chats::context_text(&context(ctx, &w, &conv)))?;
     let session = chats::launch_at(root, &w, &conv, Start::Resume, None)?;
     touched(ctx, &id, &conv);

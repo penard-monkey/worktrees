@@ -145,9 +145,14 @@ pub fn workspace_remove(ctx: &crate::Ctx, id: String) -> Result<RemovedWs, Strin
     }
     crate::workspacechats::close_all(ctx, &id)?;
     let root = ctx.workspaces_dir();
-    let moved = worktrees_core::workspacechats::retire_folder_at(root, &id)?;
+    // Its memory is in the folder: nothing of ours commits or saves as it goes.
+    let moved = worktrees_core::memory::while_still_at(root, &id, || worktrees_core::workspacechats::retire_folder_at(root, &id))??;
     match remove_in(&w, &r, &id) {
-        Ok(workspaces) => Ok(RemovedWs { workspaces, moved_to: moved.map(|p| p.to_string_lossy().into_owned()) }),
+        Ok(workspaces) => {
+            // A fold that held it is gone with its chat.
+            ctx.memory.release(&id);
+            Ok(RemovedWs { workspaces, moved_to: moved.map(|p| p.to_string_lossy().into_owned()) })
+        }
         Err(e) => {
             if let Some(Err(back)) = moved.map(|p| worktrees_core::workspacechats::restore_folder_at(root, &id, &p)) {
                 return Err(format!("{e}; and {back}"));

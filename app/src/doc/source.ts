@@ -22,7 +22,9 @@ export type Doc = {
   /** The id asked for was merged into this one. */
   merged?: { id: string; title: string | null; date: string | null };
 };
-export type Version = { version: string; at: string; size: number; title: string | null };
+/** `size` is the copy's bytes, where the source knows it (a memory's versions
+ *  are commits, and a commit's list does not say). */
+export type Version = { version: string; at: string; size?: number; title: string | null };
 
 export interface DocSource {
   /** What one is called: "This idea changed on disk…". */
