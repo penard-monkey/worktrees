@@ -6,11 +6,13 @@
 // caller passes as children, styled by App.css.
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { useEscape } from "./useEscape";
+import { useMenuKeys } from "./useMenuKeys";
 
 // Fixed at the cursor, clamped to the viewport, Esc / click-away /
 // right-click-away all close. Top-level (NOT nested in a component body) so its
 // position state survives the owner's re-renders.
-export function CtxMenu({ x, y, onClose, children }: { x: number; y: number; onClose: () => void; children: ReactNode }) {
+// `panel`: not a list of acts but something to read, by its name.
+export function CtxMenu({ x, y, onClose, panel, children }: { x: number; y: number; onClose: () => void; panel?: string; children: ReactNode }) {
   const ref = useRef<HTMLDivElement | null>(null);
   const [pos, setPos] = useState({ left: x, top: y });
   // The clamp must re-run when the menu RESIZES, not only when the cursor moves:
@@ -36,10 +38,11 @@ export function CtxMenu({ x, y, onClose, children }: { x: number; y: number; onC
     return () => { ro.disconnect(); window.removeEventListener("resize", clamp); };
   }, [x, y]);
   useEscape(onClose);
+  useMenuKeys(ref, onClose);
   return (
     <>
       <div className="menu-catch" onClick={onClose} onContextMenu={(e) => { e.preventDefault(); onClose(); }} />
-      <div ref={ref} className="ctxmenu" style={pos} onContextMenu={(e) => e.preventDefault()}>
+      <div ref={ref} className="ctxmenu" role={panel ? "dialog" : "menu"} aria-label={panel} tabIndex={-1} style={pos} onContextMenu={(e) => e.preventDefault()}>
         {children}
       </div>
     </>

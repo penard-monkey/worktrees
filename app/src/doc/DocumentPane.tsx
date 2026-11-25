@@ -137,7 +137,7 @@ export function DocumentPane(props: {
     ro.observe(head);
     return () => ro.disconnect();
   });
-  const [menu, setMenu] = useState<{ x: number; y: number; byKey: boolean } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   // The editor is mounted on the first Edit and stays for the pane's life: a
   // document that is only read fetches none.
   const [edited, setEdited] = useState(false);
@@ -163,7 +163,7 @@ export function DocumentPane(props: {
   ];
   const openMenu = (e: React.MouseEvent<HTMLButtonElement>) => {
     const r = e.currentTarget.getBoundingClientRect();
-    setMenu((m) => (m ? null : { x: r.right, y: r.bottom + 4, byKey: e.detail === 0 }));
+    setMenu((m) => (m ? null : { x: r.right, y: r.bottom + 4 }));
   };
   const state = saveWords(save);
   const takes = (d: DataTransfer | null) => !!props.attach && mode === "edit" && !!d && [...d.types].includes("Files");

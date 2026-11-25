@@ -310,7 +310,7 @@ export function WorkspaceChatColumn(props: {
           </div>
         </CtxMenu>
       )}
-      {menu?.kind === "reads" && <CtxMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}><Reads chat={c} projects={info.projects} documents={info.documents ?? []} limits={info.limits} /></CtxMenu>}
+      {menu?.kind === "reads" && <CtxMenu x={menu.x} y={menu.y} panel="What this chat reads" onClose={() => setMenu(null)}><Reads chat={c} projects={info.projects} documents={info.documents ?? []} limits={info.limits} /></CtxMenu>}
       {menu?.kind === "close" && (
         <CtxMenu x={menu.x} y={menu.y} onClose={() => { setMenu(null); arm.disarm(); }}>
           {row.live && (

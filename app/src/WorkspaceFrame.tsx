@@ -189,6 +189,7 @@ export function WorkspaceFrame(props: {
   const dropped = () => { try { window.localStorage.setItem(SPLIT_KEY, String(share)); } catch { /* it starts at its default */ } };
   const room = useTier(docs, ROOM);
   const beside = room === 2 || (room === 1 && tab !== "plan");
+  const panel = (t: WsTab) => ({ role: "tabpanel", id: `wsf-panel-${t}`, "aria-labelledby": `wsf-tab-${t}` });
   const [sideOpen, setSideOpen] = useState(false);
   const pane = tab === "plan" || tab === "ideas" || tab === "memory";
   const side = !ws ? null
@@ -234,17 +235,24 @@ export function WorkspaceFrame(props: {
         )}
         <div className="wsf-docs" ref={setDocs} style={props.middle && !one ? { flex: `0 0 ${share * 100}%` } : undefined} data-room={room === 2 ? "wide" : "narrow"}>
           {ws && (
-            <div className="wsf-tabs" role="tablist" aria-label="The workspace's documents">
+            <div className="wsf-tabs" role="tablist" aria-label="The workspace's documents" onKeyDown={(e) => {
+              const all = [...e.currentTarget.querySelectorAll<HTMLElement>("[role=tab]")], at = all.indexOf(document.activeElement as HTMLElement);
+              const to = e.key === "ArrowRight" ? at + 1 : e.key === "ArrowLeft" ? at - 1 : e.key === "Home" ? 0 : e.key === "End" ? all.length - 1 : null;
+              if (to === null || at < 0 || e.metaKey || e.ctrlKey || e.altKey) return;
+              e.preventDefault();
+              // The focus alone: opening a tab leaves a document, so Enter does that.
+              all[(to + all.length) % all.length].focus();
+            }}>
               {props.tabs.map((t) => (
-                <button key={t} role="tab" className={"wsf-tab" + (t === tab ? " on" : "")} aria-selected={t === tab} data-testid="ws-tab" data-tab={t} onClick={() => props.showTab(t)}>
+                <button key={t} role="tab" id={`wsf-tab-${t}`} aria-controls={t === tab ? `wsf-panel-${t}` : undefined} tabIndex={t === tab ? 0 : -1} className={"wsf-tab" + (t === tab ? " on" : "")} aria-selected={t === tab} data-testid="ws-tab" data-tab={t} onClick={() => props.showTab(t)}>
                   {WS_TAB_LABEL[t]}{props.counts[t] ? <span className="wsf-tab-n">{props.counts[t]}</span> : null}
                 </button>
               ))}
             </div>
           )}
-          {ws && tab === "overview" && <div className="wsf-scroll">{props.overview}</div>}
-          {ws && tab === "chats" && <div className="wsf-scroll">{props.counts.chats ? props.chatsTab : <NoChats newChat={props.firstChat} />}</div>}
-          <div className="wsf-split" hidden={!pane} data-beside={beside || undefined}>
+          {ws && tab === "overview" && <div className="wsf-scroll" {...panel("overview")}>{props.overview}</div>}
+          {ws && tab === "chats" && <div className="wsf-scroll" {...panel("chats")}>{props.counts.chats ? props.chatsTab : <NoChats newChat={props.firstChat} />}</div>}
+          <div className="wsf-split" {...(ws && pane ? panel(tab) : {})} hidden={!pane} data-beside={beside || undefined}>
             {side && !beside && (
               <button className="wsf-side-line" data-testid="ws-side-toggle" aria-expanded={sideOpen} onClick={() => setSideOpen((o) => !o)}>
                 {sideOpen ? <Icons.ChevronDown size={11} /> : <Icons.ChevronRight size={11} />} {sideLine}

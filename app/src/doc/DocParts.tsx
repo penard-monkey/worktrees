@@ -1,7 +1,8 @@
 // The document pane's small surfaces: the `[[` picker, the header's menu and an
 // idea's or a plan's History.
-import { useEffect, useRef } from "react";
+import { useRef } from "react";
 import { useEscape } from "../useEscape";
+import { useMenuKeys } from "../useMenuKeys";
 import { versionWhen, type Row } from "./ideasrelate";
 import type { Version } from "./source";
 
@@ -46,13 +47,10 @@ export type DocAct = {
 };
 
 /** The header's menu. `x` is the menu's RIGHT edge. */
-export function DocMenu(props: { x: number; y: number; byKey: boolean; acts: readonly DocAct[]; close(): void }) {
+export function DocMenu(props: { x: number; y: number; acts: readonly DocAct[]; close(): void }) {
   const ref = useRef<HTMLDivElement>(null);
   useEscape(props.close);
-  // Opened with a key: the first act takes the focus.
-  useEffect(() => {
-    if (props.byKey) ref.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
-  }, [props.byKey]);
+  useMenuKeys(ref, props.close);
   return (
     <>
       <div className="ix-catch" onPointerDown={props.close} onContextMenu={(e) => { e.preventDefault(); props.close(); }} />
