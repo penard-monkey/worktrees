@@ -800,7 +800,7 @@ impl Repo {
         }
         self.feed(&["update-index", "--force-remove", "-z", "--stdin"], &out, None)?;
         let add: Vec<u8> = w.files.iter().flat_map(|f| f.path.bytes().chain([0])).collect();
-        self.feed(&["update-index", "--add", "--remove", "--replace", "-z", "--stdin"], &add, None)?;
+        self.feed(&["update-index", "--add", "--remove", "-z", "--stdin"], &add, None)?;
         let raw = self.text(&["diff-index", "--cached", "--raw", "-z", "--no-renames", "--abbrev=40", "--ignore-submodules=none", &self.base()?])?;
         let (mut dirty, mut back) = (Vec::new(), Vec::new());
         let mut fields = raw.split('\0');
@@ -1057,6 +1057,12 @@ pub fn image_at(root: &Path, id: &str, path: &str, etag: Option<&str>) -> Result
 /// elsewhere. That one file and no other, so it takes nothing more of a fold
 /// that is being written than what is about to be overwritten.
 pub fn write_at(root: &Path, id: &str, path: &str, content: &str, base: &Base, keep_history: bool) -> Result<Saved, String> {
+    write_with(root, id, path, content, base, keep_history, &|| ())
+}
+
+/// [`write_at`], with a test's say in what happens between the check and the
+/// write.
+fn write_with(root: &Path, id: &str, path: &str, content: &str, base: &Base, keep_history: bool, between: &dyn Fn()) -> Result<Saved, String> {
     wsfolder::refuse_real(root)?;
     rel_ok(path)?;
     if content.len() as u64 > MAX_TEXT_BYTES {
@@ -1100,11 +1106,14 @@ pub fn write_at(root: &Path, id: &str, path: &str, content: &str, base: &Base, k
             f
         }
     };
-    if let Some(bytes) = was.filter(|_| keep_history) {
-        let repo = Repo::open(&mem)?;
-        repo.prepare()?;
-        preserve(&repo, path, &bytes, &format!("Before keeping your text: {path}"))?;
-        // What was preserved is what is about to go.
+    if let Some(bytes) = was {
+        if keep_history {
+            let repo = Repo::open(&mem)?;
+            repo.prepare()?;
+            preserve(&repo, path, &bytes, &format!("Before keeping your text: {path}"))?;
+        }
+        between();
+        // What was read, and preserved, is what is about to go.
         if open_read(&dst, path, MAX_TEXT_BYTES + 1)?.1 != bytes {
             return Err(format!("{ERR_STALE}: {path}"));
         }
@@ -2283,6 +2292,18 @@ mod tests {
         assert!(fs::read_dir(s.mem().join(".git")).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with("keep.")));
     }
 
+    #[test]
+    fn a_text_written_while_a_save_is_made_is_not_replaced() {
+        let s = Scratch::made("between");
+        for keep in [false, true] {
+            s.put(INDEX, "theirs\n");
+            let d = s.read(INDEX).unwrap();
+            let e = write_with(&s.root, &s.id, INDEX, "mine\n", &Base::Rev(d.rev), keep, &|| s.put(INDEX, "later\n")).unwrap_err();
+            assert!(e.starts_with(ERR_STALE), "{e}");
+            assert_eq!(s.text(INDEX), "later\n");
+        }
+    }
+
     /// The list, the watch and the history hold the same files, whatever they
     /// are called and whatever the folder says to ignore.
     #[test]
@@ -2319,8 +2340,10 @@ mod tests {
         assert_eq!(skipped(&s), vec!["a/b/c/d/e/f/g/h", "away", "files/big.bin", "topics/a\nb.md", "topics/c\\d.md", "topics/clone", "topics/l.md"]);
         assert_eq!(status_at(&s.root, &s.id).unwrap().dirty, Vec::<String>::new(), "and nothing stays dirty for good");
         assert_eq!(log_at(&s.root, &s.id, Some(":(glob)*.md"), None, None).unwrap().changes.len(), 1);
+        s.git(&["config", "core.precomposeunicode", "true"]);
         for p in &want {
             s.read(p).unwrap();
+            assert_eq!(log_at(&s.root, &s.id, Some(p), None, None).unwrap().changes.len(), 1, "{p}");
         }
     }
 
