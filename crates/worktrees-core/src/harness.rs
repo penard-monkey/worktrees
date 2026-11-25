@@ -454,6 +454,15 @@ impl Adapter for Claude {
     }
 }
 
+/// `flags` plus the per-run trust `-c`, when the launch's trust has one.
+fn with_trust_flags(mut flags: Vec<String>, trust: &crate::trust::CodexLaunchTrust) -> Vec<String> {
+    if let Some(config) = &trust.config {
+        flags.push("-c".into());
+        flags.push(shell_quote(config));
+    }
+    flags
+}
+
 impl Adapter for Codex {
     fn provider(&self) -> &'static Provider {
         provider::CODEX
@@ -465,8 +474,11 @@ impl Adapter for Codex {
             .ok_or_else(|| "Codex CLI is not installed. Install it, then sign in with `codex login`.".into())
     }
 
+    /// The permission flags, and — only for a repo in the user's allowance —
+    /// the per-run `-c` that starts Codex trusted (`trust::codex_launch_trust`).
+    /// Never a write to Codex's config; a repo that is not allowed gets none.
     fn place_flags(&self, wt: &str) -> Vec<String> {
-        crate::codex::launch_flags(wt)
+        with_trust_flags(crate::codex::launch_flags(wt), &crate::trust::codex_launch_trust(wt))
     }
 
     /// Worktrees-owned Codex panes use ChatGPT account sign-in, and
@@ -523,7 +535,7 @@ impl Adapter for Codex {
     fn prepare(&self, _p: &Project, slug: &str, wt: &str, launch: &mut AiLaunch) -> Result<(), Refusal> {
         // Before the quota gate: no usage probe for a launch that would only
         // sit at Codex's folder-trust prompt. Trust is the user's to give, so
-        // this READS Codex's config and never writes it or passes a `-c`.
+        // this READS Codex's config and the user's allowance, never writes it.
         if !launch.force {
             crate::codextrust::check(std::path::Path::new(wt)).map_err(|why| {
                 let then = if slug == "(main)" {
@@ -1677,6 +1689,35 @@ mod tests {
         assert_eq!(l.cmd, before, "no resume words may be appended without an id");
         assert!(!l.resume, "the launch must stop calling itself a resume");
         assert!(!l.launch_cmd("s").contains("resume"), "{}", l.launch_cmd("s"));
+    }
+
+    /// The trust `-c` rides on a Codex launch only for an allowed repo, quoted
+    /// as ONE shell word (a path with a space or a dot in it), and resume keeps it.
+    #[test]
+    fn codex_launch_args_carry_the_trust_override_only_for_an_allowed_repo() {
+        use crate::trust::codex_launch_trust_for as t;
+        let root = "/private/tmp/my repo.v2";
+        let launch = |allowed: bool, resume: bool| {
+            let mut l = AiLaunch::plain("codex");
+            l.place_flags = with_trust_flags(vec!["--sandbox".into()], &t(Some(root), allowed));
+            if resume {
+                l.cmd.push_str(" resume 'abc'");
+            }
+            l.launch_cmd("s")
+        };
+        let off = launch(false, false);
+        assert!(!off.contains("trust_level") && !off.contains("projects="), "{off}");
+        for resume in [false, true] {
+            let on = launch(true, resume);
+            assert!(
+                on.contains(r#"-c 'projects={"/private/tmp/my repo.v2"={trust_level="trusted"}}'"#),
+                "one quoted word, path intact: {on}"
+            );
+            assert_eq!(on.matches("trust_level").count(), 1, "{on}");
+            assert!(on.contains("--sandbox"), "the permission flags stay: {on}");
+        }
+        // An unspellable path adds nothing (the launch was refused before this).
+        assert_eq!(with_trust_flags(Vec::new(), &t(Some("/r\"x"), true)), Vec::<String>::new());
     }
 
     /// …and with one, it is emitted quoted, exactly once.

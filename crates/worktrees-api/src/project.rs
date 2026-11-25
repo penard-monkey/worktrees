@@ -917,6 +917,64 @@ pub fn kimi_version() -> Result<String, String> {
     worktrees_core::kimi::version().inspect_err(|e| applog("warn", &format!("kimi_version: {e}")))
 }
 
+/// Settings → Policy → Codex folder trust: every registered project with
+/// whether the user has allowed it (`[trust] codex`), and how a Codex lane in
+/// `repo` would be trusted. Reads `config.toml` and, for `own_trusted`, Codex's
+/// `projects` — never writes either. The dispatcher filters `projects` to the
+/// caller's scope; `stale` (allowed roots no registered project has any more)
+/// is the console's alone, so a paired device learns no path outside its reach.
+#[derive(Serialize)]
+pub struct CodexStatus {
+    pub projects: Vec<CodexProject>,
+    pub stale: Vec<String>,
+    pub repo_root: Option<String>,
+    pub repo_allowed: bool,
+    pub launch: Option<worktrees_core::trust::CodexLaunchTrust>,
+    /// Whether Codex's OWN config already trusts `repo` (so a launch there
+    /// needs nothing from the allowance).
+    pub own_trusted: Option<bool>,
+}
+
+#[derive(Serialize)]
+pub struct CodexProject {
+    pub root: String,
+    pub name: String,
+    pub allowed: bool,
+}
+
+pub fn codex_status(ctx: &Ctx, repo: Option<String>) -> Result<CodexStatus, String> {
+    let repo_root = repo.as_deref().and_then(worktrees_core::trust::repo_root);
+    let allowed = worktrees_core::trust::allowed("codex");
+    let repo_allowed = repo_root.as_ref().is_some_and(|r| allowed.contains(r));
+    let launch = repo_root.as_deref().map(worktrees_core::trust::codex_launch_trust);
+    let own_trusted = repo_root.as_deref().map(|r| {
+        worktrees_core::codextrust::check_in(std::path::Path::new(r), &worktrees_core::codexmcp::config_path()).is_ok()
+    });
+    let entries = worktrees_core::registry::read_lenient().projects;
+    let key = |root: &str| worktrees_core::trust::repo_root(root).unwrap_or_else(|| root.to_string());
+    let keys: Vec<String> = entries.iter().map(|e| key(&e.root)).collect();
+    let stale = if ctx.is_console() { allowed.iter().filter(|r| !keys.contains(r)).cloned().collect() } else { Vec::new() };
+    let projects = entries
+        .into_iter()
+        .zip(keys)
+        .map(|(e, k)| CodexProject { allowed: allowed.contains(&k), root: e.root, name: e.name })
+        .collect();
+    Ok(CodexStatus { projects, stale, repo_root, repo_allowed, launch, own_trusted })
+}
+
+/// Allow (or revoke) this repo's Codex lanes to start trusted, for each launch
+/// only (`[trust] codex`; Codex's own config is never written). The user's act,
+/// from Settings → Policy; the MCP server has no path here and a paired device
+/// is refused at the dispatcher (`HostConsole`). Same keying as kimi's.
+pub fn set_codex_allowed(repo: String, allow: bool) -> Result<bool, String> {
+    let root = worktrees_core::trust::root_for("codex", &repo, allow).ok_or_else(|| {
+        let e = format!("{repo} is not inside a git repository");
+        applog("warn", &format!("set_codex_allowed: {e}"));
+        e
+    })?;
+    worktrees_core::trust::set_allowed("codex", &root, allow).inspect_err(|e| applog("error", &format!("set_codex_allowed: {e}")))
+}
+
 /// Settings → pi's trust mode: host policy like Codex's permissions, and read
 /// back through `pi_status`'s `trust`. An unknown value is refused, never
 /// defaulted, and nothing is written.

@@ -49,6 +49,9 @@ function mockModel(h: Harness, asked: unknown): string {
 // a machine without kimi.
 let kimiMcpMode: "off" | "read-only" | "mutations" = "off";
 const kimiAllowed = new Set<string>();
+// Settings → Policy → Codex folder trust: the `[trust] codex` allowance (core
+// `trust`, in ~/.config/worktrees/config.toml). Empty = off for every repo.
+const codexAllowed = new Set<string>();
 /** The remote door's state in the harness: the hosts this "machine" is
  *  paired with, and the one the window drives. `?remote` starts with one
  *  chosen, so the path-taking acts can be seen greyed. */
@@ -5420,6 +5423,27 @@ Phase 3: Frontend pane and mock harness
         allowed: [...kimiAllowed], repo_root: root, repo_allowed: allowed,
         launch: root ? { env: allowed ? ["KIMI_CODE_TRUST_WORKSPACE", "1"] : null, source: allowed ? "allowance" : "ask", allowed, shadowed: false } : null,
       };
+    }
+    case "codex_status": {
+      const root = typeof args.repo === "string" ? args.repo : null;
+      const allowed = !!root && codexAllowed.has(root);
+      const known = new Set(ws.projects.map((p) => p.root));
+      return {
+        projects: ws.projects.map((p) => ({ root: p.root, name: projectName(p.root), allowed: codexAllowed.has(p.root) })),
+        stale: [...codexAllowed].filter((r) => !known.has(r)),
+        repo_root: root, repo_allowed: allowed,
+        launch: root ? {
+          config: allowed ? `projects={"${root}"={trust_level="trusted"}}` : null,
+          source: allowed ? "allowance" : "own", allowed, repo_root: root, reason: null,
+        } : null,
+        own_trusted: root ? false : null,
+      };
+    }
+    case "set_codex_allowed": {
+      const root = String(args.repo);
+      const had = codexAllowed.has(root);
+      if (args.allow) codexAllowed.add(root); else codexAllowed.delete(root);
+      return had !== !!args.allow;
     }
     case "kimi_mcp_status":
       return kimiMcpStatus();

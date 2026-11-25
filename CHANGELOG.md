@@ -5,6 +5,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+
+- **Codex folder trust: allow a repo once, and its Codex lanes stop at no prompt.** Codex asks "Trust this folder?" in every repo it
+  has not seen, nothing in Worktrees can answer it, and a launch into one was refused (or, forced, sat at the modal). Turn a repo
+  on in Settings → Agent policy → Codex folder trust, or run `worktrees trust codex [<repo>] [--revoke]`, and its Codex lanes
+  start trusted: Codex then reads the repo's `AGENTS.md` and `.codex/` config and runs without its folder prompt, so code the
+  repo ships runs inside Codex with no question. **Off for every repo until you turn it on**, and only you can: the CLI and the
+  desktop's Settings, never a repo's `.worktrees.toml`, an agent's MCP tools or a paired device. It rides on each launch as one
+  per-run `-c` (measured on Codex 0.172.0; the inline-table form, because the dotted `projects."<path>"` form is not read), so
+  nothing is saved: `~/.codex/config.toml` is never written, a plain `codex` outside Worktrees is unaffected, and turning a repo
+  off applies at its next launch. A path with a quote, backslash or control character in it cannot be spelled safely and is
+  refused in words. A repo that is not allowed is refused as before, and the refusal now names the new way instead of leaving
+  `--force` (which only starts Codex at its prompt) as the apparent fix. `worktrees doctor --codex` (and `doctor`, and the MCP
+  `doctor`) report each allowed repo and whether a launch there would be trusted.
+
 ### Fixed
 
 - **Text fields look like text fields.** In Settings (Join with a link was the report), the header search, the dock and the chat composer a field was a flat box a few shades darker than its panel with a 1.2:1 edge, which in a light theme reads as greyed out; the owner took a while to find out they could type. Every editable field now has a fill that differs from its surface (white in the light themes, lighter than the panel, as the Settings search already was), an edge at least 3:1 against it in all six themes (`--line-field`, new; `--line-strong` was 1.3-2.8:1), an accent edge plus an outline when focused, and a disabled field loses its fill and edge and shows a not-allowed cursor, so the two cannot be mistaken. The Join form's name field, disabled while a join runs, now shows the difference. `app/scripts/fieldlook-browser.mjs` measures all of it in Chromium and WebKit.

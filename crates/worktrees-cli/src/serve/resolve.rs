@@ -1572,6 +1572,28 @@ mod tests {
         }
     }
 
+    /// The folder-trust allowances (pi's, kimi's, Codex's) let a repo's own code
+    /// run in a lane with no prompt, so granting or revoking one is a console
+    /// act even for a device holding everything — and so is naming one for a
+    /// repo the device cannot reach. Reading Codex's is an ordinary read.
+    #[test]
+    fn the_trust_allowances_are_set_from_the_console_only() {
+        let t = two("trustrows");
+        let (cx, g) = phone(&Capability::ALL, &[&t.a]);
+        let w = t.world();
+        for cmd in ["set_pi_allowed", "set_kimi_allowed", "set_codex_allowed"] {
+            for allow in [true, false] {
+                let e = try_row(cmd, &cx, &g, json!({ "repo": s(&t.a), "allow": allow }), &w).unwrap_err();
+                assert_eq!((e.kind, e.wire()), (RefusalKind::ConsoleOnly, json!(ERR_CONSOLE_ONLY)), "{cmd} {allow}");
+            }
+        }
+        assert!(try_row("codex_status", &cx, &g, json!({ "repo": s(&t.a) }), &w).is_ok(), "a device may read it");
+        let (none, ng) = phone(&[], &[&t.a]);
+        assert!(try_row("codex_status", &none, &ng, json!({ "repo": s(&t.a) }), &w).is_err(), "and needs read");
+        let (con, all) = console();
+        assert!(try_row("set_codex_allowed", &con, &all, json!({ "repo": s(&t.a), "allow": true }), &w).is_ok());
+    }
+
     /// A slot's capacity is how much of THIS machine every lane's gate may
     /// take, so setting it — or removing it — is a console act even for a
     /// device holding everything. Reading it is a `read`/`global` row like
