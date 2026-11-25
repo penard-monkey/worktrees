@@ -246,9 +246,14 @@ async function flow(page, tag, name) {
   await overview(page);
   await page.click("[data-testid=ws-ov-plan]");
   const [again] = await Promise.all([page.context().waitForEvent("page"), page.click("[data-testid=main-doc-float]")]);
-  ok(await until(again, (id) => document.querySelector(".ix-row.on")?.dataset.idea === id || document.querySelector("[data-testid=ideas-notice]"), plan, 15000), `${tag} the plan floats too`);
-  ok(await until(page, () => !!document.querySelector("[data-testid=ws-doc-plan] .wsf-chip-f")), `${tag} and its chip in the nav wears the mark`);
+  // Another tab's mock has no such plan: it cannot open it, and nothing moves here.
+  ok(await until(page, () => /The Ideas window did not open it: .*no idea has the id/.test(document.querySelector("[data-testid=main-doc] [data-testid=ideas-notice]")?.textContent ?? ""), null, 15000) && await page.evaluate((id) => document.querySelector("[data-testid=main-doc]")?.dataset.doc === id, plan), `${tag} a document that window cannot open stays here, and says why`);
+  // One that can: its answer, by name (documents-float-browser.mjs has two windows).
   await again.close();
+  await page.evaluate(() => { const t = window.__TAURI_INTERNALS__, i = t.invoke; window.__openReal = i; t.invoke = (c, a) => { if (c !== "open_companion") return i(c, a); const k = JSON.parse(localStorage.getItem("wt.ideas.show")); localStorage.setItem("wt.ideas.shown", JSON.stringify({ ask: k.ask, at: Date.now(), ok: true, doc: k.doc })); return Promise.resolve(null); }; });
+  await page.click("[data-testid=main-doc-float]");
+  ok(await until(page, () => !!document.querySelector("[data-testid=ws-doc-plan] .wsf-chip-f")), `${tag} and its chip in the nav wears the mark`);
+  await page.evaluate(() => { window.__TAURI_INTERNALS__.invoke = window.__openReal; localStorage.removeItem("wt.ideas.show"); });
   await page.click("[data-testid=ws-floated-here]");
   ok(await until(page, (id) => document.querySelector("[data-testid=main-doc]")?.dataset.doc === id, plan) && await until(page, () => !document.querySelector(".wsf-chip-f")), `${tag} Open it here opens it, and the mark goes`);
 

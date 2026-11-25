@@ -103,8 +103,21 @@ export function useDoc(o: DocOptions) {
     if (session.current) void session.current.external(ev);
   }), [source, bump]);
 
-  /** Start a session on a document just read, created or changed by an act. */
-  const begin = useCallback((d: Doc, focus = false) => {
+  /** Start a session on a document just read, created or changed by an act.
+   *  `false`: the open one holds text its file does not, and no document takes
+   *  its place. An act's answer for that same one meets the text as a change
+   *  (a conflict). `over`: that text has just been kept elsewhere. */
+  const begin = useCallback((d: Doc, focus = false, over = false): boolean => {
+    const was = session.current;
+    if (was && !over && was.dirty()) {
+      if (was.id === d.id && openRef.current?.source === source) was.adopt(d.content, d.mtime_ms);
+      else {
+        void was.flush();
+        cb.current.notice(`“${d.title || "Untitled"}” is not open: this ${openRef.current ? nounOf(openRef.current) : "document"} has text that is being saved.`);
+      }
+      bump();
+      return false;
+    }
     readSeq.current++;
     session.current?.close();
     const key = `${d.id}#${++keySeq.current}`;
@@ -164,6 +177,7 @@ export function useDoc(o: DocOptions) {
     setPicker(null);
     cb.current.began?.();
     bump();
+    return true;
   }, [arm, bump, setOpen, source]);
 
   /** The open document NOW, before React has drawn it. */
@@ -175,14 +189,17 @@ export function useDoc(o: DocOptions) {
   /** Leave the open document, saving first. Refused while its text cannot be
    *  saved (a conflict, or it was removed): that text exists nowhere else. */
   const leave = useCallback(async (before = "before you open another"): Promise<boolean> => {
-    const s = session.current;
-    if (!s) return true;
-    await s.flush();
-    if ((s.held() || s.current.kind === "error") && s.dirty()) {
-      cb.current.notice(`This ${openRef.current ? nounOf(openRef.current) : "document"} has text that is not saved. Keep yours or reload ${before}.`);
+    for (;;) {
+      const s = session.current;
+      if (!s) return true;
+      const clean = await s.drain();
+      // Another opening took its place while it was saved: that one is left too.
+      if (s !== session.current) continue;
+      if (clean) return true;
+      const stuck = s.held() || s.current.kind === "error";
+      cb.current.notice(`This ${openRef.current ? nounOf(openRef.current) : "document"} has text that is not saved${stuck ? `. Keep yours or reload ${before}.` : " yet: it is still being typed in."}`);
       return false;
     }
-    return true;
   }, []);
 
   /** Open one by its id. `true`: it (or what took it) is the open one now. */
@@ -203,7 +220,7 @@ export function useDoc(o: DocOptions) {
         // Typed while the read was out.
         if (!(await leave())) return false;
         if (n !== readSeq.current) return false;
-        begin(d);
+        return begin(d);
       }
       return true;
     } catch (e) {
@@ -219,8 +236,8 @@ export function useDoc(o: DocOptions) {
     if (!s || !cur || !cur.source.rename) return;
     setRenaming(null);
     if (!title.trim() || title.trim() === cur.title) return;
-    await s.flush();
-    if (s.held() || s.current.kind === "error") { cb.current.notice(`Save or reload this ${nounOf(cur)} before renaming it.`); return; }
+    if (!(await s.drain()) || s.held() || s.current.kind === "error") { cb.current.notice(`Save or reload this ${nounOf(cur)} before renaming it.`); return; }
+    if (s !== session.current) return;
     setBusy(true);
     try {
       const d = await cur.source.rename(cur.id, title.trim(), s.lastMtime);
@@ -240,7 +257,7 @@ export function useDoc(o: DocOptions) {
     try {
       const d = await source.keepAsNew(cur.title, text);
       cb.current.trace(`kept removed ${cur.id} as ${d.id}`);
-      begin(d);
+      begin(d, false, true);
       cb.current.listed();
     } catch (e) { cb.current.notice(`Could not save it as a new ${source.noun}: ${errText(e)}`); }
   }, [begin, source]);
@@ -259,13 +276,14 @@ export function useDoc(o: DocOptions) {
     if (!cur?.source.restore) return;
     const s = session.current;
     if (s) {
-      await s.flush();
-      if (s.held() || s.current.kind === "error") { cb.current.notice(`Save or reload this ${nounOf(cur)} before restoring a version.`); return; }
+      if (!(await s.drain()) || s.held() || s.current.kind === "error") { cb.current.notice(`Save or reload this ${nounOf(cur)} before restoring a version.`); return; }
+      if (s !== session.current) return;
     }
     try {
       const d = await cur.source.restore(cur.id, v.version, s?.lastMtime);
       cb.current.trace(`restored ${cur.id} ${v.version}`);
-      begin(d);
+      if (session.current !== s) { cb.current.listed(); return; }
+      if (!begin(d)) { cb.current.listed(); return; }
       cb.current.notice(`Restored the version of ${versionWhen(v.at)}. The text it replaced is in History.`);
       cb.current.listed();
     } catch (e) { cb.current.notice(`Could not restore it: ${errText(e)}`); }

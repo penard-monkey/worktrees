@@ -70,7 +70,7 @@ import { publishGroupChat } from "./betaLive";
 import { publishLanes } from "./laneLive";
 import {
   agentFor, ideaOntoWorkspace, itemPlace, launchCall, linkIdeaCall, linkPlaceCall, mainAsk, MAIN_ASK_KEY, makePlanCall, missingPlaces, newPath, placeOntoItem, planOntoWorkspace, problemLine,
-  setPlanCall, setProjectCall, showRequest, SHOW_KEY, startCall, unlinkIdeaCall, WS_CHANGED_KEY, WS_SHOW_KEY,
+  setPlanCall, setProjectCall, showRequest, startCall, unlinkIdeaCall, WS_CHANGED_KEY, WS_SHOW_KEY,
   type ItemRef, type Overview, type PlanView, type ProjectSet, type ProjectState, type StartDone, type WorkItem,
 } from "./plans";
 import { privacyArea, privacyWords } from "./privacypaths";
@@ -88,8 +88,9 @@ import { memoryDocs, type MemoryView } from "./doc/memory";
 import { linkTo, memoryLink } from "./doc/memorypath";
 import { navRows, type ChatRow } from "./wschats";
 import { attentionOf, docChips, LAST_VIEW_KEY, lastView, placeWorkspace, placeWorkspaces, PLACE_WS_KEY, placeWsRead, placeWsSet, rollupOf, tabOr, wsCounts, wsFrameOn, wsTabs, type LastView, type Rollup } from "./wsview";
+import { answer, ask, DOCK, FLOAT, take, windowEnv, type Ask, type HandDoc } from "./doc/handoff";
 import { MainDocument, type MainDocApi } from "./doc/MainDocument";
-import { ideaDocs as ideaSource, sameDoc, type DocTarget } from "./doc/source";
+import { ideaDocs as ideaSource, ideaHand, sameDoc, type DocTarget } from "./doc/source";
 import { remoteHostLabel, remoteTitle, remoteWebUrl } from "./remote";
 import { PrsPane } from "./PrsPane";
 import { ageOf, prOfPlace, prsShown, prSummary, TAB_MAX_AGE_S, useProjectPrs } from "./prs";
@@ -7052,14 +7053,48 @@ function App() {
   useEffect(() => {
     if (docShown) setNotice((n) => (n === docWaits.current ? "" : n));
   }, [docShown]);
-  /** Open a plan or an idea in the Ideas window (the document's Float): the
-   *  hand-off key, then open (or raise) it; it reads the key on load, focus or
-   *  `storage`. */
-  const openIdeaDoc = (id: string) => {
-    if (!ideasOn) return;
-    try { window.localStorage.setItem(SHOW_KEY, JSON.stringify({ id, at: Date.now() })); } catch { /* the window still opens */ }
-    openIdeas();
+  /** Ask the Ideas window to open a document (Float, and its card's Show).
+   *  `null`: it has it open. Else why not, and nothing has moved. */
+  const floatDoc = useCallback((to: DocTarget, ws: { id: string; name: string } | null): Promise<string | null> => {
+    const doc: HandDoc | null = to.source === ideaSource ? ideaHand(to.name) : ws ? { kind: "memory", ws: ws.id, name: ws.name, path: to.name } : null;
+    if (!ideasOn || !doc) return Promise.resolve("Ideas is off (Settings → General → Beta features).");
+    return ask(windowEnv(), FLOAT, doc, () => invoke("open_companion"), "The Ideas window");
+  }, [ideasOn]);
+  /** …and back: the Ideas window's Dock. Answered once the document is open. */
+  const docking = useRef<{ a: Ask; to: DocTarget } | null>(null);
+  const landedHere = (to: DocTarget, ok: boolean) => {
+    const d = docking.current;
+    if (!d || (ok && !sameDoc(d.to, to) && d.a.doc.kind === "memory")) return;
+    docking.current = null;
+    answer(windowEnv(), DOCK, d.a, ok ? { ok, doc: d.a.doc } : { ok, why: "The main window could not open it." });
   };
+  useEffect(() => {
+    if (!frameOn || !wsList) return;
+    const look = async () => {
+      const a = take(windowEnv(), DOCK);
+      if (!a || a.doc.kind !== "memory") return;
+      const { ws, path } = a.doc, to: DocTarget = { source: memoryDocs(ws), name: path };
+      const no = (why: string) => answer(windowEnv(), DOCK, a, { ok: false, why });
+      if (!wsChatsOn || !wsById(ws)) { no(wsChatsOn ? "The main window does not have that workspace any more." : "Workspace chats is off (Settings → General → Beta features)."); return; }
+      if (sameDoc(mainDocRef.current, to)) {
+        void showWsRef.current(ws, "memory", { doc: path, here: true });
+        answer(windowEnv(), DOCK, a, { ok: true, doc: a.doc });
+        return;
+      }
+      docking.current = { a, to };
+      if (!(await showWsRef.current(ws, "memory", { doc: path, here: true })) && docking.current?.a === a) {
+        docking.current = null;
+        no("The main window has a document open with text that is not saved.");
+      }
+    };
+    void look();
+    const go = () => void look();
+    const onStorage = (e: StorageEvent) => { if (e.key === DOCK.ask) go(); };
+    window.addEventListener("focus", go);
+    window.addEventListener("storage", onStorage);
+    return () => { window.removeEventListener("focus", go); window.removeEventListener("storage", onStorage); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [frameOn, wsChatsOn, !!wsList]);
   /** The Ideas window asks to show a workspace ("Make workspace", "Open
    *  workspace ▸"), the same way round. */
   useEffect(() => {
@@ -9319,11 +9354,15 @@ function App() {
         }}
         edit={(t, name) => void showWs(id, t, { doc: t === "plan" ? undefined : name ?? undefined, startIn: "edit", chat: null })}
         float={ideasOn ? (to) => void (async () => {
-          // One document, one editor: what is open here of it is saved and closed.
-          const cur = mainDocRef.current;
-          if (sameDoc(cur, to) && !(await leaveMainDoc())) { setNotice("It is open in its workspace with text that is not saved."); return; }
-          setFloated({ ...to, title: ideaDocs.find((d) => d.id === to.name)?.title ?? "It" });
-          openIdeaDoc(to.name);
+          const title = to.source === ideaSource ? ideaDocs.find((d) => d.id === to.name)?.title || "It" : nameAt(wsMem.of(id), to.name);
+          // What is open here of it is saved, before and after.
+          const here = () => sameDoc(mainDocRef.current, to);
+          const unsaved = () => setNotice(`“${title}” is open in its workspace with text that is not saved.`);
+          if (here() && mainDocApi.current && !(await mainDocApi.current.leave())) { unsaved(); return; }
+          const why = await floatDoc(to, placeWs);
+          if (why !== null) { setNotice(`${why} “${title}” is still here.`); return; }
+          if (here() && !(await leaveMainDoc())) { unsaved(); return; }
+          setFloated({ ...to, title });
         })() : null}
         reveal={(path) => { revealOnHost(path).catch((e) => fail(e)); }} />
     );
@@ -9930,7 +9969,7 @@ function App() {
                           fresh: tab === "memory" && wsMem.unseen(w.id) && !(wsShown?.id === w.id && wsTabNow === "memory"),
                           count: tab === "ideas" ? (w.ideas ?? []).length : undefined,
                           on: !guestOpen && wsShown?.id === w.id && wsTabNow === tab,
-                          floated: !!floated && (tab === "plan" ? w.plan === floated.name : tab === "ideas" && (w.ideas ?? []).includes(floated.name)),
+                          floated: !!floated && (tab === "memory" ? floated.source === memoryDocs(w.id) : tab === "plan" ? w.plan === floated.name : tab === "ideas" && (w.ideas ?? []).includes(floated.name)),
                           waits: docStuck !== null && mainDoc?.ws === w.id && mainDoc.tab === tab,
                         }))}
                         open={(tab) => { void showWs(w.id, tab); setMenu(null); closeCtx(); hideNav(); }}
@@ -10902,7 +10941,7 @@ function App() {
                 }}
                 floated={floated && wsShown && sameDoc(floated, tabDoc(wsShown.id, wsTabNow)) ? {
                   title: floated.title,
-                  show: () => openIdeaDoc(floated.name),
+                  show: () => void floatDoc(floated, wsShown).then((why) => { if (why !== null) setNotice(why); }),
                   here: () => void showWs(wsShown.id, wsTabNow, { here: true }),
                 } : null}
                 openId={wsShown ? tabDoc(wsShown.id, wsTabNow)?.name ?? null : null}
@@ -10931,9 +10970,10 @@ function App() {
                     stuck={setDocStuck}
                     waits={(title) => { docWaits.current = `“${title}” has text that is not saved. It is still open in its workspace.`; setNotice(docWaits.current); }}
                     closed={() => setMainDoc(null)}
-                    // The Ideas window takes an idea's id: a memory file has no
-                    // hand-off to it yet, so it does not float.
-                    float={mainDoc.source === ideaSource ? (to, title) => { setMainDoc(null); setFloated({ ...to, title }); openIdeaDoc(to.name); } : undefined}
+                    // Floating is the Ideas window's, and that is Ideas' own beta.
+                    float={ideasOn ? (to) => floatDoc(to, wsById(mainDoc.ws) ?? null) : undefined}
+                    floated={(to, title) => { setMainDoc((d) => (sameDoc(d, to) ? null : d)); setFloated({ ...to, title }); }}
+                    landed={landedHere}
                     {...(mainDoc.tab === "memory" ? {
                       // A note is its heading, as the open document has it.
                       title: mainDoc.name.startsWith("notes/") ? undefined : mainDoc.name.slice(mainDoc.name.lastIndexOf("/") + 1),

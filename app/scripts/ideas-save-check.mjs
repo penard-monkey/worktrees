@@ -137,6 +137,7 @@ function rig(initial = "---\nid: 01JC\n---\n\n# A\n", { holdWrites = false } = {
   const states = [];
   const replaced = [];
   const c = clock();
+  let reading = null;
   const doWrite = (content, exp) => {
     if (!disk.exists) throw GONE;
     if (exp !== disk.mtime) throw STALE;
@@ -154,6 +155,7 @@ function rig(initial = "---\nid: 01JC\n---\n\n# A\n", { holdWrites = false } = {
     },
     read() {
       calls.push({ row: "idea_read" });
+      if (reading) { const p = reading; reading = null; return p; }
       return disk.exists ? Promise.resolve({ content: disk.content, mtime_ms: disk.mtime }) : Promise.reject(GONE);
     },
   };
@@ -166,6 +168,7 @@ function rig(initial = "---\nid: 01JC\n---\n\n# A\n", { holdWrites = false } = {
   });
   return {
     s, c, disk, calls, states, replaced, saved,
+    holdRead(p) { reading = p; },
     type(t) { editor = t; s.edited(); },
     get editor() { return editor; },
     writes: () => calls.filter((x) => x.row === "idea_write"),
@@ -226,6 +229,68 @@ function rig(initial = "---\nid: 01JC\n---\n\n# A\n", { holdWrites = false } = {
   check(r.last() === "clean" && r.disk.content === r.editor, "both edits are on disk");
 }
 
+// ── leaving: the text typed while leave's own write is out ──────────────────
+{
+  const r = rig(undefined, { holdWrites: true });
+  r.type(r.editor + "1");
+  let left = null;
+  const l = r.s.drain().then((x) => { left = x; });
+  await settle();
+  check(r.writes().length === 1, "leaving saves at once");
+  for (const c of ["2", "3"]) {
+    r.type(r.editor + c);
+    await r.release();
+    check(left === null, `typed (${c}) during that write: it has not left`);
+  }
+  await r.release();
+  await within(l, "leaving");
+  check(left === true && r.disk.content === r.editor && r.editor.endsWith("123"), "it leaves with all of it on disk");
+  r.s.close();
+  check(r.c.pending() === 0 && !r.s.dirty(), "and nothing is left for a timer that closing drops");
+}
+{
+  const r = rig(undefined, { holdWrites: true });
+  r.type(r.editor + "1");
+  const l = r.s.drain();
+  await settle();
+  r.type(r.editor + "2");
+  r.disk.content = "theirs"; r.disk.mtime = 9000;
+  await r.release();
+  check(await Promise.race([l, settle().then(() => "pending")]) === false && r.last() === "conflict" && r.editor.endsWith("12"), "a refusal is said: it has not left, and the text is there");
+}
+{
+  const r = rig(undefined, { holdWrites: true });
+  r.type(r.editor + "1");
+  let left = null;
+  const l = r.s.drain().then((x) => { left = x; });
+  await settle();
+  for (let i = 0; i < 60 && left === null; i++) { r.type(r.editor + "x"); await r.release(); }
+  await within(l, "leaving while it is typed in");
+  check(left === false && r.s.dirty(), "one that is typed in without a pause is not left, rather than waited for for ever");
+  check(r.c.pending() === 1, "and its autosave is still there");
+}
+{
+  const r = rig();
+  check(await r.s.drain() === true && r.writes().length === 0, "leaving a clean one writes nothing");
+}
+
+// ── a change by an act of the window's own (rename, restore), typed into ────
+{
+  const r = rig();
+  r.disk.content = "---\nid: 01JC\n---\n\n# Renamed\n"; r.disk.mtime = 2000;
+  r.type(r.editor + "typed during it");
+  r.s.adopt(r.disk.content, 2000);
+  check(r.editor.endsWith("typed during it") && r.last() === "conflict", "what was typed during a rename is not replaced by its answer: it asks");
+  await r.s.keepMine();
+  check(r.disk.content === r.editor && r.last() === "clean", "and Keep mine saves it");
+}
+{
+  const r = rig();
+  r.disk.content = "---\nid: 01JC\n---\n\n# Renamed\n"; r.disk.mtime = 2000;
+  r.s.adopt(r.disk.content, 2000);
+  check(r.editor === r.disk.content && r.last() === "clean", "with nothing typed its answer is taken");
+}
+
 // ── a refused save ──────────────────────────────────────────────────────────
 {
   const r = rig();
@@ -267,12 +332,14 @@ function rig(initial = "---\nid: 01JC\n---\n\n# A\n", { holdWrites = false } = {
   r.type(r.editor + "b");
   await r.s.flush();
   await r.s.external({ changed: [{ id: "01JC", mtime_ms: m1 }], removed: [] });
-  check(r.reads().length === 0 && r.replaced.length === 0 && r.last() === "clean",
-    "an event carrying the mtime of an EARLIER write of ours (a tick between two saves) is ours: nothing is read or replaced");
+  check(r.replaced.length === 0 && r.last() === "clean",
+    "an event carrying the mtime of an EARLIER write of ours (a tick between two saves) is ours: nothing is replaced");
   await r.s.external({ changed: [{ id: "01JC", mtime_ms: r.disk.mtime }], removed: [] });
-  check(r.reads().length === 0 && r.replaced.length === 0, "the last write's mtime is ours too");
+  check(r.replaced.length === 0 && r.last() === "clean", "the last write's mtime is ours too");
+  check(r.reads().length === 2, "…each read to know: a millisecond is not a revision");
+  const before = r.reads().length;
   await r.s.external({ changed: [{ id: "01OTHER", mtime_ms: 1 }], removed: ["01GONE"] });
-  check(r.reads().length === 0 && r.last() === "clean", "another idea's change is not this one's");
+  check(r.reads().length === before && r.last() === "clean", "another idea's change is not this one's");
 }
 {
   const r = rig(undefined, { holdWrites: true });
@@ -285,7 +352,81 @@ function rig(initial = "---\nid: 01JC\n---\n\n# A\n", { holdWrites = false } = {
   check(r.reads().length === 0 && r.last() === "saving", "an event during a write waits for the write's answer");
   await r.release();
   await within(done, "the deferred event");
-  check(r.reads().length === 0 && r.replaced.length === 0 && r.last() === "clean", "and the mtime it carried was that write's: ours");
+  check(r.replaced.length === 0 && r.last() === "clean" && r.disk.content === r.editor, "and the mtime it carried was that write's: ours");
+}
+// ── the same millisecond, another text ──────────────────────────────────────
+for (const [what, theirs] of [["of the same size", "---\nid: 01JC\n---\n\n# B\n"], ["of another size", "---\nid: 01JC\n---\n\n# Another\n"]]) {
+  const ev = { changed: [{ id: "01JC", mtime_ms: 1000 }], removed: [] };
+  {
+    const r = rig();
+    r.disk.content = theirs; // the mtime does not move
+    await r.s.external(ev);
+    check(r.reads().length === 1 && r.editor === theirs && r.last() === "clean", `an edit elsewhere in the open copy's own millisecond (${what}) is read, and taken`);
+  }
+  {
+    const r = rig();
+    r.type(r.editor + "mine");
+    r.disk.content = theirs;
+    await r.s.external(ev);
+    check(r.editor.endsWith("mine") && r.last() === "conflict", `…and with unsaved text it is a conflict (${what})`);
+    await r.c.advance(SAVE_PAUSE_MS * 2);
+    check(r.writes().length === 0 && r.disk.content === theirs, "…which no autosave writes over");
+  }
+  {
+    const r = rig();
+    r.type(r.editor + "a");
+    await r.s.flush();
+    const own = r.disk.mtime;
+    r.disk.content = theirs; // in the millisecond of our write
+    await r.s.external({ changed: [{ id: "01JC", mtime_ms: own }], removed: [] });
+    check(r.editor === theirs, `one in the millisecond of a write of ours too (${what})`);
+  }
+}
+{
+  // The event for the text it was LOADED with, late, while a save is out.
+  const r = rig(undefined, { holdWrites: true });
+  r.type(r.editor + "1");
+  await r.c.advance(SAVE_PAUSE_MS);
+  const done = r.s.external({ changed: [{ id: "01JC", mtime_ms: 1000 }], removed: [] });
+  r.type(r.editor + "2");
+  await r.release();
+  await within(done, "the late event");
+  check(r.last() !== "conflict" && r.editor.endsWith("12"), "a late event for the text it was loaded with is no conflict");
+  await r.c.advance(SAVE_PAUSE_MS);
+  await r.release();
+  check(r.disk.content === r.editor && r.last() === "clean", "…and both edits are on disk");
+}
+{
+  // Touched, with the same text: nothing to take, and the next save goes through.
+  const r = rig();
+  r.type(r.editor + "mine");
+  r.disk.mtime = 5000;
+  await r.s.external({ changed: [{ id: "01JC", mtime_ms: 5000 }], removed: [] });
+  check(r.last() === "dirty" && r.replaced.length === 0, "a file touched, its text the same: no conflict");
+  await r.c.advance(SAVE_PAUSE_MS);
+  check(r.disk.content === r.editor && r.last() === "clean", "…and the save after it is against its new mtime");
+}
+{
+  // The read is out: a save of ours lands meanwhile, and its answer is not theirs.
+  const r = rig();
+  let go;
+  const real = r.disk.content;
+  r.holdRead(new Promise((res) => { go = () => res({ content: real, mtime_ms: 1000 }); }));
+  const done = r.s.external({ changed: [{ id: "01JC", mtime_ms: 1000 }], removed: [] });
+  await settle();
+  r.type(r.editor + "typed");
+  await r.s.flush();
+  go();
+  await within(done, "the read");
+  check(r.editor.endsWith("typed") && r.disk.content === r.editor && r.last() === "clean" && r.replaced.length === 0, "a read that was out while a save of ours landed is asked again, not believed");
+}
+{
+  const r = rig();
+  r.type(r.editor + "typed");
+  await r.s.external({ changed: [{ id: "01JC", mtime_ms: 1000 }], removed: [] });
+  check(r.last() === "dirty" && r.editor.endsWith("typed"), "an event for the text we have, while typing: nothing");
+  await r.c.advance(SAVE_PAUSE_MS);
+  check(r.disk.content === r.editor && r.last() === "clean", "…and it is saved as ever");
 }
 {
   const r = rig();

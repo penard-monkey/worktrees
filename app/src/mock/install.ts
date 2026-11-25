@@ -4463,7 +4463,7 @@ Phase 3: Frontend pane and mock harness
       mockIdeaWrites.push({ id: args.id as string, content, expected_mtime: args.expectedMtime ?? args.expected_mtime, keep_history: keep });
       ideaCas(d, args.expectedMtime ?? args.expected_mtime);
       if (d.content !== content) {
-        if (keep) mockIdeaHistory.push({ id: d.id!, content: d.content });
+        if (keep) { mockIdeaHistory.push({ id: d.id!, content: d.content }); ideaKeep(d.id!, d.content); }
         d.content = content; d.mtime_ms = ideaNow(); ideasTouched();
       }
       // The answer is the idea as saved, without its text: its new `file`

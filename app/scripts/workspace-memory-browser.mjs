@@ -80,7 +80,7 @@ async function tabs(page, tag, eng) {
   ok(await page.evaluate(() => { const s = document.querySelector("[data-testid=ws-side]").getBoundingClientRect(), d = document.querySelector("[data-testid=main-doc]").getBoundingClientRect(); return s.right <= d.left + 1; }), `${tag} its files are a column beside it`);
   const list = await files(page);
   ok(list[0] === "MEMORY.md" && list.filter((p) => p.startsWith("notes/")).length === 2 && list.includes("topics/nas-layout.md") && list.includes("files/rack.svg"), `${tag} the index, then notes, topics, files (${list})`);
-  ok((await page.locator("[data-testid=main-doc] .ix-title").innerText()) === "MEMORY.md" && await page.locator("[data-testid=main-doc] [data-testid=main-doc-float]").count() === 0, `${tag} its name is the file's, and it does not float yet`);
+  ok((await page.locator("[data-testid=main-doc] .ix-title").innerText()) === "MEMORY.md" && await page.locator("[data-testid=main-doc] [data-testid=main-doc-float]").count() === ((await page.evaluate(() => JSON.parse(sessionStorage.getItem("wt-mock-ui-state")).beta_ideas)) ? 1 : 0), `${tag} its name is the file's, and it floats with Ideas on`);
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/wsm-tab-${eng}.png` });
   // ── links ──
   await page.locator("[data-testid=main-doc] [data-testid=ideas-read] a", { hasText: "NAS layout" }).click();

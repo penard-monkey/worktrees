@@ -41,8 +41,15 @@ export function MainDocument(props: {
   waits(title: string): void;
   /** It is open no more: closed from its banner. */
   closed(): void;
-  /** Saved and closed here: the other window opens it. */
-  float?(to: DocTarget, title: string): void;
+  /** Ask the other window to open it. `null`: it has it open, and this one may
+   *  close; else why not, and it stays here. */
+  float?(to: DocTarget, title: string): Promise<string | null>;
+  /** It was: closed here, or left here to be read. */
+  floated?(to: DocTarget, title: string): void;
+  /** What the button says, where it is not Float (the Ideas window's Dock). */
+  floatAs?: { label: string; title: string; asking: string; to: string };
+  /** The document asked for is open (`true`), or could not be. */
+  landed?(to: DocTarget, ok: boolean): void;
   lead?: ReactNode;
   title?: string;
   strips?: ReactNode | ((mode: "edit" | "read") => ReactNode);
@@ -97,6 +104,7 @@ export function MainDocument(props: {
       const cur = current();
       if (ok) {
         if (cur && cur.name !== target.name) at.current.opened(cur);
+        if (cur) at.current.landed?.(cur, true);
         if (at.current.startIn === "edit") switchMode("edit", false);
         return;
       }
@@ -105,6 +113,7 @@ export function MainDocument(props: {
       had.current = false;
       closeOpen();
       setFailed(true);
+      at.current.landed?.(target, false);
     });
     return () => { gone = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- the one asked for is the trigger
@@ -140,17 +149,31 @@ export function MainDocument(props: {
     else if (had.current) { had.current = false; at.current.closed(); }
   }, [open]);
 
-  /** Float is a MOVE: saved, then closed here, then opened there. If it cannot
-   *  be saved nothing moves, and its banner says why. */
+  /** Float is a MOVE: saved, then opened there, then closed here. It stays on
+   *  screen until the other window says it has it; a refusal there, a window that
+   *  did not open and one that did not answer are said here, and nothing moves. */
+  const [asking, setAsking] = useState(false);
+  const asked = useRef(false);
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const float = async () => {
     const to = current();
-    if (!to || !(await leave("before you float it"))) return;
-    // Typed while the save was out: this is not the moment.
-    if (current()?.name !== to.name || session.current?.dirty()) return;
+    if (!to || !at.current.float || asked.current || !(await leave("before you float it"))) return;
+    if (!sameDoc(current(), to)) return;
     const title = openRef.current?.title || "Untitled";
-    had.current = false;
-    closeOpen();
-    props.float?.(to, title);
+    const key = openRef.current?.key;
+    asked.current = true;
+    setAsking(true);
+    const why = await at.current.float(to, title);
+    asked.current = false;
+    if (!alive.current) return;
+    setAsking(false);
+    if (why !== null) { setNotice(`${why} “${title}” is still here.`); return; }
+    // Typed while it was asked: saved first, and the other window reads it again.
+    const mine = openRef.current?.key === key;
+    if (mine && !(await leave("before it closes here: it is open in the other window too"))) return;
+    if (mine && openRef.current?.key === key) { had.current = false; closeOpen(); }
+    at.current.floated?.(to, title);
   };
   // The document before, until the one asked for is here: kept mounted (the
   // editor with it), out of reach, and gone from sight if the read is slow.
@@ -160,7 +183,7 @@ export function MainDocument(props: {
       {notice && <DocNotice text={notice} dismiss={() => setNotice(null)} />}
       {open ? (
         <DocumentPane doc={doc} follow={props.follow} history={props.history} lead={props.lead} title={props.title} strips={props.strips} attach={props.attach} linkNote={props.linkNote}
-          float={props.float && { title: "Float: move it to the Ideas window", run: () => void float() }} />
+          float={props.float && { title: asking ? (props.floatAs?.asking ?? "Opening it in the Ideas window…") : props.floatAs?.title ?? "Float: move it to the Ideas window", label: props.floatAs?.label, busy: asking, run: () => void float() }} />
       ) : (
         <header className="ix-head">
           <h1 className="ix-title">{failed ? "Not open" : "Opening…"}</h1>

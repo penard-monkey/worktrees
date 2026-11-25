@@ -93,7 +93,7 @@ export function DocumentPane(props: {
    *  there is room for its icon alone. */
   tool?: (small: boolean) => ReactNode;
   /** After History: the document's move to another window. */
-  float?: { title: string; run(): void };
+  float?: { title: string; label?: string; busy?: boolean; run(): void };
   /** In the menu, after History (when it is folded there) and Rename. */
   acts?: readonly DocAct[];
   /** The acts are the header's own buttons, on as many rows as they take, and
@@ -189,8 +189,8 @@ export function DocumentPane(props: {
           {props.float && (
             // Its own tooltip, not `title`: the press unmounts the button, and WKWebView
             // leaves a native tooltip on screen with nothing under it (VM, 2026-11-24).
-            <button className="ix-btn ix-btn-icon ix-tip" data-testid="main-doc-float" data-tip={props.float.title} aria-label={props.float.title} onClick={props.float.run}>
-              <Icons.ExternalLink size={13} />
+            <button className="ix-btn ix-btn-icon ix-tip" data-testid="main-doc-float" data-tip={props.float.title} aria-label={props.float.title} disabled={props.float.busy} onClick={props.float.run}>
+              <Icons.ExternalLink size={13} />{props.float.label && <span className="ix-float-label">{props.float.label}</span>}
             </button>
           )}
           {acts.length > 0 && (
