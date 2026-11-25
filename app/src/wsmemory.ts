@@ -107,7 +107,7 @@ export const conflictWords = (files: readonly string[]): string =>
 
 /** Commits of a memory that keep failing, in words. The files are saved. */
 export const failingWords = (e: CommitError, since: string): string =>
-  `Changes are not reaching this memory's history: ${e.error.replace(/[.\s]+$/, "")}. The files are saved. Tried ${e.times} times since ${since}.`;
+  `Memory could not be saved to its history since ${since}: ${e.error.replace(/[.\s]+$/, "")}. Its files are saved. ${e.times} tries.`;
 
 /** A memory's dot: something changed since it was looked at here. A memory that
  *  was only made is nothing to look at. */

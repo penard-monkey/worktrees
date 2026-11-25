@@ -49,6 +49,8 @@
 .ix-head-buttons .ix-tools { flex: 0 1 auto; flex-wrap: wrap; }
 .ix-head[data-tier="0"] { padding: var(--s1) var(--s3); gap: var(--s2); }
 .ix-state[hidden] { display: none; }
+.ix-head[data-fold="1"] .wsm-crumb, .ix-head[data-fold="2"] .wsm-crumb { display: none; }
+.ix-head[data-fold="2"] .ix-state:is([data-state="clean"], [data-state="dirty"], [data-state="saving"]) { display: none; }
 .ix-state { white-space: nowrap; color: var(--txt); font-size: var(--fs-meta); min-width: 5.5em; text-align: right; }
 /* Edit | Read: a segmented pair. Not `.seg` — App.css's `.seg` is Settings'. */
 .ix-seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 5px; overflow: hidden; flex: none; }

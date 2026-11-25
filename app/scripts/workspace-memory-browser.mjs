@@ -211,7 +211,7 @@ async function commits(page, tag) {
   const p = await page.context().newPage();
   await boot(p, ["beta_workspace_chats"], "&memfail=1");
   await name(p);
-  const words = /Changes are not reaching this memory's history: git commit failed: fatal: no space left on device\. The files are saved\. Tried 4 times since /;
+  const words = /Memory could not be saved to its history since .*: git commit failed: fatal: no space left on device\. Its files are saved\. 4 tries\./;
   ok(await until(p, () => !!document.querySelector("[data-testid=memory-failing]")) && words.test(await p.locator("[data-testid=memory-failing]").first().innerText()), `${tag} commits that keep failing are said on the Overview`);
   await p.click("[data-testid=ws-tab][data-tab=memory]");
   await isDoc(p, "MEMORY.md");
@@ -241,7 +241,7 @@ async function states(page, tag) {
   // ── a long index ──
   await page.evaluate((id) => window.__mock.memoryEdit(id, "MEMORY.md", "# Memory\n\n" + "A line of the index, long enough to count.\n".repeat(560)), ws);
   await tab(page, "memory");
-  ok(await until(page, () => /The index is long \(\d+ KB\)\. Every chat reads all of it\./.test(document.querySelector("[data-testid=memory-long]")?.textContent ?? "")) && await page.locator("[data-testid=memory-long] button").isDisabled(), `${tag} a long index says so; Tidy… is not here yet`);
+  ok(await until(page, () => /The index is long \(\d+ KB\)\. Every chat reads all of it\./.test(document.querySelector("[data-testid=memory-long]")?.textContent ?? "")) && await page.locator("[data-testid=memory-long] button").count() === 0, `${tag} a long index says so; Tidy… is not here yet`);
   // ── two hundred files ──
   await page.evaluate((id) => { for (let i = 0; i < 200; i++) window.__mock.memoryEdit(id, `notes/2026-${String(1 + (i % 10)).padStart(2, "0")}-${String(1 + (i % 28)).padStart(2, "0")}-n${i}.md`, `# Note ${i}\n`); }, ws);
   ok(await until(page, () => document.querySelectorAll("[data-testid=memory-group]").length === 10, null, 10000), `${tag} 200 notes fold by month`);

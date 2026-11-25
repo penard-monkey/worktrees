@@ -2,7 +2,7 @@
 // windows. Its header, the banners for a save that was refused, its history,
 // the editor and Read. What only one window has (the Ideas window's acts and
 // strips, the main window's Float) comes in through the slots.
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from "react";
 import * as Icons from "../icons";
 import { Markdown } from "../markdown";
 import "./doc.css";
@@ -33,10 +33,13 @@ function saveWords(s: SaveState): string {
 
 /** An image in Read: as its source answers it, or the words of why not. */
 function DocPicture({ source, from, src, alt }: { source: DocSource; from: string; src: string; alt: string }) {
-  const [img, setImg] = useState<DocImage | null>(null);
+  const [got, setGot] = useState<{ source: DocSource; from: string; src: string; img: DocImage } | null>(null);
+  // Only ever its own: not the one before, while this one is read.
+  const img = got?.source === source && got.from === from && got.src === src ? got.img : null;
   useEffect(() => {
     let gone = false;
-    source.image?.(from, src).then((i) => { if (!gone) setImg(i); }, (e) => { if (!gone) setImg({ note: errText(e) }); });
+    const take = (i: DocImage) => { if (!gone) setGot({ source, from, src, img: i }); };
+    source.image?.(from, src).then(take, (e) => take({ note: errText(e) }));
     return () => { gone = true; };
   }, [source, from, src]);
   if (!img) return <span className="ix-pic-note">{alt || src}</span>;
@@ -79,6 +82,8 @@ export function DocNotice(props: { text: string; act?: ReactNode; dismiss(): voi
 export const NARROW = 420;
 export const FULL = 640;
 const BREAKS = [NARROW, FULL] as const;
+/** A document's name is cut to fewer than this only when nothing else is left to fold. */
+const NAME_CHARS = 12;
 const bad = (s: SaveState) => s.kind === "conflict" || s.kind === "removed" || s.kind === "error";
 
 export function DocumentPane(props: {
@@ -116,6 +121,22 @@ export function DocumentPane(props: {
   const { open, save, mode, arm, session } = doc;
   const [head, setHead] = useState<HTMLElement | null>(null);
   const tier = useTier(head, BREAKS);
+  // The name keeps twelve characters (or all of itself): its folder goes first, then
+  // the word of its state, in the sheet, by what is measured with nothing folded.
+  useLayoutEffect(() => {
+    if (!head) return;
+    const fit = () => {
+      for (const f of ["0", "1", "2"]) {
+        head.dataset.fold = f;
+        const t = head.querySelector<HTMLElement>(".ix-title");
+        if (!t || t.clientWidth >= Math.min(t.scrollWidth, parseFloat(getComputedStyle(t).fontSize) * 0.6 * NAME_CHARS)) break;
+      }
+    };
+    fit();
+    const ro = new ResizeObserver(fit);
+    ro.observe(head);
+    return () => ro.disconnect();
+  });
   const [menu, setMenu] = useState<{ x: number; y: number; byKey: boolean } | null>(null);
   // The editor is mounted on the first Edit and stays for the pane's life: a
   // document that is only read fetches none.

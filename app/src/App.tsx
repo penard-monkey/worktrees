@@ -4433,6 +4433,8 @@ function App() {
   // replaced). A red banner for a question is what this whole path exists to
   // stop, so it does not share the error register.
   const [notice, setNotice] = useState("");
+  /** Where a removed workspace's folder went. */
+  const [wsMoved, setWsMoved] = useState<string | null>(null);
   const [codexInstallPrompt, setCodexInstallPrompt] = useState(false);
   const [agentSwitch, setAgentSwitch] = useState<AgentSwitch | null>(null);
   const [launchRefused, setLaunchRefused] = useState<LaunchRefused | null>(null);
@@ -6816,7 +6818,7 @@ function App() {
       const l = await wsRun("workspace_remove", { id });
       if (!l) return;
       const moved = (l as WsList & { moved_to?: string | null }).moved_to;
-      if (moved) setNotice(`Its memory and its chats were kept, in ${moved}.`);
+      if (moved) setWsMoved(moved);
       commitHist((h) => pruneNav(h, (x) => x.ws?.id === id));
       setWsOpen((cur) => (cur === id ? null : cur));
     })();
@@ -11442,8 +11444,17 @@ function App() {
       {groupChatOn && <GuestToasts />}
       {groupChatOn && <ShareDialogHost />}
       {groupChatOn && joining && <JoinDialog groupChat={groupChatOn} onClose={() => setJoining(false)} />}
-      {(err || notice || undo || planHint) && (
+      {(err || notice || undo || planHint || wsMoved) && (
         <div className="float-stack">
+          {/* A removed workspace's folder: the only word of where it is, so it
+              stays until it is dismissed. */}
+          {wsMoved && (
+            <div className="err err-float notice" data-testid="ws-moved" role="status">
+              <span className="float-text">Its memory and its chats were kept, in {wsMoved}</span>
+              <button className="ctrl sm" data-testid="ws-moved-reveal" onClick={() => { revealOnHost(wsMoved).catch((e) => fail(e)); }}>Show in Finder</button>
+              <button className="ctrl sm" data-testid="ws-moved-dismiss" onClick={() => setWsMoved(null)}>Dismiss</button>
+            </div>
+          )}
           {/* One click back from a slip of the wrist — a drag rewrites declared
               state, and the row it moves can land in a collapsed group or a
               hidden tier, i.e. out of sight of the gesture that moved it. */}

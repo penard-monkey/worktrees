@@ -18,6 +18,8 @@ import {
 import { whenWords } from "./wschats";
 import "./WorkspaceMemory.css";
 
+/** Of what the list does not show, how many it names. */
+const SKIPPED_SHOWN = 6;
 const errText = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : String(e));
 
 /** The files: the index, then notes, topics, files; folded where there are many. */
@@ -61,9 +63,18 @@ export function MemoryFiles(props: { ws: string; view: MemoryView; on: string | 
       })}
       {props.made && <NewFile ws={props.ws} made={props.made} />}
       {(view.truncated || view.skipped.length > 0) && (
-        <p className="wsm-skipped" data-testid="memory-skipped" title={view.skipped.map((s) => `${s.path}: ${s.why}`).join("\n")}>
-          {view.truncated ? "Not every file is listed. " : ""}{view.skipped.length ? `${filesWords(view.skipped.length)} not shown: ${view.skipped[0].path} (${view.skipped[0].why})${view.skipped.length > 1 ? "…" : ""}` : ""}
-        </p>
+        <div className="wsm-skipped" data-testid="memory-skipped">
+          {view.truncated && <p>Not every file is listed.</p>}
+          {view.skipped.length > 0 && (
+            <>
+              <p>{filesWords(view.skipped.length)} not shown:</p>
+              <ul>
+                {view.skipped.slice(0, SKIPPED_SHOWN).map((s) => <li key={s.path}><b>{s.path}</b>: {s.why}</li>)}
+                {view.skipped.length > SKIPPED_SHOWN && <li title={view.skipped.slice(SKIPPED_SHOWN).map((s) => `${s.path}: ${s.why}`).join("\n")}>and {view.skipped.length - SKIPPED_SHOWN} more</li>}
+              </ul>
+            </>
+          )}
+        </div>
       )}
     </div>
   );
@@ -125,7 +136,7 @@ export function MemoryStrips(props: {
   return (
     <>
       <MemoryFailing error={props.failing} />
-      {props.long && <div className="wsm-long" data-testid="memory-long" role="status"><span>{props.long}</span><button className="ctrl sm" disabled title="Not yet: it starts a chat that moves detail into topics">Tidy…</button></div>}
+      {props.long && <div className="wsm-long" data-testid="memory-long" role="status"><span>{props.long}</span></div>}
       {may && (
         <div className="wsm-long" data-testid="memory-may-edit" role="status">
           <span>{may} <span className="wsm-change-d">If it does while you have unsaved text, you choose: keep yours, or reload its version.</span></span>
@@ -175,13 +186,16 @@ export async function keepFiles(ws: string, from: string, files: readonly File[]
 /** A file that is not a text: an image's preview, or its name and size. */
 export function MemoryPreview(props: { ws: string; file: MemoryFile; tick: number; reveal: (() => void) | null }) {
   const { file } = props;
-  const [img, setImg] = useState<MemoryImage | null>(null);
+  // By what it is of: the one before is never drawn under this one's name.
+  const of = `${props.ws}|${file.path}|${file.mtime_ms}`;
+  const [got, setGot] = useState<{ of: string; img: MemoryImage } | null>(null);
+  const img = got?.of === of ? got.img : null;
   useEffect(() => {
     if (file.kind !== "image") return;
     let gone = false;
-    memoryDocs(props.ws).image("", linkTo("", file.path)).then((i) => { if (!gone) setImg(i); });
+    memoryDocs(props.ws).image("", linkTo("", file.path)).then((i) => { if (!gone) setGot({ of, img: i }); });
     return () => { gone = true; };
-  }, [props.ws, file.path, file.kind, file.mtime_ms, props.tick]);
+  }, [props.ws, file.path, file.kind, of, props.tick]);
   return (
     <div className="wsm-preview" data-testid="memory-preview" data-path={file.path}>
       {file.kind === "image" && (img === null ? <p className="ws-ov-none">Reading…</p> : "src" in img ? <img src={img.src} alt={file.name} /> : <p className="ws-ov-none">{img.note}</p>)}
