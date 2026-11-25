@@ -33,7 +33,7 @@
 //! **`chats.json` is in the chat's own working directory**, so an agent can
 //! edit it. Nothing read from it reaches a path or argv unchecked: ids are
 //! ULIDs, the session id a UUID, and the note's path is the one this module
-//! names or it is named again ([`note_path`]).
+//! names or it is none ([`note_name`]).
 
 use std::fs;
 use std::io;
@@ -166,8 +166,9 @@ pub struct Chat {
     /// session ending.
     #[serde(default)]
     pub last_activity: String,
-    /// Where its fold writes its note, relative to the workspace's folder
-    /// ([`note_path`]). Named here, never by the agent.
+    /// Where its fold writes its note, relative to the workspace's folder.
+    /// Empty until it is first folded, when it is named ([`name_note`]) for
+    /// good. Named here, never by the agent.
     #[serde(default)]
     pub note: String,
     /// Its last fold, or none asked yet.
@@ -236,23 +237,74 @@ impl desk::Entry for Chat {
 /// `chats.json`. Keys this build does not know are kept.
 pub type Record = desk::Record<Chat>;
 
-/// Where a chat's fold writes its note: `memory/notes/<date>-<conv>.md`,
-/// relative to the workspace's folder. One chat has one note, however often it
-/// is folded.
-pub fn note_path(started: &str, conv: &str) -> String {
-    let date: String = started.chars().take(10).collect();
-    let ok = date.len() == 10 && date.chars().all(|c| c.is_ascii_digit() || c == '-');
-    format!("{MEMORY_DIR}/notes/{}-{conv}.md", if ok { date.as_str() } else { "0000-00-00" })
+/// The name of a chat's note, relative to the workspace's folder:
+/// `memory/notes/<date>-<words of its title>-<end of its id>.md`. Decided when
+/// the chat is first folded ([`name_note`]) and its own from then on.
+pub fn note_name(title: &str, conv: &str, date: &str) -> String {
+    format!("{MEMORY_DIR}/notes/{date}-{}-{}.md", note_words(title), note_tail(conv))
 }
 
-/// The record's entry as a reader may use it: a note path that is not the one
-/// this module names (a hand edit, an agent's) is named again, and a fold's
-/// commit that is not a full commit id is none.
+/// The longest run of a title's words in a note's name, in characters.
+const NOTE_WORDS_MAX: usize = 40;
+
+/// A title as a note's name says it: [`crate::ideas::slug`], short, ending at
+/// a word.
+fn note_words(title: &str) -> String {
+    if !title.chars().any(char::is_alphanumeric) {
+        return NOUN.to_string();
+    }
+    let all = crate::ideas::slug(title);
+    if all.chars().count() <= NOTE_WORDS_MAX {
+        return all;
+    }
+    let cut: String = all.chars().take(NOTE_WORDS_MAX + 1).collect();
+    match cut.rsplit_once('-') {
+        Some((words, _)) => words.to_string(),
+        None => cut.chars().take(NOTE_WORDS_MAX).collect(),
+    }
+}
+
+/// What tells two chats' notes apart: the end of the id.
+fn note_tail(conv: &str) -> String {
+    conv.chars().skip(conv.chars().count().saturating_sub(6)).collect::<String>().to_lowercase()
+}
+
+/// The day `epoch` (seconds) is on at this host, as a person here would say it.
+pub fn local_date(epoch: i64) -> String {
+    crate::plans::when(epoch).chars().take(10).collect()
+}
+
+/// Whether chat `c`'s note is one [`note_name`] could have made for it: the
+/// record is in the chat's own working directory, so what it says is checked
+/// whole, the words by making them again. The first builds' name, the whole
+/// id, is still the note of a chat that was folded under it.
+fn note_ok(c: &Chat) -> bool {
+    let Some(name) = c.note.strip_prefix("memory/notes/").and_then(|n| n.strip_suffix(".md")) else { return false };
+    let Some((date, rest)) = name.split_at_checked(10) else { return false };
+    let dated = date.bytes().enumerate().all(|(i, b)| if i == 4 || i == 7 { b == b'-' } else { b.is_ascii_digit() });
+    let Some(rest) = rest.strip_prefix('-').filter(|_| dated) else { return false };
+    if rest == c.id {
+        return c.fold.is_some();
+    }
+    rest.strip_suffix(&note_tail(&c.id)).and_then(|w| w.strip_suffix('-')).is_some_and(|words| !words.is_empty() && note_words(words) == words)
+}
+
+/// Name chat `c`'s note, once: one it has is kept.
+pub fn name_note(c: &mut Chat, date: &str) {
+    if !note_ok(c) {
+        c.note = note_name(&c.title, &c.id, date);
+    }
+}
+
+/// The record's entry as a reader may use it: a note path this module would
+/// not have named (a hand edit, an agent's) is none, and a fold's commit that is not a full commit id is none.
 fn checked(mut c: Chat) -> Chat {
     if let Some(f) = c.fold.as_mut() {
         f.commit = f.commit.take().filter(|s| crate::memory::is_sha(s));
     }
-    c.note = note_path(&c.started, &c.id);
+    if !note_ok(&c) {
+        c.note.clear();
+    }
     if c.last_activity.is_empty() {
         c.last_activity = c.started.clone();
     }
@@ -319,7 +371,7 @@ pub fn prepare_at(root: &Path, ws: &str, context: impl FnOnce(&str) -> String) -
     let started = desk::now_iso();
     desk.edit(|rec: &mut Record| {
         let c = Chat {
-            note: note_path(&started, &conv),
+            note: String::new(),
             id: conv,
             harness: crate::provider::CLAUDE.id.to_string(),
             session_id: desk::new_uuid(),
@@ -758,7 +810,10 @@ pub fn note_exists(root: &Path, ws: &str, c: &Chat) -> bool {
 /// `None` unless it is a regular file at the path this module names, through
 /// no link.
 pub fn note_mtime_ms(root: &Path, ws: &str, c: &Chat) -> Option<u64> {
-    let rel = PathBuf::from(note_path(&c.started, &c.id));
+    if !note_ok(c) {
+        return None;
+    }
+    let rel = PathBuf::from(&c.note);
     let mut at = folder_at(root, ws).ok()?;
     let parts: Vec<_> = rel.components().collect();
     let mut mtime = None;
@@ -778,10 +833,11 @@ pub fn note_mtime_ms(root: &Path, ws: &str, c: &Chat) -> Option<u64> {
 // ── the fold's file ─────────────────────────────────────────────────────────
 
 /// What `fold.md` says: the fixed template, filled with paths of the engine's
-/// own, every one absolute. No text a person or an agent wrote is in it.
+/// own, every one absolute. Of the chat's title it has only the note's name,
+/// which is letters, digits and dashes.
 pub fn fold_text(folder: &Path, c: &Chat) -> String {
     let memory = folder.join(MEMORY_DIR);
-    let note = folder.join(note_path(&c.started, &c.id));
+    let note = folder.join(&c.note);
     format!(
         "# Fold this chat into the workspace's memory\n\
          \n\
@@ -796,7 +852,9 @@ pub fn fold_text(folder: &Path, c: &Chat) -> String {
             `## Asked` — `## Decided` — `## Done` — `## Open`\n\
          2. Update `{memory}/{MEMORY_INDEX}`: one line and a link for each durable fact, and correct a line\n\
             that is no longer true. Keep it short: move anything long to a file in `{memory}/topics/` and\n\
-            link to it. Links are relative to the file they are in.\n\
+            link to it. Links are relative to the file they are in. A link's words say what it leads to:\n\
+            this note is `[the note's heading](notes/…)`, with its own heading there, and a topic its own.\n\
+            A link's words are never a path or a file name, and neither is what you say to the person.\n\
          3. Write nowhere else. Do not commit: the app does. Start no new work and ask no question.\n\
          4. Then say in two lines what you changed.\n\
          \n\
@@ -815,6 +873,9 @@ pub fn fold_opener(folder: &Path, conv: &str) -> String {
 
 /// Write chat `c`'s `fold.md` and answer the opener that reads it.
 pub fn write_fold_at(root: &Path, ws: &str, c: &Chat) -> Result<String, String> {
+    if !note_ok(c) {
+        return Err(format!("chat {} has no note to fold into", c.id));
+    }
     let folder = folder_at(root, ws)?;
     let own = ws_desk(root, ws)?.make_conv_dir(&c.id)?;
     crate::fsx::write_atomic(&own.join(FOLD), fold_text(&folder, c).as_bytes(), None).map_err(|e| format!("{FOLD}: {e}"))?;
@@ -1006,7 +1067,7 @@ mod tests {
         assert!(crate::codex::is_uuid(&c.session_id));
         assert_eq!((c.title.as_str(), c.harness.as_str()), ("Chat 1", "claude"));
         assert_eq!(c.last_activity, c.started);
-        assert_eq!(c.note, format!("memory/notes/{}-{}.md", &c.started[..10], c.id));
+        assert_eq!(c.note, "", "no note until it is folded");
         assert_eq!(c.fold, None);
         let own = root.join(&ws).join("chats").join(&c.id);
         assert_eq!(fs::read_to_string(own.join(CONTEXT)).unwrap(), "the context\n");
@@ -1067,10 +1128,48 @@ mod tests {
             assert!(t.contains(from), "{t}");
             fs::write(&p, t.replace(from, to)).unwrap();
         };
-        edit(&c.note, "../../../etc/passwd");
-        assert_eq!(find_at(&root, &ws, &c.id).unwrap().note, c.note, "the note's path is this module's");
-        edit("2026-", "../../");
-        assert!(find_at(&root, &ws, &c.id).unwrap().note.starts_with("memory/notes/0000-00-00-"));
+        update_at(&root, &ws, &c.id, |c| name_note(c, "2026-11-24")).unwrap();
+        let named = find_at(&root, &ws, &c.id).unwrap().note;
+        let tail = c.id[20..].to_lowercase();
+        assert_eq!(named, format!("memory/notes/2026-11-24-chat-1-{tail}.md"));
+        let other = crate::ulid::new();
+        let bad = [
+            "../../../etc/passwd".to_string(),
+            "memory/MEMORY.md".into(),
+            "memory/notes/../../chats.json".into(),
+            format!("memory/notes/2026-11-24-a/b-{tail}.md"),
+            format!("memory/notes/2026-11-24-..-{tail}.md"),
+            format!("memory/notes/2026-11-24--{tail}.md"),
+            format!("memory/notes/2026-11-24-.hid-{tail}.md"),
+            format!("memory/notes/2026-11-24-a b-{tail}.md"),
+            format!("memory/notes/2026-1x-24-a-{tail}.md"),
+            format!("memory/notes/2026-11-24-{}-{tail}.md", "x".repeat(200)),
+            // Another chat's note is not this one's.
+            format!("memory/notes/2026-11-24-chat-1-{}.md", other[20..].to_lowercase()),
+            format!("memory/notes/2026-11-24-{other}.md"),
+            // This build's first notes, for a chat that was never folded.
+            format!("memory/notes/2026-11-24-{}.md", c.id),
+        ];
+        // A file that IS there, newer than any fold, must not pass for the note.
+        fs::create_dir_all(root.join(&ws).join("memory")).unwrap();
+        fs::write(root.join(&ws).join("memory/MEMORY.md"), "index").unwrap();
+        for b in &bad {
+            let t = fs::read_to_string(&p).unwrap();
+            fs::write(&p, t.replace(&named, b)).unwrap();
+            let got = find_at(&root, &ws, &c.id).unwrap();
+            assert_eq!(got.note, "", "{b}");
+            assert_eq!(note_mtime_ms(&root, &ws, &Chat { note: b.clone(), ..got.clone() }), None, "{b}: nor by hand");
+            // Folded again, it is named as if for the first time.
+            let again = update_at(&root, &ws, &c.id, |c| name_note(c, "2026-11-25")).unwrap();
+            assert_eq!(again.note, format!("memory/notes/2026-11-25-chat-1-{tail}.md"), "{b}");
+            fs::write(&p, t).unwrap();
+        }
+        // One of this build's first notes is still the chat's that was folded.
+        let t = fs::read_to_string(&p).unwrap();
+        fs::write(&p, t.replace(&named, bad.last().unwrap())).unwrap();
+        update_at(&root, &ws, &c.id, |c| c.fold = Some(Fold::default())).unwrap();
+        assert_eq!(find_at(&root, &ws, &c.id).unwrap().note, *bad.last().unwrap());
+        fs::write(&p, t).unwrap();
         edit(&c.session_id, "x; rm -rf ~");
         assert!(find_at(&root, &ws, &c.id).unwrap_err().contains("no usable session id"));
         fs::write(&p, r#"{"conversations":[{"id":"../x","harness":"claude","session_id":"0","title":"","started":""}]}"#).unwrap();
@@ -1461,6 +1560,7 @@ mod tests {
         let ws = crate::ulid::new();
         let c = prepare_at(&root, &ws, |_| String::new()).unwrap();
         assert!(!note_exists(&root, &ws, &c));
+        let c = update_at(&root, &ws, &c.id, |c| name_note(c, "2026-11-24")).unwrap();
         let p = root.join(&ws).join(&c.note);
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink("/etc/hosts", &p).unwrap();
@@ -1473,6 +1573,55 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// Words first, and short: the day, the title, the end of the id. Named
+    /// once, whatever the title becomes.
+    #[test]
+    fn a_note_is_named_by_its_day_and_its_words_once() {
+        let id = "01M8884X2QGG0A2ZJHEP1FKQ7J";
+        for (title, want) in [
+            ("Jellyfin sharing", "jellyfin-sharing"),
+            ("Chat 3", "chat-3"),
+            ("  Who can see what? (guests/family)  ", "who-can-see-what-guests-family"),
+            ("Configuración del NAS", "configuración-del-nas"),
+            ("../../etc/passwd", "etc-passwd"),
+            (".hidden", "hidden"),
+            ("a\u{202e}b", "a-b"),
+            ("!!!", "chat"),
+            ("The long one that a first message made of itself and would not end", "the-long-one-that-a-first-message-made"),
+            ("Donaudampfschifffahrtsgesellschaftskapitänsmütze", "donaudampfschifffahrtsgesellschaftskapit"),
+        ] {
+            assert_eq!(note_name(title, id, "2026-11-24"), format!("memory/notes/2026-11-24-{want}-1fkq7j.md"), "{title}");
+        }
+        let mut c = Chat { id: id.into(), title: "Jellyfin sharing".into(), ..chat(&desk::new_uuid()) };
+        name_note(&mut c, "2026-11-24");
+        let first = c.note.clone();
+        c.title = "Renamed".into();
+        name_note(&mut c, "2026-12-01");
+        assert_eq!(c.note, first);
+        assert!(note_ok(&c), "what it names it accepts");
+    }
+
+    /// The day as it is HERE: an evening west of Greenwich is not tomorrow.
+    /// The zone is a child's, never this process's.
+    #[test]
+    fn a_notes_day_is_the_hosts() {
+        if let Ok(want) = std::env::var("WT_TEST_LOCAL_DATE") {
+            assert_eq!(local_date(1_795_566_000), want);
+            return;
+        }
+        // 2026-11-25T00:20:00Z.
+        for (tz, want) in [("UTC", "2026-11-25"), ("EST5", "2026-11-24"), ("JST-9", "2026-11-25")] {
+            let o = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "workspacechats::tests::a_notes_day_is_the_hosts"])
+                .env("TZ", tz)
+                .env("WT_TEST_LOCAL_DATE", want)
+                .output()
+                .unwrap();
+            let out = String::from_utf8_lossy(&o.stdout);
+            assert!(o.status.success() && out.contains("1 passed"), "{tz}: {out}");
+        }
+    }
+
     /// The fold's file names every path absolutely, its note's exact one, and
     /// the four headings; no text of the chat's is in it.
     #[test]
@@ -1481,7 +1630,8 @@ mod tests {
         let ws = crate::ulid::new();
         let c = prepare_at(&root, &ws, |_| String::new()).unwrap();
         rename_at(&root, &ws, &c.id, "A title with `backticks`").unwrap();
-        let c = find_at(&root, &ws, &c.id).unwrap();
+        assert!(write_fold_at(&root, &ws, &c).is_err(), "a chat with no note yet has nowhere to fold to");
+        let c = update_at(&root, &ws, &c.id, |c| name_note(c, "2026-11-24")).unwrap();
         let opener = write_fold_at(&root, &ws, &c).unwrap();
         let folder = root.join(&ws);
         assert_eq!(opener, format!("Read {}/chats/{}/fold.md and do what it says.", folder.display(), c.id));
@@ -1492,7 +1642,10 @@ mod tests {
         for h in ["## Asked", "## Decided", "## Done", "## Open", NOTHING, "Do not commit", "rewrite it", "NOT Claude Code's own auto memory"] {
             assert!(t.contains(h), "{h}: {t}");
         }
-        assert!(!t.contains("backticks"));
+        assert!(!t.contains("`backticks`"), "a title's words reach it only as its note's name");
+        for said in ["[the note's heading](notes/", "never a path or a file name"] {
+            assert!(t.contains(said), "{said}: {t}");
+        }
         // Written whole each time, and never through a link.
         let p = folder.join("chats").join(&c.id).join(FOLD);
         fs::remove_file(&p).unwrap();
