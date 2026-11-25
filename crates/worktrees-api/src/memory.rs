@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use worktrees_core::memory::{self as store, Change, Doc, FileChange, Index, Listing, Log, Reverted, Saved, Stamp};
-use worktrees_core::{attach, workspaces};
+use worktrees_core::{attach, registry, workspacechats, workspaces};
 
 use crate::files::{b64_encode, PlaceImage};
 use crate::Ctx;
@@ -98,10 +98,38 @@ pub fn workspace_memory(ctx: &Ctx, id: String) -> Result<MemoryView, String> {
 
 /// Make the memory (§2.2). One already made is left as it is.
 pub fn workspace_memory_make(ctx: &Ctx, id: String) -> Result<MemoryView, String> {
-    // The name is only the template's heading.
-    let name = workspaces::read()?.workspaces.into_iter().find(|w| w.id == id).map(|w| w.name).unwrap_or_default();
-    store::init_at(root(ctx), &id, &name)?;
+    // The removal holds this too: never a folder for a workspace just removed.
+    let lock = crate::workspacechats::life_lock(ctx, &id);
+    let _life = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let w = workspaces::read_at(ctx.workspaces_file())?.workspaces.into_iter().find(|w| w.id == id).ok_or_else(|| format!("no workspace {id}"))?;
+    make(ctx, &w)?;
     workspace_memory(ctx, id)
+}
+
+/// Not under a registered project (or over one): a repository made there would
+/// be taken for part of it.
+fn make(ctx: &Ctx, w: &workspaces::Workspace) -> Result<(), String> {
+    let r = root(ctx);
+    workspacechats::check_root(r, &registry::read_lenient().roots())?;
+    store::init_at(r, &w.id, &w.name).map(|_| ())
+}
+
+/// What a chat's start and resume do first. No memory yet: it is made, and one
+/// that cannot be made refuses the launch. A dirty one is committed, as the
+/// quiet minute would, so what the chat changes is told from what was there —
+/// but not while a fold holds it: that dirty tree is the fold's. A commit that
+/// fails is logged and keeps nobody from their chat: the poll tries again.
+/// The caller holds `workspacechats::life_lock`.
+pub fn before_launch(ctx: &Ctx, w: &workspaces::Workspace) -> Result<(), String> {
+    if !store::ids_at(root(ctx)).contains(&w.id) {
+        return make(ctx, w);
+    }
+    if !ctx.memory.is_held(&w.id) {
+        if let Err(e) = memory_commit_if_dirty(ctx, &w.id, None) {
+            crate::log::warn(&format!("memory: {}: could not commit before a chat: {e}", w.id));
+        }
+    }
+    Ok(())
 }
 
 /// One text file; with `commit`, as it was in that change.
@@ -401,6 +429,66 @@ mod tests {
         c.memory.release(&s.id);
         let r = workspace_memory_revert(c, id(), done.commit).unwrap();
         assert_eq!((r.change, r.conflicts), (None, vec!["topics/t.md".to_string()]));
+    }
+
+    /// A chat's start and resume: no memory is made, a dirty one is committed
+    /// as the quiet minute would, and a fold's dirty tree is left to the fold.
+    #[test]
+    fn a_launch_makes_the_memory_and_commits_a_dirty_one_unless_a_fold_holds_it() {
+        let s = Scratch::new("launch");
+        let w = workspaces::Workspace { id: ulid::new(), name: "Homelab".into(), ..Default::default() };
+        before_launch(&s.ctx, &w).unwrap();
+        let v = workspace_memory(&s.ctx, w.id.clone()).unwrap();
+        assert!(v.made && v.index.unwrap().content.starts_with("# Memory: Homelab\n"));
+        let log = |id: &str| workspace_memory_log(&s.ctx, id.into(), None, None, None).unwrap().changes;
+        before_launch(&s.ctx, &w).unwrap();
+        assert_eq!(log(&w.id).len(), 1, "nothing to commit");
+        let mine = workspaces::Workspace { id: s.id.clone(), name: "Personal".into(), ..Default::default() };
+        s.put("topics/t.md", "by hand\n");
+        s.ctx.memory.hold(&s.id);
+        before_launch(&s.ctx, &mine).unwrap();
+        assert_eq!(log(&s.id).len(), 1, "a fold's dirty tree is the fold's");
+        s.ctx.memory.release(&s.id);
+        before_launch(&s.ctx, &mine).unwrap();
+        assert_eq!(log(&s.id)[0].subject, "Edited: topics/t.md");
+        // Broken, it keeps nobody from a chat; one that cannot be MADE does.
+        fs::write(store::dir_at(s.ctx.workspaces_dir(), &s.id).unwrap().join(".git/config"), "[").unwrap();
+        before_launch(&s.ctx, &mine).unwrap();
+        let bad = workspaces::Workspace { id: ulid::new(), name: "B".into(), ..Default::default() };
+        fs::write(s.ctx.workspaces_dir().join(&bad.id), "a file where its folder goes").unwrap();
+        assert!(before_launch(&s.ctx, &bad).is_err());
+    }
+
+    /// A removed workspace's memory goes with its folder, history and all, its
+    /// hold is let go, and the move waits for whoever is in it.
+    #[test]
+    fn a_removed_workspaces_memory_moves_with_its_folder_and_its_hold_is_released() {
+        use std::os::fd::AsRawFd;
+        let s = Scratch::new("removed");
+        let file = s.base.join("cfg").join("workspaces.json");
+        let ctx = s.ctx.clone().with_workspaces_file(file.clone());
+        let id = workspaces::create_at(&file, "Home").unwrap().id;
+        workspace_memory_make(&ctx, id.clone()).unwrap();
+        ctx.memory.hold(&id);
+        // Someone is in it: the removal waits, however long.
+        let at = ctx.workspaces_dir().join(&id);
+        let lock = fs::File::options().write(true).open(at.join(".memory.lock")).unwrap();
+        // SAFETY: a live descriptor, closed below.
+        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (c2, i2) = (ctx.clone(), id.clone());
+        let t = std::thread::spawn(move || tx.send(crate::workspaces::workspace_remove(&c2, i2).map(|r| r.moved_to)).unwrap());
+        assert!(rx.recv_timeout(Duration::from_millis(400)).is_err(), "it did not wait");
+        assert!(at.join("memory/MEMORY.md").exists());
+        drop(lock);
+        let to = rx.recv_timeout(Duration::from_secs(20)).expect("the removal never ended").unwrap().unwrap();
+        t.join().unwrap();
+        assert_eq!(to, ctx.workspaces_dir().join(".removed").join(&id).to_string_lossy());
+        assert!(Path::new(&to).join("memory/MEMORY.md").is_file() && Path::new(&to).join("memory/.git").is_dir());
+        assert!(!ctx.memory.is_held(&id), "its hold is released");
+        assert!(!at.exists() && !store::ids_at(ctx.workspaces_dir()).contains(&id));
+        assert!(workspace_memory_make(&ctx, id).unwrap_err().contains("no workspace"), "and none is made for it again");
+        assert!(!at.exists());
     }
 
     /// The event names each path and the mtime a client compares with its own

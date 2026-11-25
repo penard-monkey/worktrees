@@ -123,9 +123,43 @@ pub fn workspace_rename(id: String, name: String) -> Result<Workspaces, String> 
     let (w, r) = paths();
     rename_in(&w, &r, &id, &name)
 }
-pub fn workspace_remove(id: String) -> Result<Workspaces, String> {
-    let (w, r) = paths();
-    remove_in(&w, &r, &id)
+/// `workspace_remove`'s answer: the list, and where its folder went.
+#[derive(Serialize, Debug)]
+pub struct RemovedWs {
+    #[serde(flatten)]
+    pub workspaces: Workspaces,
+    /// The folder of its memory and chats as it is now, `None` when it had
+    /// none. Moved, never deleted.
+    pub moved_to: Option<String>,
+}
+
+/// Remove a workspace: end its live chats (without folding them), move its
+/// folder to `.removed/<id>/`, then take it off the list. A step that fails
+/// leaves it on the list, with its folder where it was.
+pub fn workspace_remove(ctx: &crate::Ctx, id: String) -> Result<RemovedWs, String> {
+    let (w, r) = (ctx.workspaces_file().to_path_buf(), registry::path());
+    let lock = crate::workspacechats::life_lock(ctx, &id);
+    let _life = lock.lock().unwrap_or_else(|e| e.into_inner());
+    if !store::read_at(&w)?.workspaces.iter().any(|x| x.id == id) {
+        return Ok(RemovedWs { workspaces: view(&w, &r)?, moved_to: None });
+    }
+    crate::workspacechats::close_all(ctx, &id)?;
+    let root = ctx.workspaces_dir();
+    // Its memory is in the folder: nothing of ours commits or saves as it goes.
+    let moved = worktrees_core::memory::while_still_at(root, &id, || worktrees_core::workspacechats::retire_folder_at(root, &id))??;
+    match remove_in(&w, &r, &id) {
+        Ok(workspaces) => {
+            // A fold that held it is gone with its chat.
+            ctx.memory.release(&id);
+            Ok(RemovedWs { workspaces, moved_to: moved.map(|p| p.to_string_lossy().into_owned()) })
+        }
+        Err(e) => {
+            if let Some(Err(back)) = moved.map(|p| worktrees_core::workspacechats::restore_folder_at(root, &id, &p)) {
+                return Err(format!("{e}; and {back}"));
+            }
+            Err(e)
+        }
+    }
 }
 pub fn workspace_set_projects(id: String, roots: Vec<String>) -> Result<Workspaces, String> {
     let (w, r) = paths();

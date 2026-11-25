@@ -113,11 +113,12 @@ impl Watch {
 /// only for a transcript that grew, plus ONE chained capture while some live
 /// claude has no probe yet (`claude_startup_tick`) — and none otherwise.
 /// `panes` is the tick's `list-panes -a` and `sessions` its fingerprint.
-pub fn claude_activity(w: &Watch, panes: &mut tmux::PaneList, sessions: &str) -> (ClaudeTick, IdeaSessions) {
+pub fn claude_activity(w: &Watch, panes: &mut tmux::PaneList, sessions: &str) -> (ClaudeTick, IdeaSessions, WorkspaceSessions) {
     let probes = worktrees_core::agent::live_probes_in(Some(&*panes));
     let tick = claude_activity_in(w, &probes, panes, tmux::ps_foreground, |targets| activity::capture_chain(sessions, targets));
     let ideas = idea_sessions_in(&probes, panes, |targets| activity::capture_chain(sessions, targets));
-    (tick, ideas)
+    let chats = workspace_sessions_in(&probes, panes, |targets| activity::capture_chain(sessions, targets));
+    (tick, ideas, chats)
 }
 
 /// Payload for `ideas:sessions` (phase S): the idea conversations' tmux
@@ -151,50 +152,134 @@ impl IdeaSessions {
     }
 }
 
-/// [`IdeaSessions`] for one tick, over its probes and panes; `capture` reads
-/// the screens of the idea panes running Claude with no probe yet (keyed by
-/// session, so two conversations starting at once are told apart).
+/// [`IdeaSessions`] for one tick ([`desk_sessions_in`]).
 fn idea_sessions_in(
     probes: &[worktrees_core::agent::ClaudeProbe],
     panes: &tmux::PaneList,
     capture: impl FnOnce(&[(String, String)]) -> Vec<(String, String, String)>,
 ) -> IdeaSessions {
-    use worktrees_core::ideasessions::is_idea_session;
-    let mut out = IdeaSessions::default();
+    let [live, busy, waiting] = desk_sessions_in(worktrees_core::ideasessions::is_idea_session, probes, panes, capture);
+    IdeaSessions { live, busy, waiting, ..IdeaSessions::default() }
+}
+
+/// Payload for `workspaces:sessions`: the workspace chats' tmux sessions
+/// (`worktrees~ws~<conv>`), by NAME, the twin of [`IdeaSessions`]. Whole
+/// state, change-gated.
+#[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkspaceSessions {
+    pub live: Vec<String>,
+    pub busy: Vec<String>,
+    pub waiting: Vec<String>,
+    /// Each live session's workspace and chat. Filled by the poll, which
+    /// knows the folder ([`WorkspaceSessions::with_chats`]).
+    pub chat_of: std::collections::BTreeMap<String, ChatOf>,
+    /// Each chat with a fold to say something about, by its session's name,
+    /// live or not. Empty until the fold is built; the shape is its.
+    pub fold: std::collections::BTreeMap<String, FoldOf>,
+}
+
+/// Which chat a session is.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct ChatOf {
+    pub workspace: String,
+    pub chat: String,
+}
+
+/// A chat's fold, as the event says it.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct FoldOf {
+    pub workspace: String,
+    pub chat: String,
+    /// `folding`, `waiting` (on a prompt) or `failed`.
+    pub state: String,
+    /// Why it failed, in words.
+    pub why: Option<String>,
+}
+
+impl WorkspaceSessions {
+    /// [`WorkspaceSessions::chat_of`] for the live sessions, from the folder
+    /// at `root`.
+    pub fn with_chats(mut self, root: &std::path::Path) -> WorkspaceSessions {
+        use worktrees_core::workspacechats as wc;
+        self.chat_of = self
+            .live
+            .iter()
+            .filter_map(|s| {
+                let chat = wc::conv_of_session(s)?;
+                Some((s.clone(), ChatOf { workspace: wc::workspace_of_conv(root, chat)?, chat: chat.to_string() }))
+            })
+            .collect();
+        self
+    }
+
+    /// The chats something ended in between `before` and this tick: a turn
+    /// that was running is not, or the session is gone. What `last_activity`
+    /// is stamped for (`workspacechats::tick`).
+    pub fn ended_since<'a>(&'a self, before: &'a WorkspaceSessions) -> Vec<&'a ChatOf> {
+        before
+            .live
+            .iter()
+            .filter(|s| !self.live.contains(s) || (before.busy.contains(s) && !self.busy.contains(s)))
+            .filter_map(|s| before.chat_of.get(s))
+            .collect()
+    }
+}
+
+/// [`WorkspaceSessions`] for one tick ([`desk_sessions_in`]).
+fn workspace_sessions_in(
+    probes: &[worktrees_core::agent::ClaudeProbe],
+    panes: &tmux::PaneList,
+    capture: impl FnOnce(&[(String, String)]) -> Vec<(String, String, String)>,
+) -> WorkspaceSessions {
+    let [live, busy, waiting] = desk_sessions_in(worktrees_core::workspacechats::is_workspace_session, probes, panes, capture);
+    WorkspaceSessions { live, busy, waiting, ..WorkspaceSessions::default() }
+}
+
+/// The live, busy and waiting sessions among those `mine` names, over one
+/// tick's probes and panes; `capture` reads the screens of the panes running
+/// Claude with no probe yet (keyed by session, so two conversations starting
+/// at once are told apart).
+fn desk_sessions_in(
+    mine: fn(&str) -> bool,
+    probes: &[worktrees_core::agent::ClaudeProbe],
+    panes: &tmux::PaneList,
+    capture: impl FnOnce(&[(String, String)]) -> Vec<(String, String, String)>,
+) -> [Vec<String>; 3] {
+    let [mut live, mut busy, mut waiting]: [Vec<String>; 3] = Default::default();
     for p in panes.panes() {
-        if is_idea_session(&p.session) && !out.live.contains(&p.session) {
-            out.live.push(p.session.clone());
+        if mine(&p.session) && !live.contains(&p.session) {
+            live.push(p.session.clone());
         }
     }
     let mut probed: Vec<&str> = Vec::new();
     for probe in probes.iter().filter(|p| p.is_interactive_cli()) {
-        let Some(session) = probe.session().filter(|s| is_idea_session(s) && out.live.iter().any(|l| l == s)) else { continue };
+        let Some(session) = probe.session().filter(|s| mine(s) && live.iter().any(|l| l == s)) else { continue };
         probed.push(session);
         match activity::claude_state(&worktrees_core::agent::effective_state(probe)) {
-            activity::State::Busy => out.busy.push(session.to_string()),
-            activity::State::Waiting => out.waiting.push(session.to_string()),
+            activity::State::Busy => busy.push(session.to_string()),
+            activity::State::Waiting => waiting.push(session.to_string()),
             _ => {}
         }
     }
     let targets: Vec<(String, String)> = panes
         .panes()
         .iter()
-        .filter(|p| is_idea_session(&p.session) && !probed.contains(&p.session.as_str()) && !tmux::is_shell_command(&p.cmd))
+        .filter(|p| mine(&p.session) && !probed.contains(&p.session.as_str()) && !tmux::is_shell_command(&p.cmd))
         .filter(|p| provider::for_pane(&p.session, p.program()).is_some_and(|x| x.id == provider::CLAUDE.id))
         .map(|p| (p.session.clone(), p.session.clone()))
         .collect();
     if !targets.is_empty() {
         for (session, cmd, screen) in capture(&targets) {
             if activity::startup_activity("claude", &session, &cmd, &screen).is_some() {
-                out.waiting.push(session);
+                waiting.push(session);
             }
         }
     }
-    for v in [&mut out.live, &mut out.busy, &mut out.waiting] {
+    for v in [&mut live, &mut busy, &mut waiting] {
         v.sort_unstable();
         v.dedup();
     }
-    out
+    [live, busy, waiting]
 }
 
 /// Busy cwds, waiting cwds, and (pid, model) per tmux-hosted session.
@@ -257,9 +342,9 @@ fn claude_startup_tick(
     let candidate = |p: &tmux::Pane| {
         !p.session.is_empty()
             && !tmux::is_shell_sidecar(&p.session)
-            // An idea conversation's screen is read by `idea_sessions_in`,
-            // keyed by its session; its cwd (the ideas folder) is no place's.
-            && !worktrees_core::ideasessions::is_idea_session(&p.session)
+            // A desk session's screen is read by `desk_sessions_in`, keyed by
+            // its session; its cwd is no place's.
+            && !worktrees_core::desksessions::is_desk_session(&p.session)
             && !tmux::is_shell_command(&p.cmd)
             && activity::claude_activity(probes, &p.path).is_none()
             && provider::for_pane(&p.session, p.program()).is_some_and(|x| x.id == provider::CLAUDE.id)
@@ -1219,6 +1304,47 @@ mod tests {
             Vec::new()
         });
         assert!(waiting.is_empty());
+    }
+
+    /// Workspace chats have a bucket of their own, by session name, and are
+    /// never among the ideas' or the places' startup captures.
+    #[test]
+    fn workspace_chats_are_bucketed_by_session_name() {
+        use worktrees_core::workspacechats as wc;
+        let root = std::env::temp_dir().join(format!("wt-watch-ws-{}", worktrees_core::ulid::new()));
+        let ws = worktrees_core::ulid::new();
+        let chat = || wc::prepare_at(&root, &ws, |_| String::new()).unwrap().id;
+        let (ca, cb) = (chat(), chat());
+        let (a, b) = (wc::session_name(&ca), wc::session_name(&cb));
+        let idea = "worktrees~idea~01JCB2Z4K3M9QX2T7VBN5R6WY1";
+        let pane = |s: &str, id: &str| tmux::Pane { session: s.into(), path: "/ws".into(), cmd: "claude".into(), id: Some(id.into()), ..tmux::Pane::default() };
+        let mut panes = tmux::PaneList::from_panes(vec![pane(&a, "%1"), pane(&b, "%2"), pane(idea, "%3"), pane("repo-x", "%4")]);
+        let mut probes: Vec<worktrees_core::agent::ClaudeProbe> =
+            vec![serde_json::from_value(serde_json::json!({"pid": 1, "cwd": "/ws", "status": "busy", "tmux": format!("{a}:@1.%1")})).unwrap()];
+        worktrees_core::agent::locate(&mut probes, &panes);
+        let got = workspace_sessions_in(&probes, &panes, |targets| {
+            assert_eq!(targets, [(b.clone(), b.clone())], "only the probe-less chat is captured");
+            vec![(b.clone(), "claude".into(), TRUST.into())]
+        })
+        .with_chats(&root);
+        assert_eq!((got.live.len(), got.busy.clone(), got.waiting.clone()), (2, vec![a.clone()], vec![b.clone()]));
+        assert_eq!(got.chat_of[&a], ChatOf { workspace: ws.clone(), chat: ca.clone() });
+        assert!(got.fold.is_empty());
+        assert_eq!(serde_json::to_value(&got).unwrap()["fold"], serde_json::json!({}), "the field is in the shape");
+        assert_eq!(idea_sessions_in(&probes, &panes, |t| { assert_eq!(t.len(), 1); Vec::new() }).live, v(&[idea]));
+        assert!(claude_startup_tick(&mut panes, &[], no_ps, |t| {
+            assert!(t.iter().all(|(_, s)| s == "repo-x"), "{t:?}");
+            Vec::new()
+        })
+        .is_empty());
+        // A turn that ended and a session that went are activity; a busy one
+        // that still is, is not.
+        let idle = WorkspaceSessions { busy: vec![], ..got.clone() };
+        assert_eq!(idle.ended_since(&got), vec![&ChatOf { workspace: ws.clone(), chat: ca }]);
+        let gone = WorkspaceSessions { live: vec![a.clone()], waiting: vec![], ..got.clone() };
+        assert_eq!(gone.ended_since(&got), vec![&ChatOf { workspace: ws, chat: cb }]);
+        assert!(got.ended_since(&got).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A project whose folder was renamed: its Claude's probe still names the

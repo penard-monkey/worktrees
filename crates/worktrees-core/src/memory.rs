@@ -621,6 +621,15 @@ fn hold(folder: &Path) -> Result<Held, String> {
     Ok(Held { _file: file, _serial: serial })
 }
 
+/// Run `f` with workspace `id`'s memory held still: no commit, undo or save of
+/// this module's is in it, or starts in it, meanwhile. What moves the folder
+/// uses it, or a commit would be cut in half by the move.
+pub fn while_still_at<T>(root: &Path, id: &str, f: impl FnOnce() -> T) -> Result<T, String> {
+    let folder = wsfolder::folder_at(root, id)?;
+    let _held = if is_made(&folder.join(DIR)) { Some(hold(&folder)?) } else { None };
+    Ok(f())
+}
+
 // ── make ────────────────────────────────────────────────────────────────────
 
 fn template(name: &str) -> String {

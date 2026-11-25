@@ -38,7 +38,7 @@ for (const [name, engine] of [["chromium", chromium], ["webkit", webkit]]) {
   ok(await until((s) => document.querySelector(s)?.textContent?.includes("What this workspace is for"), ed), say("the index opens in the editor"));
   ok(await page.locator('[data-testid="mem-log"] [data-commit]').count() === 5, say("five changes"));
   const kinds = await page.locator('[data-testid="mem-log"] [data-kind]').evaluateAll((e) => e.map((x) => x.dataset.kind));
-  ok(kinds.join() === "undo,edit,fold,fold,made", say(`newest first (${kinds})`));
+  ok(kinds.join() === "edit,fold,undo,fold,made", say(`newest first (${kinds})`));
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/memory-index.${name}.png` });
 
   // Typing saves by itself.
@@ -76,15 +76,15 @@ for (const [name, engine] of [["chromium", chromium], ["webkit", webkit]]) {
   await page.click(`${edit} [data-file="files/rack.svg"]`);
   ok(await until(() => { const s = [...document.querySelectorAll('[data-testid="mem-side"]')]; return s.length === 2 && s.every((i) => i.complete && i.naturalWidth > 0) && s[0].src !== s[1].src; }), say("a changed image draws before and after"));
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/memory-history.${name}.png` });
-  ok(await page.locator(`${edit} [data-act="revert"]`).textContent() === "Redo", say("an undone change offers Redo"));
-  await page.click('[data-kind="fold"]:has-text("Release order") [data-act="revert"]');
+  ok(await page.locator('[data-kind="fold"]:has-text("Naming") [data-act="revert"]').textContent() === "Redo", say("an undone change offers Redo"));
+  await page.click('[data-kind="fold"]:has-text("Storage layout") [data-act="revert"]');
   ok(await until(() => document.querySelector('[data-testid="mem-note"]')?.textContent.includes("conflict: MEMORY.md")), say("an undo over a later edit is refused, naming the file"));
   await page.evaluate((id) => window.__mock.memoryEdit(id, "topics/second.md", "# Second\n\nx\n"), id);
   ok(await until(() => !!document.querySelector('[data-path="topics/second.md"]')), say("a new file is listed"));
 
   // A version, and a removal.
   await page.click('[data-testid="ideas-versions-toggle"]');
-  ok(await until(() => document.querySelectorAll('[data-testid="ideas-version"]').length === 3), say("the file's changes are its versions"));
+  ok(await until(() => document.querySelectorAll('[data-testid="ideas-version"]').length === 2), say("the file's changes are its versions"));
   const v = page.locator('[data-testid="ideas-version"]', { hasText: "fold: Storage layout" }).locator("button");
   await v.click(); await v.click();
   await page.waitForTimeout(400);
@@ -92,6 +92,24 @@ for (const [name, engine] of [["chromium", chromium], ["webkit", webkit]]) {
   await page.evaluate((id) => window.__mock.memoryEdit(id, "topics/nas-layout.md", null), id);
   ok(await until(() => /removed|deleted|gone/i.test(document.querySelector(".ix-doc")?.textContent ?? "")), say("a removed file is said"));
   ok(await page.evaluate((s) => document.querySelector(s).textContent.includes("Second shelf"), ed), say("and its text stays on screen"));
+  // The chats' rows and the memory's tell one story.
+  const both = await page.evaluate(async (id) => {
+    const { invoke } = await import("/src/ipc.ts");
+    const chats = (await invoke("workspace_chats", { id })).chats;
+    const folds = chats.filter((c) => c.fold?.state === "done");
+    const shown = await Promise.all(folds.map((c) => invoke("workspace_memory_diff", { id, commit: c.fold.commit }).then((d) => d.change.subject === `fold: ${c.title}` && d.change.files.some((f) => `memory/${f.path}` === c.note) && d.change.added === c.fold.lines.added)));
+    const notes = chats.filter((c) => c.note_exists).map((c) => c.title);
+    const before = (await invoke("workspace_memory_log", { id, n: 1 })).changes[0].commit;
+    window.__mock.memoryEdit(id, "topics/second.md", "# Second\n\nby hand\n");
+    await invoke("workspace_chat_start", { id });
+    const top = (await invoke("workspace_memory_log", { id, n: 1 })).changes[0];
+    const gone = await invoke("workspace_remove", { id });
+    return { n: folds.length, shown, undone: folds.filter((c) => c.fold.reverted).map((c) => c.title), notes, committed: top.commit !== before && top.subject, moved: gone.moved_to?.endsWith(`.removed/${id}`) };
+  }, id);
+  ok(both.n === 2 && both.shown.every(Boolean), say(`each folded chat's record names its commit and note (${JSON.stringify(both)})`));
+  ok(both.undone.join() === "Naming" && both.notes.join() === "Storage layout", say("the undone fold's note is gone, the other's is there"));
+  ok(/^Edited: .*topics/.test(both.committed || ""), say("a chat's start commits what was dirty"));
+  ok(both.moved === true, say("a removal moves its folder"));
   ok(errors.length === 0, say(`no page errors ${errors.join(" | ")}`));
   await browser.close();
 }

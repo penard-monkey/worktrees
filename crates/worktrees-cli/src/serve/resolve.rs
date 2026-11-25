@@ -153,9 +153,13 @@ pub enum Obj {
     /// A conversation of an idea: `(conv, id)`, a ULID in that idea's record
     /// (`ideasessions::find_at`). The idea is resolved too.
     IdeaConv(&'static str, &'static str),
-    /// A named workspace: an id `workspaces.json` knows. The host's, not a
-    /// project's: only `HostConsole` rows name one.
+    /// A named workspace (`workspaces.json`, `Ctx::workspaces_file`): an id
+    /// the list has. Workspaces are the host's, not a project's: only
+    /// `HostConsole` rows name one.
     Workspace(&'static str),
+    /// A chat of a workspace: `(conv, id)`, a ULID in that workspace's
+    /// `chats.json` (`workspacechats::find_at`). The workspace is resolved too.
+    WorkspaceChat(&'static str, &'static str),
     /// A share (group chat §2), read from `shares.json` on every request: for
     /// the console, one that exists; for anyone else, one that names the
     /// caller's principal among its guests — another's reads as missing. An
@@ -176,8 +180,8 @@ impl Obj {
             Project(a) | OptProject(a, _) | Slug(a) | Root(a) | File(a) | Probe(a) | Session(a) | Attach(a) | Close(a) | ShellRef(a) | Job(a)
             | NewJob(a) | Device(a) | Revocable(a) | NewPath(a) | RemoteUrl(a) | Places(a) | Roots(a) | Candidates(a) => vec![a],
             SessionIn(s, _) => vec![s],
-            Idea(a) | Workspace(a) | Share(a) => vec![a],
-            IdeaConv(c, i) => vec![c, i],
+            Idea(a) | Share(a) | Workspace(a) => vec![a],
+            IdeaConv(c, i) | WorkspaceChat(c, i) => vec![c, i],
             Place(r, s) => vec![r, s],
             SessionOf(s, _, _) => vec![s],
             Shell(r, s, i) => vec![r, s, i],
@@ -693,10 +697,16 @@ impl St<'_> {
             }
             Obj::Workspace(a) => {
                 let id: String = self.get(args, a)?;
-                let file = worktrees_core::workspaces::read().map_err(Refusal::not_found)?;
-                if !file.workspaces.iter().any(|w| w.id == id) {
+                let f = worktrees_core::workspaces::read_at(self.cx.ctx.workspaces_file()).map_err(Refusal::not_found)?;
+                if !f.workspaces.iter().any(|w| w.id == id) {
                     return Err(Refusal::not_found(format!("no workspace {id}")));
                 }
+            }
+            Obj::WorkspaceChat(c, i) => {
+                self.resolve(row, &Obj::Workspace(i), args)?;
+                let id: String = self.get(args, i)?;
+                let conv: String = self.get(args, c)?;
+                worktrees_core::workspacechats::find_at(self.cx.ctx.workspaces_dir(), &id, &conv).map_err(Refusal::not_found)?;
             }
             Obj::Share(a) => {
                 let id: String = self.get(args, a)?;

@@ -208,6 +208,10 @@ pub const EVENTS: &[(&str, Event)] = &[
     // `{live, busy, waiting}`: the idea conversations' tmux sessions, by name
     // (phase S, `worktrees_api::watch::IdeaSessions`). Desktop only.
     ("ideas:sessions", Event::Console),
+    // `{live, busy, waiting, chat_of, fold}`: the workspace chats' tmux
+    // sessions, by name (`worktrees_api::watch::WorkspaceSessions`). Desktop
+    // only.
+    ("workspaces:sessions", Event::Console),
     // `keepawake::State`: the host's sleep hold, which `get_keep_awake`
     // answers for any device (`read`, host-wide, no project in it).
     ("keep_awake:changed", Event::Everyone),
@@ -255,8 +259,9 @@ pub fn is_one_shot(event: &str) -> bool {
 /// "re-read", and a client re-pulls the workspace, which carries
 /// `last_worked_epoch`, on every reconnect. `sessions:drafts` has
 /// `list_drafts`. `ideas:sessions` is the idea conversations' live, busy
-/// and waiting sets, the companion's dots: the same shape of state.
-pub const SNAPSHOT: &[&str] = &["sessions:busy", "ideas:sessions"];
+/// and waiting sets, the companion's dots: the same shape of state. `workspaces:sessions` is
+/// its twin for the workspaces' chats.
+pub const SNAPSHOT: &[&str] = &["sessions:busy", "ideas:sessions", "workspaces:sessions"];
 
 /// `event`'s row in [`SNAPSHOT`], for the `'static` name a cache keys on.
 pub fn snapshot(event: &str) -> Option<&'static str> {

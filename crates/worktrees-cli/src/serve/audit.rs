@@ -248,9 +248,10 @@ fn by_caller(by: &Actor) -> Option<Caller> {
 /// records; the traffic in between is NOT — one record per keystroke is what
 /// §5.1 rules out — and is totalled into the close.
 const STREAM_OPEN: &[&str] = &["term_open", "shell_open"];
-/// The opens that are console rows: an idea conversation's terminal. Its
-/// traffic and its close are the `term_*` rows', tallied the same way.
-const CONSOLE_STREAM_OPEN: &[&str] = &["idea_term_open"];
+/// The opens that are console rows: an idea conversation's and a workspace
+/// chat's terminal. Their
+/// traffic and their close are the `term_*` rows', tallied the same way.
+const CONSOLE_STREAM_OPEN: &[&str] = &["idea_term_open", "workspace_term_open"];
 const STREAM_CLOSE: &[&str] = &["term_close", "shell_detach", "close_shell_session"];
 const STREAM_TRAFFIC: &[&str] = &["term_write", "shell_write", "term_wheel", "term_resize", "shell_resize"];
 
@@ -1856,7 +1857,8 @@ fn recorded(row: &Row) -> bool {
 /// Console rows that only READ, which a console row cannot say in its
 /// capability column: the idea chat's (phase S), which the companion polls
 /// as the main window polls `agent_turns`, a `read` row no record is made
-/// of. Recorded, each poll would be a line. Every act on a conversation
+/// of, and a workspace's chats', which are the same. Recorded, each poll would
+/// be a line. Every act on a conversation
 /// (start, resume, close, remove, rename, send, answer, interrupt) is still
 /// recorded.
 ///
@@ -1867,7 +1869,8 @@ fn recorded(row: &Row) -> bool {
 /// open requests, which the owner's app reads on every `shares:changed`.
 const CONSOLE_READS: &[&str] = &[
     "idea_conversations", "idea_turns", "idea_turn_text", "idea_tool_call", "idea_prompt",
-    "workspace_memory", "workspace_memory_file", "workspace_memory_image", "workspace_memory_log", "workspace_memory_diff", "shares_all", "guests_list", "share_requests_list",
+    "workspace_memory", "workspace_memory_file", "workspace_memory_image", "workspace_memory_log", "workspace_memory_diff",
+    "workspace_chats", "workspace_turns", "workspace_turn_text", "workspace_tool_call", "workspace_prompt", "shares_all", "guests_list", "share_requests_list",
 ];
 
 /// A drive-class act, as the audit budget counts one: what step-up guards
@@ -2074,8 +2077,9 @@ impl ConnAudit {
             // the session, never the text — the record names what was sent
             // without the log holding what a phone told an agent.
             // `idea_send` is the same path's console door (phase S, C14): the
-            // same record, the conversation's id in place of a session.
-            "agent_send" | "idea_send" => {
+            // same record, the conversation's id in place of a session; and
+            // `workspace_send` is one more, for a workspace's chat.
+            "agent_send" | "idea_send" | "workspace_send" => {
                 if let Some(Value::String(t)) = arg(args, "text") {
                     detail.insert("bytes".into(), json!(t.len()));
                     detail.insert("sha256".into(), json!(sha256_hex(t.as_bytes())));
@@ -2113,8 +2117,10 @@ impl ConnAudit {
                     detail.insert("commit".into(), json!(ident(c)));
                 }
             }
-            // An idea conversation's terminal: which conversation, by its id.
-            "idea_term_open" => {
+            // An idea conversation's terminal, a workspace chat's, and the
+            // acts on a chat's life: which one, by its id.
+            "idea_term_open" | "workspace_term_open" | "workspace_chat_resume" | "workspace_chat_close" | "workspace_chat_remove"
+            | "workspace_chat_rename" | "workspace_interrupt" => {
                 if let Some(Value::String(c)) = arg(args, "conv") {
                     detail.insert("conv".into(), json!(ident(c)));
                 }
@@ -2164,7 +2170,10 @@ impl ConnAudit {
             }
             // Free text into a prompt's field: like a line, its length and
             // hash and never the text — and which choice, of which prompt.
-            "agent_answer_text" | "idea_answer_text" => {
+            "agent_answer_text" | "idea_answer_text" | "workspace_answer_text" => {
+                if let Some(Value::String(c)) = arg(args, "conv") {
+                    detail.insert("conv".into(), json!(ident(c)));
+                }
                 if let Some(Value::String(t)) = arg(args, "text") {
                     detail.insert("bytes".into(), json!(t.len()));
                     detail.insert("sha256".into(), json!(sha256_hex(t.as_bytes())));
@@ -2194,7 +2203,10 @@ impl ConnAudit {
                 _ => {}
             },
             // A multi-select's boxes: which, to which prompt.
-            "agent_answer_many" | "idea_answer_many" => {
+            "agent_answer_many" | "idea_answer_many" | "workspace_answer_many" => {
+                if let Some(Value::String(c)) = arg(args, "conv") {
+                    detail.insert("conv".into(), json!(ident(c)));
+                }
                 if let Some(Value::Array(cs)) = arg(args, "choices") {
                     detail.insert("choices".into(), json!(cs.iter().filter_map(Value::as_u64).take(64).collect::<Vec<_>>()));
                 }
@@ -2204,7 +2216,10 @@ impl ConnAudit {
             }
             // An answer (S7, §9.2): which of the prompt's choices, to which
             // prompt — the fingerprint is a hash of what the device saw.
-            "agent_answer" | "idea_answer" => {
+            "agent_answer" | "idea_answer" | "workspace_answer" => {
+                if let Some(Value::String(c)) = arg(args, "conv") {
+                    detail.insert("conv".into(), json!(ident(c)));
+                }
                 if let Some(c) = arg(args, "choice").and_then(Value::as_u64) {
                     detail.insert("choice".into(), json!(c));
                 }
@@ -2272,6 +2287,13 @@ impl ConnAudit {
         if let (true, Outcome::Ok(v)) = (p.cmd == "agent_interrupt", &outcome) {
             if let Some(b) = v.get("interrupted").and_then(Value::as_bool) {
                 detail.insert("interrupted".into(), json!(b));
+            }
+        }
+        // A chat that started: which, by the id the engine made (the workspace
+        // is the record's object). Inside `RESERVE_SLACK`, and only a ULID.
+        if let (true, Outcome::Ok(v)) = (p.cmd == "workspace_chat_start", &outcome) {
+            if let Some(c) = v.pointer("/chat/id").and_then(Value::as_str).filter(|c| worktrees_core::ulid::is_valid(c)) {
+                detail.insert("conv".into(), json!(c));
             }
         }
         // An attach's kind, the sniff's word — only one of its three, never
@@ -4152,6 +4174,62 @@ mod tests {
         let p = phone(&g.a, 9);
         let refused = through(&pcx, &p, &g.w, "idea_send", json!({ "id": id, "conv": conv.id, "text": "x" }));
         assert_eq!(refused, Err(json!("console-only")), "{refused:?}");
+        assert_eq!(pane.sent.lock().unwrap().len(), 1);
+    }
+
+    /// The workspace chats' door: `workspace_send` and `workspace_answer_text`
+    /// are `idea_send`'s and `idea_answer_text`'s bodies, recorded the same
+    /// way — length, SHA-256 and the chat, never the text. The polled reads
+    /// are not records; a chat of another workspace is refused before the
+    /// body; a device reaches no row of them.
+    #[test]
+    fn a_workspace_send_is_recorded_like_an_idea_send_and_its_reads_are_not() {
+        let mut g = Gate::new("wssend", Caller::console());
+        let (dir, file) = (g.top.join("workspaces"), g.top.join("workspaces.json"));
+        let id = worktrees_core::workspaces::create_at(&file, "Home").unwrap().id;
+        let other = worktrees_core::workspaces::create_at(&file, "Other").unwrap().id;
+        let c0 = worktrees_core::workspacechats::prepare_at(&dir, &id, |_| String::new()).unwrap();
+        let session = worktrees_core::workspacechats::session_name(&c0.id);
+        let pane = super::super::tests::ScriptedAgent::new(&session, super::super::tests::CLAUDE_EMPTY, super::super::tests::CLAUDE_EMPTY);
+        g.cx.ctx = g.cx.ctx.clone().with_agents(worktrees_api::agents::Agents::new(pane.clone())).with_workspaces_dir(dir.clone()).with_workspaces_file(file.clone());
+        let c = ConnAudit::new(g.a.clone(), 7, Some("127.0.0.1".into()), Caller::console());
+        let text = "what is SECRET-WS-1 running";
+        let r = through(&g.cx, &c, &g.w, "workspace_send", json!({ "id": id, "conv": c0.id, "text": text }));
+        assert_eq!(r.map(|v| v["delivered"].clone()), Ok(json!(true)));
+        for bad in ["SECRET-WS-2\tx", "/SECRET-WS-3", "!SECRET-WS-4", "#SECRET-WS-5", "@SECRET-WS-6"] {
+            assert!(through(&g.cx, &c, &g.w, "workspace_send", json!({ "id": id, "conv": c0.id, "text": bad })).is_err(), "{bad}");
+        }
+        let _ = through(&g.cx, &c, &g.w, "workspace_answer_text", json!({ "id": id, "conv": c0.id, "choice": 1, "fingerprint": "f", "text": "SECRET-WS-7" }));
+        assert_eq!(*pane.sent.lock().unwrap(), vec![text.to_string()]);
+        assert!(through(&g.cx, &c, &g.w, "workspace_turns", json!({ "id": id, "conv": c0.id })).unwrap()["turns"].is_array());
+        let _ = through(&g.cx, &c, &g.w, "workspace_prompt", json!({ "id": id, "conv": c0.id }));
+        let l = through(&g.cx, &c, &g.w, "workspace_chats", json!({ "id": id })).unwrap();
+        assert_eq!((l["chats"][0]["id"].clone(), l["chats"][0]["state"].clone()), (json!(c0.id), json!("ended")), "{l}");
+        let raw = std::fs::read_to_string(g.d.join(FILE)).unwrap();
+        assert!(!raw.contains("SECRET-WS"), "the text reached the log:\n{raw}");
+        let sent = g.records("call", "workspace_send");
+        assert_eq!(sent.len(), 6, "{sent:#?}");
+        assert_eq!((&sent[0]["detail"]["bytes"], &sent[0]["detail"]["sha256"], &sent[0]["detail"]["conv"]), (&json!(text.len()), &json!(sha256_hex(text.as_bytes())), &json!(c0.id)));
+        let answered = g.records("call", "workspace_answer_text");
+        assert_eq!((&answered[0]["detail"]["bytes"], &answered[0]["detail"]["sha256"], &answered[0]["detail"]["conv"]), (&json!(11), &json!(sha256_hex(b"SECRET-WS-7")), &json!(c0.id)));
+        for read in ["workspace_turns", "workspace_prompt", "workspace_chats"] {
+            assert!(g.records("call", read).is_empty(), "{read} is a read");
+        }
+        through(&g.cx, &c, &g.w, "workspace_chat_rename", json!({ "id": id, "conv": c0.id, "title": "SECRET-WS-8" })).unwrap();
+        assert_eq!(g.records("call", "workspace_chat_rename")[0]["detail"], json!({ "conv": c0.id }));
+        // Another workspace's chat, one no record has, and no such workspace.
+        for (ws, conv) in [(other.clone(), c0.id.clone()), (id.clone(), worktrees_core::ulid::new()), (worktrees_core::ulid::new(), c0.id.clone())] {
+            assert!(through(&g.cx, &c, &g.w, "workspace_send", json!({ "id": ws, "conv": conv, "text": "x" })).is_err(), "{ws} {conv}");
+        }
+        assert_eq!(g.records("refused", "workspace_send").len(), 3);
+        // A device reaches no row of them.
+        let mut pcx = g.cx.with(g.cx.ctx.clone(), g.cx.frames.clone());
+        pcx.caller = phone_caller();
+        let p = phone(&g.a, 9);
+        for r in dispatch::TABLE.iter().filter(|r| r.name == "workspace_chats" || r.objects.iter().any(|o| matches!(o, super::super::resolve::Obj::Workspace(_) | super::super::resolve::Obj::WorkspaceChat(..)))) {
+            let refused = through(&pcx, &p, &g.w, r.name, json!({ "id": id, "conv": c0.id, "text": "x", "choice": 1, "choices": [1], "fingerprint": "f" }));
+            assert_eq!(refused, Err(json!("console-only")), "{}", r.name);
+        }
         assert_eq!(pane.sent.lock().unwrap().len(), 1);
     }
 

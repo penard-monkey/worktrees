@@ -30,13 +30,15 @@ const size = (f: F) => (f.text !== null ? new TextEncoder().encode(f.text).lengt
 const bad = (p: unknown) => typeof p !== "string" || !p || p.startsWith("/") || /[\\\u0000-\u001f]/.test(p) || p.split("/").some((x) => !x || x.startsWith("."));
 const same = (a: F | undefined, b: F | undefined) => a?.text === b?.text && a?.b64 === b?.b64;
 
+const TEMPLATE = (ws: string) => `# Memory: ${ws}\n\n## What this workspace is for\n\n## Projects\n\n## Decisions\n\n## How we work here\n\n## Open\n`;
+
 /** A rack drawn, so the image is one a person can see. */
 const rack = (led: string) => btoa(
   `<svg xmlns="http://www.w3.org/2000/svg" width="240" height="160" viewBox="0 0 240 160"><rect x="30" y="10" width="180" height="140" rx="6" fill="#39424e"/>` +
   [0, 1, 2, 3].map((i) => `<rect x="42" y="${22 + i * 31}" width="156" height="24" rx="3" fill="#59636f"/><circle cx="186" cy="${34 + i * 31}" r="4" fill="${i === 2 ? led : "#7ccf8a"}"/>`).join("") + `</svg>`,
 );
 
-const INDEX = (ws: string, fold: boolean, undone: boolean) => `# Memory: ${ws}
+const INDEX = (ws: string, o: { naming?: string; storage?: string; edited?: boolean }) => `# Memory: ${ws}
 
 ## What this workspace is for
 
@@ -45,12 +47,11 @@ The media box and the two apps that run on it.
 ## Projects
 
 - **worktrees**: the app everything is built with.
-- **the media box**: compose files and backups. See [NAS layout](topics/nas-layout.md).
+- **the media box**: compose files and backups.${o.storage ? " See [NAS layout](topics/nas-layout.md)." : ""}
 
 ## Decisions
 
-- 2026-11-20 Media lives on the NAS, never in a container. → [note](notes/2026-11-20-storage-layout.md)
-${fold ? "- 2026-11-22 The role ships before the schema. → [note](notes/2026-11-22-release-order.md)\n" : ""}${undone ? "- Deploys go out on Fridays.\n" : ""}
+${o.naming ? `- Roles are named for what they read. → [note](${o.naming})\n` : ""}${o.storage ? `- Media lives on the NAS, never in a container. → [note](${o.storage})\n` : ""}${o.edited ? "- Deploys go out on Fridays. See [how we work](notes/2026-11-19-how-we-work.md).\n" : ""}
 ## How we work here
 
 One place per branch. Work is proposed in the plan.
@@ -59,7 +60,7 @@ One place per branch. Work is proposed in the plan.
 
 - Which disks go in the second shelf.
 `;
-const NAS = (shelf: string) => `# NAS layout
+const NAS = (shelf: string, note: string) => `# NAS layout
 
 ![The rack](../files/rack.svg)
 
@@ -68,7 +69,7 @@ const NAS = (shelf: string) => `# NAS layout
 | \`/volume1/media\` | Films and series, read only to guests |
 | \`/volume1/backup\` | Nightly, kept thirty days |
 
-Second shelf: ${shelf}. Decided in [storage layout](../notes/2026-11-20-storage-layout.md).
+Second shelf: ${shelf}. Decided in [storage layout](../${note}).
 `;
 const NOTE = (t: string, asked: string, decided: string) => `# ${t}
 
@@ -89,34 +90,39 @@ Written down here and in the index.
 Nothing.
 `;
 
-function seed(ws: string): Mem {
+/** Where a chat of that title keeps its note, in the memory. */
+type NoteFor = (title: string) => string | null;
+
+/** Made, a fold, its undo, a second fold, an edit by hand. The folds are the
+ *  workspace's own chats', at the notes their records name, where it has any. */
+function seed(ws: string, noteFor: NoteFor): Mem {
   const m: Mem = { name: ws, files: new Map(), commits: [], seen: new Map(), tick: null, quiet: null };
   const day = 86_400_000;
   const t = Date.now();
-  const set = (p: string, text: string | null, b64: string | null, mtime: number) => m.files.set(p, { text, b64, mtime });
-  const at = (days: number, subject: string, k: string, acts: () => void, reverts: string | null = null) => { acts(); commit(m, subject, k, t - days * day, reverts); };
-  at(5, "Memory made", "made", () => set("MEMORY.md", `# Memory: ${ws}\n\n## What this workspace is for\n\n## Projects\n\n## Decisions\n\n## How we work here\n\n## Open\n`, null, t - 5 * day));
-  at(4, "fold: Storage layout", "fold", () => {
-    set("notes/2026-11-20-storage-layout.md", NOTE("Storage layout", "Where the media should live.", "On the NAS, mounted read only for guests."), null, t - 4 * day);
-    set("topics/nas-layout.md", NAS("not bought yet"), null, t - 4 * day);
-    set("files/rack.svg", null, rack("#e2c16b"), t - 4 * day);
-    set("MEMORY.md", INDEX(ws, false, false), null, t - 4 * day);
+  const naming = noteFor("Naming") ?? "notes/2026-11-19-naming.md";
+  const storage = noteFor("Storage layout") ?? "notes/2026-11-22-storage-layout.md";
+  const at = (days: number, subject: string, k: string, acts: (set: (p: string, text: string | null, b64?: string) => void) => void, reverts: string | null = null) => {
+    acts((p, text, b64) => { if (text === null && !b64) m.files.delete(p); else m.files.set(p, { text, b64: b64 ?? null, mtime: t - days * day }); });
+    return commit(m, subject, k, t - days * day, reverts)!;
+  };
+  at(6, "Memory made", "made", (set) => set("MEMORY.md", TEMPLATE(ws)));
+  const fold = at(5, "fold: Naming", "fold", (set) => {
+    set(naming, NOTE("Naming", "Names for the roles.", "Named for what they read."));
+    set("MEMORY.md", INDEX(ws, { naming }));
   });
-  at(2, "fold: Release order", "fold", () => {
-    set("notes/2026-11-22-release-order.md", NOTE("Release order", "What goes out first.", "The role, then the schema."), null, t - 2 * day);
-    set("MEMORY.md", INDEX(ws, true, false), null, t - 2 * day);
+  at(4.9, "Undo: fold: Naming", "undo", (set) => { set(naming, null); set("MEMORY.md", TEMPLATE(ws)); }, fold.commit);
+  at(1, "fold: Storage layout", "fold", (set) => {
+    set(storage, NOTE("Storage layout", "Where the media should live.", "On the NAS, mounted read only for guests."));
+    set("topics/nas-layout.md", NAS("not bought yet", storage));
+    set("files/rack.svg", null, rack("#e2c16b"));
+    set("MEMORY.md", INDEX(ws, { storage }));
   });
-  at(1, "Edited: MEMORY.md, topics/nas-layout.md, files/rack.svg", "edit", () => {
-    set("MEMORY.md", INDEX(ws, true, true), null, t - day);
-    set("topics/nas-layout.md", NAS("four 8 TB disks"), null, t - day);
-    set("files/rack.svg", null, rack("#e06c75"), t - day);
+  at(0.2, "Edited: MEMORY.md, files/rack.svg, notes/2026-11-19-how-we-work.md and 1 more", "edit", (set) => {
+    set("notes/2026-11-19-how-we-work.md", "# How we work\n\nOne place per branch, and nothing merges on a Friday afternoon.\n");
+    set("MEMORY.md", INDEX(ws, { storage, edited: true }));
+    set("topics/nas-layout.md", NAS("four 8 TB disks", storage));
+    set("files/rack.svg", null, rack("#e06c75"));
   });
-  const edit = m.commits[m.commits.length - 1].commit;
-  at(0.2, "Undo: Edited: MEMORY.md, topics/nas-layout.md, files/rack.svg", "undo", () => {
-    set("MEMORY.md", INDEX(ws, true, false), null, t - 0.2 * day);
-    set("topics/nas-layout.md", NAS("not bought yet"), null, t - 0.2 * day);
-    set("files/rack.svg", null, rack("#e2c16b"), t - 0.2 * day);
-  }, edit);
   m.seen = stamp(m);
   return m;
 }
@@ -193,12 +199,13 @@ function change(m: Mem, c: C) {
 // ── the rows ────────────────────────────────────────────────────────────────
 export type MemoryMock = ReturnType<typeof memoryMock>;
 
-/** `nameOf` refuses an id `workspaces.json` does not know, as the resolver does. */
-export function memoryMock(emit: Emit, nameOf: (id: unknown) => string) {
+/** `nameOf` refuses an id `workspaces.json` does not know, as the resolver
+ *  does; `noteOf` is where a workspace's chat of that title keeps its note. */
+export function memoryMock(emit: Emit, nameOf: (id: unknown) => string, noteOf: (id: string, title: string) => string | null) {
   const none = Q.get("memory") === "none";
   const get = (id: string): Mem | null => {
     const ws = nameOf(id);
-    if (!mems.has(id) && !none) mems.set(id, seed(ws));
+    if (!mems.has(id) && !none) mems.set(id, seed(ws, (t) => noteOf(id, t)));
     return mems.get(id) ?? null;
   };
   const need = (id: string) => { const m = get(id); if (!m) throw "this workspace has no memory yet"; return m; };
@@ -255,7 +262,7 @@ export function memoryMock(emit: Emit, nameOf: (id: unknown) => string) {
       case "workspace_memory_make": {
         if (!get(id)) {
           const m: Mem = { name: nameOf(id), files: new Map(), commits: [], seen: new Map(), tick: null, quiet: null };
-          m.files.set("MEMORY.md", { text: `# Memory: ${m.name}\n\n## What this workspace is for\n\n## Projects\n\n## Decisions\n\n## How we work here\n\n## Open\n`, b64: null, mtime: now() });
+          m.files.set("MEMORY.md", { text: TEMPLATE(m.name), b64: null, mtime: now() });
           commit(m, "Memory made", "made");
           m.seen = stamp(m);
           mems.set(id, m);
@@ -364,5 +371,28 @@ export function memoryMock(emit: Emit, nameOf: (id: unknown) => string) {
       touched(id, m);
     },
     writes: () => writes.slice(),
+    /** A chat's start and resume: make it, or commit what is dirty. */
+    beforeLaunch(id: string) {
+      const m = get(id);
+      if (!m) call("workspace_memory_make", { id });
+      else commit(m, null, "edit");
+    },
+    /** What a chat's record says of the fold of that title, as git has it. */
+    fold(id: string, title: string): { commit: string; files: number; lines: { added: number; removed: number }; reverted: boolean } | null {
+      const m = get(id);
+      const c = m?.commits.find((x) => x.subject === `fold: ${title}`);
+      if (!m || !c) return null;
+      const ch = change(m, c);
+      return { commit: ch.commit, files: ch.files.length, lines: { added: ch.added, removed: ch.removed }, reverted: ch.reverted_by !== null };
+    },
+    /** A note is on disk, by its path in the workspace's folder. */
+    has: (id: string, path: string) => !!get(id)?.files.has(path.replace(/^memory\//, "")),
+    /** Its workspace was removed: the folder, if it had one, is moved away. */
+    remove(id: string): boolean {
+      const m = mems.get(id);
+      if (m?.tick != null) clearTimeout(m.tick);
+      if (m?.quiet != null) clearTimeout(m.quiet);
+      return mems.delete(id);
+    },
   };
 }

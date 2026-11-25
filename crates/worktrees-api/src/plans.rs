@@ -175,7 +175,7 @@ pub struct Files {
 
 impl Files {
     pub fn of(ctx: &Ctx) -> Files {
-        Files { ideas: ctx.ideas_dir().to_path_buf(), ws: store::path(), reg: registry::path() }
+        Files { ideas: ctx.ideas_dir().to_path_buf(), ws: ctx.workspaces_file().to_path_buf(), reg: registry::path() }
     }
 }
 
