@@ -14,6 +14,13 @@
 //! that text. `rev` is `null` for a file too large to open here. Its first
 //! sight of a memory is a baseline and sends nothing.
 //!
+//! **`workspaces:history`** is `{id, commit}`: the newest commit of `id`'s
+//! memory is `commit` and was another one the tick before, whoever made it (a
+//! save's, a fold's, an undo's, the quiet minute's, another engine's). It is
+//! sent too, with the commit there is, when a commit begins to fail again and
+//! again or stops failing: `workspace_memory`'s `commit_error` moved. What an
+//! open History or Overview shows is out of date; a document is not.
+//!
 //! **What a tick costs:** one `readdir` a folder and one `lstat` an entry, for
 //! every workspace that has a memory, and no git. 20 workspaces of 200 files
 //! each measured 6.8 ms (core's `memory_poll_cost`, release, an Apple silicon
@@ -33,7 +40,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use worktrees_core::memory::{self as store, Base, Change, Doc, FileChange, Index, Listing, Log, Reverted, Saved, Sig, Stamp};
-use worktrees_core::{attach, registry, workspacechats, workspaces};
+use worktrees_core::{attach, registry, workspacechats, workspaces, wslock};
 
 use crate::files::{b64_encode, PlaceImage};
 use crate::Ctx;
@@ -46,7 +53,23 @@ pub const QUIET: Duration = Duration::from_secs(60);
 #[derive(Default)]
 pub struct Memory {
     held: Mutex<HashSet<String>>,
+    failing: Mutex<HashMap<String, CommitError>>,
 }
+
+/// Commits of a memory that keep failing.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct CommitError {
+    /// git's words, or ours.
+    pub error: String,
+    /// When the first of them failed, in seconds since the epoch.
+    pub since: i64,
+    /// How many have, one after another.
+    pub times: u32,
+}
+
+/// What is said of failing commits: one may be a moment's (a file that moved
+/// as it was read), and the next quiet minute tries again.
+const SAID_AFTER: u32 = 2;
 
 impl Memory {
     /// Keep the poll from committing `id`'s memory, and refuse an undo there.
@@ -58,6 +81,24 @@ impl Memory {
     }
     pub fn is_held(&self, id: &str) -> bool {
         self.held.lock().unwrap_or_else(|e| e.into_inner()).contains(id)
+    }
+    /// How a commit of `id`'s memory went.
+    fn went<T>(&self, id: &str, r: &Result<T, String>, now: i64) {
+        let mut all = self.failing.lock().unwrap_or_else(|e| e.into_inner());
+        match r {
+            Ok(_) => {
+                all.remove(id);
+            }
+            Err(e) => {
+                let f = all.entry(id.to_string()).or_insert(CommitError { error: String::new(), since: now, times: 0 });
+                f.error = e.clone();
+                f.times += 1;
+            }
+        }
+    }
+    /// The failure to tell of, once it has repeated.
+    fn failing(&self, id: &str) -> Option<CommitError> {
+        self.failing.lock().unwrap_or_else(|e| e.into_inner()).get(id).filter(|f| f.times >= SAID_AFTER).cloned()
     }
 }
 
@@ -80,13 +121,15 @@ pub struct MemoryView {
     pub listing: Listing,
     /// The newest commit, with its files and counts.
     pub last: Option<Change>,
+    /// What changes here is not getting into the history, and why.
+    pub commit_error: Option<CommitError>,
 }
 
 pub fn workspace_memory(ctx: &Ctx, id: String) -> Result<MemoryView, String> {
     let r = root(ctx);
     let dir = store::dir_at(r, &id)?.to_string_lossy().into_owned();
     if !store::ids_at(r).contains(&id) {
-        return Ok(MemoryView { made: false, dir, index: None, listing: Listing::default(), last: None });
+        return Ok(MemoryView { made: false, dir, index: None, listing: Listing::default(), last: None, commit_error: None });
     }
     Ok(MemoryView {
         made: true,
@@ -94,6 +137,7 @@ pub fn workspace_memory(ctx: &Ctx, id: String) -> Result<MemoryView, String> {
         index: store::index_at(r, &id)?,
         listing: store::list_at(r, &id)?,
         last: store::log_at(r, &id, None, None, Some(1))?.changes.pop(),
+        commit_error: ctx.memory.failing(&id),
     })
 }
 
@@ -125,7 +169,8 @@ pub fn before_launch(ctx: &Ctx, w: &workspaces::Workspace) -> Result<(), String>
     if !store::ids_at(root(ctx)).contains(&w.id) {
         return make(ctx, w);
     }
-    if !ctx.memory.is_held(&w.id) {
+    let _lock = wslock::take(root(ctx), &w.id)?;
+    if may_commit(ctx, &w.id).is_ok() {
         if let Err(e) = memory_commit_if_dirty(ctx, &w.id, None) {
             crate::log::warn(&format!("memory: {}: could not commit before a chat: {e}", w.id));
         }
@@ -230,9 +275,10 @@ pub fn workspace_memory_diff(ctx: &Ctx, id: String, commit: String, path: Option
 /// Undo a change, or redo an undo: a new commit. `conflicts` names the files
 /// that changed since, and nothing was done.
 pub fn workspace_memory_revert(ctx: &Ctx, id: String, commit: String) -> Result<Reverted, String> {
-    if ctx.memory.is_held(&id) {
-        return Err("a chat is folding into this memory: wait for it, or stop it".into());
-    }
+    // Asked and done under one lock: a fold that begins waits for this, and one
+    // that has begun, in this engine or another, is seen.
+    let _lock = wslock::take(root(ctx), &id)?;
+    may_commit(ctx, &id)?;
     let done = store::revert_at(root(ctx), &id, &commit)?;
     // An undone fold says so in its chat's record, and a redone one no longer.
     if done.change.is_some() {
@@ -243,7 +289,23 @@ pub fn workspace_memory_revert(ctx: &Ctx, id: String, commit: String) -> Result<
 
 /// Commit what is dirty, for whoever starts a chat or a fold.
 pub fn memory_commit_if_dirty(ctx: &Ctx, id: &str, message: Option<&str>) -> Result<Option<Change>, String> {
-    store::commit_if_dirty_at(root(ctx), id, message)
+    let done = store::commit_if_dirty_at(root(ctx), id, message);
+    ctx.memory.went(id, &done, worktrees_core::sysclock::now_epoch());
+    done
+}
+
+/// Whether what is dirty in `id`'s memory is anyone's to commit, or a fold's
+/// alone. Asked under [`wslock`], which a fold takes to begin: by this
+/// engine's holds, and by the record, which any engine's fold is in. A record
+/// that cannot be read is not a no.
+fn may_commit(ctx: &Ctx, id: &str) -> Result<(), String> {
+    let folding = ctx.memory.is_held(id) || folding_at(root(ctx), id)?.is_some();
+    if folding { Err("a chat is folding into this memory: wait for it, or stop it".into()) } else { Ok(()) }
+}
+
+/// The chats lane's `workspacechats::folding_at`, until it is merged here.
+fn folding_at(_root: &Path, _id: &str) -> Result<Option<String>, String> {
+    Ok(None)
 }
 
 // ── the poll ────────────────────────────────────────────────────────────────
@@ -278,6 +340,8 @@ pub struct MemoryWatch {
     before: Option<(i64, Live)>,
     /// This one's.
     here: (i64, Live),
+    /// Each memory's newest commit and failure, as they were last told.
+    told: HashMap<String, (Option<String>, Option<String>)>,
 }
 
 /// The live chats of each workspace.
@@ -390,25 +454,61 @@ pub fn tick(ctx: &Ctx, w: &mut MemoryWatch, live: Live) {
         ctx.emit("workspaces:memory", serde_json::to_value(ev).unwrap_or(serde_json::Value::Null));
     }
     for id in quiet {
-        let done = store::commit_quiet_at(r, &id, |last| w.seen.get(&id).map(|s| s.live_since(last)).unwrap_or_default());
-        if let (Some(s), Ok(_)) = (w.seen.get_mut(&id), &done) {
-            s.live.clear();
+        commit_quiet(ctx, w, &id);
+    }
+    w.told.retain(|id, _| ids.contains(id));
+    for id in &ids {
+        let now = (store::head_at(r, id), ctx.memory.failing(id).map(|f| f.error));
+        // The first sight of a memory is a baseline here too.
+        if w.told.insert(id.clone(), now.clone()).is_some_and(|was| was != now) {
+            ctx.emit("workspaces:history", serde_json::json!({"id": id, "commit": now.0}));
         }
-        match done {
-            Ok(Some(c)) => {
-                w.said.remove(&id);
-                crate::log::info(&format!("memory: {id}: committed {} ({} file(s))", &c.commit[..7], c.files.len()));
+    }
+}
+
+/// The quiet minute's commit, unless a fold owns what is dirty, in this engine
+/// or another, or someone else is at it now: the poll waits for nobody.
+fn commit_quiet(ctx: &Ctx, w: &mut MemoryWatch, id: &str) {
+    let r = root(ctx);
+    let lock = match wslock::try_take(r, id) {
+        Ok(Some(l)) => Ok(l),
+        // The next tick asks again.
+        Ok(None) => {
+            if let Some(s) = w.seen.get_mut(id) {
+                s.moved = Instant::now().checked_sub(QUIET).or(Some(Instant::now()));
             }
-            Ok(None) => {}
-            Err(e) => {
-                // Tried again after another quiet minute, and said once.
-                if let Some(s) = w.seen.get_mut(&id) {
-                    s.moved = Some(Instant::now());
-                }
-                if w.said.get(&id) != Some(&e) {
-                    crate::log::warn(&format!("memory: {id}: could not commit: {e}"));
-                    w.said.insert(id, e);
-                }
+            return;
+        }
+        Err(e) => Err(e),
+    };
+    // A record that cannot be read: the minute is owed until it can be.
+    if lock.is_ok() && may_commit(ctx, id).is_err() {
+        if let Some(s) = w.seen.get_mut(id) {
+            s.moved = Some(Instant::now());
+        }
+        return;
+    }
+    let done = lock.and_then(|_l| store::commit_quiet_at(r, id, |last| w.seen.get(id).map(|s| s.live_since(last)).unwrap_or_default()));
+    ctx.memory.went(id, &done, worktrees_core::sysclock::now_epoch());
+    if let (Some(s), Ok(_)) = (w.seen.get_mut(id), &done) {
+        s.live.clear();
+    }
+    match done {
+        Ok(Some(c)) => {
+            w.said.remove(id);
+            crate::log::info(&format!("memory: {id}: committed {} ({} file(s))", &c.commit[..7], c.files.len()));
+        }
+        Ok(None) => {
+            w.said.remove(id);
+        }
+        Err(e) => {
+            // Tried again after another quiet minute, and said once.
+            if let Some(s) = w.seen.get_mut(id) {
+                s.moved = Some(Instant::now());
+            }
+            if w.said.get(id) != Some(&e) {
+                crate::log::warn(&format!("memory: {id}: could not commit: {e}"));
+                w.said.insert(id.to_string(), e);
             }
         }
     }
@@ -441,6 +541,7 @@ mod tests {
         }
         fn put(&self, path: &str, text: &str) {
             let p = store::dir_at(self.ctx.workspaces_dir(), &self.id).unwrap().join(path);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
             fs::write(p, text).unwrap();
         }
     }
@@ -589,7 +690,8 @@ mod tests {
         )]);
         memory_commit_if_dirty(&s.ctx, &s.id, None).unwrap().unwrap();
         tick(&s.ctx, &mut w, Live::new());
-        assert!(s.rec.events.lock().unwrap().is_empty(), "a commit is no change to a file");
+        let ev: Vec<String> = std::mem::take(&mut *s.rec.events.lock().unwrap()).into_iter().map(|e| e.0).collect();
+        assert_eq!(ev, vec!["workspaces:history"], "a commit is no change to a file");
         fs::remove_file(store::dir_at(s.ctx.workspaces_dir(), &s.id).unwrap().join("topics/t.md")).unwrap();
         tick(&s.ctx, &mut w, Live::new());
         assert_eq!(s.rec.events.lock().unwrap()[0].1["removed"], serde_json::json!(["topics/t.md"]));
@@ -597,6 +699,115 @@ mod tests {
         fs::remove_dir_all(s.ctx.workspaces_dir()).unwrap();
         tick(&s.ctx, &mut w, Live::new());
         assert!(s.rec.events.lock().unwrap().is_empty(), "a workspace that went is not its files removed one by one");
+    }
+
+    fn history(s: &Scratch) -> Vec<serde_json::Value> {
+        let mut ev = s.rec.events.lock().unwrap();
+        let out = ev.iter().filter(|e| e.0 == "workspaces:history").map(|e| e.1.clone()).collect();
+        ev.clear();
+        out
+    }
+
+    /// Whoever makes a commit, an open History hears of it once, and of a
+    /// memory first seen nothing.
+    #[test]
+    fn a_commit_that_lands_is_told_whoever_made_it() {
+        let s = Scratch::new("history");
+        let mut w = MemoryWatch::default();
+        let mut beat = || {
+            tick(&s.ctx, &mut w, Live::new());
+            history(&s)
+        };
+        let head = || store::head_at(s.ctx.workspaces_dir(), &s.id).unwrap();
+        assert!(beat().is_empty(), "the baseline");
+        s.put("topics/t.md", "1\n");
+        assert!(beat().is_empty(), "an edit is no commit");
+        // Another engine's, as this one sees it.
+        let c = store::commit_if_dirty_at(s.ctx.workspaces_dir(), &s.id, Some("theirs")).unwrap().unwrap();
+        assert_eq!(beat(), vec![serde_json::json!({"id": s.id, "commit": c.commit})]);
+        assert!(beat().is_empty(), "once");
+        workspace_memory_revert(&s.ctx, s.id.clone(), c.commit).unwrap();
+        assert_eq!(beat(), vec![serde_json::json!({"id": s.id, "commit": head()})]);
+        s.put("topics/t.md", "2\n");
+        beat();
+        w.seen.get_mut(&s.id).unwrap().moved = Instant::now().checked_sub(QUIET);
+        tick(&s.ctx, &mut w, Live::new());
+        assert_eq!(history(&s), vec![serde_json::json!({"id": s.id, "commit": head()})], "the quiet minute's, in the tick that makes it");
+    }
+
+    /// A commit that fails again and again is said where the memory is read,
+    /// with since when; one that failed once is not, and one that works ends it.
+    #[test]
+    fn a_commit_that_keeps_failing_is_said_in_the_answer_and_told() {
+        let s = Scratch::new("failing");
+        let mut w = MemoryWatch::default();
+        let quiet = |w: &mut MemoryWatch| {
+            w.seen.get_mut(&s.id).unwrap().moved = Instant::now().checked_sub(QUIET);
+            tick(&s.ctx, w, Live::new());
+            history(&s)
+        };
+        let said = || workspace_memory(&s.ctx, s.id.clone()).unwrap().commit_error;
+        tick(&s.ctx, &mut w, Live::new());
+        s.put("topics/t.md", "1\n");
+        tick(&s.ctx, &mut w, Live::new());
+        let block = store::git_dir(s.ctx.workspaces_dir(), &s.id).join("index.lock");
+        fs::write(&block, "").unwrap();
+        assert!(quiet(&mut w).is_empty());
+        assert_eq!(said(), None, "once is nothing to say");
+        assert_eq!(quiet(&mut w).len(), 1, "it is told when it begins");
+        let f = said().unwrap();
+        assert!(f.times == 2 && f.error.contains("index.lock") && f.since > 0, "{f:?}");
+        assert!(quiet(&mut w).is_empty(), "and not every time");
+        assert_eq!(said().unwrap().times, 3);
+        assert_eq!(serde_json::to_value(workspace_memory(&s.ctx, s.id.clone()).unwrap()).unwrap()["commit_error"]["times"], 3);
+        fs::remove_file(&block).unwrap();
+        assert_eq!(quiet(&mut w).len(), 1);
+        assert_eq!(said(), None);
+    }
+
+    /// The poll's commit waits for nobody: whoever has the lock is at the
+    /// memory now, and the next tick asks again.
+    #[test]
+    fn the_quiet_commit_waits_for_nobody_and_is_made_at_the_next_tick() {
+        let s = Scratch::new("busy");
+        let mut w = MemoryWatch::default();
+        tick(&s.ctx, &mut w, Live::new());
+        s.put("topics/t.md", "1\n");
+        tick(&s.ctx, &mut w, Live::new());
+        let n = || store::log_at(s.ctx.workspaces_dir(), &s.id, None, None, None).unwrap().changes.len();
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let (up, ready) = std::sync::mpsc::channel();
+        let (r, id) = (s.ctx.workspaces_dir().to_path_buf(), s.id.clone());
+        let t = std::thread::spawn(move || {
+            let _l = wslock::take(&r, &id).unwrap();
+            up.send(()).unwrap();
+            let _ = wait.recv();
+        });
+        ready.recv().unwrap();
+        w.seen.get_mut(&s.id).unwrap().moved = Instant::now().checked_sub(QUIET);
+        tick(&s.ctx, &mut w, Live::new());
+        assert_eq!(n(), 1);
+        assert!(w.seen[&s.id].moved.unwrap().elapsed() >= QUIET, "due at the next tick, not a minute later");
+        // Undo waits for it, and a fold that begins meanwhile refuses it.
+        let (ctx, id) = (s.ctx.clone(), s.id.clone());
+        let c = store::head_at(s.ctx.workspaces_dir(), &s.id).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let u = std::thread::spawn(move || tx.send(workspace_memory_revert(&ctx, id, c).map(|_| ())).unwrap());
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "it did not wait");
+        s.ctx.memory.hold(&s.id);
+        go.send(()).unwrap();
+        t.join().unwrap();
+        assert!(rx.recv_timeout(Duration::from_secs(20)).unwrap().unwrap_err().contains("folding"));
+        u.join().unwrap();
+        tick(&s.ctx, &mut w, Live::new());
+        assert_eq!(n(), 1, "held");
+        // Held after the tick looked and before the lock was had.
+        commit_quiet(&s.ctx, &mut w, &s.id);
+        assert!(n() == 1 && w.seen[&s.id].moved.unwrap().elapsed() < QUIET, "asked again under the lock");
+        s.ctx.memory.release(&s.id);
+        w.seen.get_mut(&s.id).unwrap().moved = Instant::now().checked_sub(QUIET);
+        tick(&s.ctx, &mut w, Live::new());
+        assert_eq!(n(), 2);
     }
 
     /// The quiet minute, on a scripted clock: committed once, a minute after

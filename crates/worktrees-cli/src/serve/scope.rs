@@ -202,9 +202,12 @@ pub const EVENTS: &[(&str, Event)] = &[
     // `{changed: [{id, mtime_ms}], removed: [id]}`: the ideas folder moved
     // (`worktrees_api::ideas`). Desktop only, like every ideas row.
     ("ideas:changed", Event::Console),
-    // `{id, changed: [{path, mtime_ms}], removed: [path]}`: a workspace's memory
-    // moved (`worktrees_api::memory`). Desktop only, like its rows.
+    // `{id, changed: [{path, mtime_ms, size, rev}], removed: [path]}`: a
+    // workspace's memory moved (`worktrees_api::memory`). Desktop only, like
+    // its rows.
     ("workspaces:memory", Event::Console),
+    // `{id, commit}`: its newest commit is another one. Desktop only.
+    ("workspaces:history", Event::Console),
     // `{live, busy, waiting}`: the idea conversations' tmux sessions, by name
     // (phase S, `worktrees_api::watch::IdeaSessions`). Desktop only.
     ("ideas:sessions", Event::Console),

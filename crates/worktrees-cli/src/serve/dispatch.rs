@@ -2219,7 +2219,9 @@ mod tests {
             assert!(e.as_str().unwrap().contains(&format!("no workspace {id}")), "{cmd}: {e}");
         }
         assert!(!folder.exists());
-        assert_eq!(scope::EVENTS.iter().find(|(n, _)| *n == "workspaces:memory").map(|(_, e)| matches!(e, scope::Event::Console)), Some(true));
+        for ev in ["workspaces:memory", "workspaces:history"] {
+            assert_eq!(scope::EVENTS.iter().find(|(n, _)| *n == ev).map(|(_, e)| matches!(e, scope::Event::Console)), Some(true), "{ev}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
