@@ -1501,7 +1501,7 @@ commands! { cx, a;
     workspace_memory_make: HostConsole [console, workspace(id)] => memory::workspace_memory_make(&cx.ctx, a.get("id")?),
     workspace_memory_file: HostConsole [console, workspace(id)] => memory::workspace_memory_file(&cx.ctx, a.get("id")?, a.get("path")?, a.get("commit")?),
     workspace_memory_image: HostConsole [console, workspace(id)] => memory::workspace_memory_image(&cx.ctx, a.get("id")?, a.get("path")?, a.get("etag")?),
-    workspace_memory_write: HostConsole [console, workspace(id)] => memory::workspace_memory_write(&cx.ctx, a.get("id")?, a.get("path")?, a.get("content")?, a.get("expected_mtime")?, a.get("keep_history")?),
+    workspace_memory_write: HostConsole [console, workspace(id)] => memory::workspace_memory_write(&cx.ctx, a.get("id")?, a.get("path")?, a.get("content")?, a.get("expected_mtime")?, a.get("expected_rev")?, a.get("keep_history")?),
     workspace_memory_put: HostConsole [console, workspace(id)] => memory::workspace_memory_put(&cx.ctx, a.get("id")?, a.get("name")?, a.get("data")?),
     workspace_memory_log: HostConsole [console, workspace(id)] => memory::workspace_memory_log(&cx.ctx, a.get("id")?, a.get("path")?, a.get("before")?, a.get("n")?),
     workspace_memory_diff: HostConsole [console, workspace(id)] => memory::workspace_memory_diff(&cx.ctx, a.get("id")?, a.get("commit")?, a.get("path")?),

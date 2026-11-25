@@ -28,6 +28,12 @@ const kind = (p: string) => (IMAGES[ext(p)] ? "image" : ["md", "markdown", "txt"
 const title = (t: string | null) => (t === null ? null : /^ {0,3}# +(.+?)\s*$/m.exec(t)?.[1]) ?? null;
 const size = (f: F) => (f.text !== null ? new TextEncoder().encode(f.text).length : Math.floor((f.b64!.length * 3) / 4));
 const bad = (p: unknown) => typeof p !== "string" || !p || p.startsWith("/") || /[\\\u0000-\u001f]/.test(p) || p.split("/").some((x) => !x || x.startsWith("."));
+/** A file's bytes, named: equal for equal bytes (a small hash, the mock's). */
+const rev = (f: F) => {
+  let h = 0xcbf29ce484222325n;
+  for (const c of new TextEncoder().encode(f.text ?? f.b64!)) h = ((h ^ BigInt(c)) * 0x100000001b3n) & 0xffffffffffffffffn;
+  return h.toString(16).padStart(16, "0");
+};
 const same = (a: F | undefined, b: F | undefined) => a?.text === b?.text && a?.b64 === b?.b64;
 
 const TEMPLATE = (ws: string) => `# Memory: ${ws}\n\n## What this workspace is for\n\n## Projects\n\n## Decisions\n\n## How we work here\n\n## Open\n`;
@@ -127,7 +133,7 @@ function seed(ws: string, noteFor: NoteFor): Mem {
   return m;
 }
 
-const stamp = (m: Mem) => new Map([...m.files].map(([p, f]) => [p, `${f.mtime}|${size(f)}`]));
+const stamp = (m: Mem) => new Map([...m.files].map(([p, f]) => [p, `${f.mtime}|${rev(f)}`]));
 const head = (m: Mem): Files => (m.commits.length ? tree(m, m.commits.length) : new Map());
 function tree(m: Mem, n: number): Files {
   const out: Files = new Map();
@@ -218,7 +224,7 @@ export function memoryMock(emit: Emit, nameOf: (id: unknown) => string, noteOf: 
     return f;
   };
   const find = (m: Mem, c: unknown) => { const x = m.commits.find((y) => y.commit === c); if (!x) throw "no such change in this memory"; return x; };
-  const row = (p: string, f: F) => ({ path: p, file: name(p), title: title(f.text) ?? name(p), mtime_ms: f.mtime, size: size(f) });
+  const row = (p: string, f: F) => ({ path: p, file: name(p), title: title(f.text) ?? name(p), mtime_ms: f.mtime, rev: rev(f), size: size(f) });
   function touched(id: string, m: Mem) {
     if (m.quiet !== null) clearTimeout(m.quiet);
     m.quiet = window.setTimeout(() => { m.quiet = null; if (!held.has(id)) commit(m, null, "edit", Date.now(), null, liveOf(id)); }, QUIET);
@@ -226,7 +232,7 @@ export function memoryMock(emit: Emit, nameOf: (id: unknown) => string, noteOf: 
     m.tick = window.setTimeout(() => {
       m.tick = null;
       const s = stamp(m);
-      const changed = [...s].filter(([p, x]) => m.seen.get(p) !== x).map(([path]) => ({ path, mtime_ms: m.files.get(path)!.mtime }));
+      const changed = [...s].filter(([p, x]) => m.seen.get(p) !== x).map(([path]) => { const f = m.files.get(path)!; return { path, mtime_ms: f.mtime, size: size(f), rev: rev(f) }; });
       const removed = [...m.seen.keys()].filter((p) => !s.has(p));
       m.seen = s;
       if (changed.length || removed.length) emit("workspaces:memory", { id, changed, removed });
@@ -248,7 +254,7 @@ export function memoryMock(emit: Emit, nameOf: (id: unknown) => string, noteOf: 
     const all = [...m.files.values()];
     return {
       made: true, dir,
-      index: ix && { path: "MEMORY.md", content: ix.text ?? "", mtime_ms: ix.mtime, size: size(ix), budget: 16384, over_budget: size(ix) > 16384 },
+      index: ix && { path: "MEMORY.md", content: ix.text ?? "", mtime_ms: ix.mtime, rev: rev(ix), size: size(ix), budget: 16384, over_budget: size(ix) > 16384 },
       folders: [...by].map(([n, files]) => ({ name: n, files })).sort((a, b) => rank(a.name) - rank(b.name) || (a.name < b.name ? -1 : 1)),
       count: all.length, bytes: all.reduce((n, f) => n + size(f), 0), skipped: [], truncated: false,
       last: m.commits.length ? change(m, m.commits[m.commits.length - 1]) : null,
@@ -259,6 +265,7 @@ export function memoryMock(emit: Emit, nameOf: (id: unknown) => string, noteOf: 
   const call = (cmd: string, a: Record<string, unknown>): unknown => {
     const id = a.id as string;
     const exp = (a.expectedMtime ?? a.expected_mtime ?? null) as number | null;
+    const expRev = (a.expectedRev ?? a.expected_rev ?? null) as string | null;
     switch (cmd) {
       case "workspace_memory": return view(id);
       case "workspace_memory_make": {
@@ -295,13 +302,13 @@ export function memoryMock(emit: Emit, nameOf: (id: unknown) => string, noteOf: 
         const m = need(id);
         const p = a.path as string;
         const keep = (a.keepHistory ?? a.keep_history) === true;
-        writes.push({ id, path: p, content: a.content, expected_mtime: exp, keep_history: keep });
+        writes.push({ id, path: p, content: a.content, expected_mtime: exp, expected_rev: expRev, keep_history: keep });
         if (bad(p)) throw `not a memory path: "${p}"`;
         if (kind(p) !== "text") throw `${p} is not a text file`;
-        if (exp === null) { if (m.files.has(p)) throw `there is already a file at ${p}`; }
-        else if (file(m, p).mtime !== exp) throw `the file changed on disk since you opened it: ${p}`;
-        const old = m.files.get(p);
+        if (exp === null && expRev === null && m.files.has(p)) throw `there is already a file at ${p}`;
+        const old = exp === null && expRev === null ? undefined : file(m, p);
         if (old && old.text === a.content) return row(p, old);
+        if (old && (expRev !== null ? rev(old) !== expRev : old.mtime !== exp)) throw `the file changed on disk since you opened it: ${p}`;
         if (keep) commit(m, `Before keeping your text: ${p}`, "edit");
         m.files.set(p, { text: a.content as string, b64: null, mtime: now() });
         touched(id, m);
