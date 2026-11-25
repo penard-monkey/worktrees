@@ -55,6 +55,15 @@ pub const CHATS_DIR: &str = "chats";
 pub const START: &str = "start.md";
 /// The workspace as the engine sees it, rewritten at every start and resume.
 pub const CONTEXT: &str = "context.md";
+/// What a fold's Claude is told, in the chat's own folder.
+pub const FOLD: &str = "fold.md";
+/// The whole reply of a fold that found nothing to keep.
+pub const NOTHING: &str = "No memory changes.";
+/// A fold's states in the record ([`Fold::state`]).
+pub const FOLDING: &str = "folding";
+pub const FOLDED: &str = "done";
+pub const FOLD_FAILED: &str = "failed";
+pub const FOLD_NONE: &str = "none";
 /// The memory repository, in the workspace's folder.
 pub const MEMORY_DIR: &str = "memory";
 /// The index every chat reads, in [`MEMORY_DIR`].
@@ -174,11 +183,17 @@ pub struct Fold {
     /// When it was asked for, `YYYY-MM-DDTHH:MM:SSZ`.
     #[serde(default)]
     pub asked: String,
-    /// `folding`, `done` or `failed`. The fold lane's words; a reader that
-    /// does not know one shows it as nothing.
+    /// [`FOLDING`], [`FOLDED`], [`FOLD_FAILED`], or [`FOLD_NONE`] (stopped, or
+    /// closed without one since). A reader that does not know one shows it as
+    /// nothing.
     #[serde(default)]
     pub state: String,
-    /// The fold's commit in the memory repository, or none (nothing to say).
+    /// [`Fold::asked`] as milliseconds since the epoch: what a note's mtime is
+    /// compared to, across a restart too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked_ms: Option<u64>,
+    /// The fold's commit in the memory repository, a full id; none while it
+    /// runs, and for one that changed nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
     /// How many files it changed.
@@ -192,6 +207,10 @@ pub struct Fold {
     /// Why it failed, in words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
+    /// How many files were changed and not committed when it failed, as the
+    /// engine counted them; none when it did not look.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left: Option<u32>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -227,8 +246,12 @@ pub fn note_path(started: &str, conv: &str) -> String {
 }
 
 /// The record's entry as a reader may use it: a note path that is not the one
-/// this module names (a hand edit, an agent's) is named again.
+/// this module names (a hand edit, an agent's) is named again, and a fold's
+/// commit that is not a full commit id is none.
 fn checked(mut c: Chat) -> Chat {
+    if let Some(f) = c.fold.as_mut() {
+        f.commit = f.commit.take().filter(|s| crate::memory::is_sha(s));
+    }
     c.note = note_path(&c.started, &c.id);
     if c.last_activity.is_empty() {
         c.last_activity = c.started.clone();
@@ -607,22 +630,85 @@ pub fn context_text(c: &Context) -> String {
     out
 }
 
-/// Whether chat `c`'s note is on disk: a regular file at the path this module
-/// names, through no link.
+/// Whether chat `c`'s note is on disk ([`note_mtime_ms`]).
 pub fn note_exists(root: &Path, ws: &str, c: &Chat) -> bool {
+    note_mtime_ms(root, ws, c).is_some()
+}
+
+/// When chat `c`'s note was last written, in milliseconds since the epoch:
+/// `None` unless it is a regular file at the path this module names, through
+/// no link.
+pub fn note_mtime_ms(root: &Path, ws: &str, c: &Chat) -> Option<u64> {
     let rel = PathBuf::from(note_path(&c.started, &c.id));
-    let Ok(mut at) = folder_at(root, ws) else { return false };
+    let mut at = folder_at(root, ws).ok()?;
     let parts: Vec<_> = rel.components().collect();
+    let mut mtime = None;
     for (i, part) in parts.iter().enumerate() {
-        let Component::Normal(n) = part else { return false };
+        let Component::Normal(n) = part else { return None };
         at.push(n);
-        let Ok(md) = fs::symlink_metadata(&at) else { return false };
+        let md = fs::symlink_metadata(&at).ok()?;
         let last = i + 1 == parts.len();
         if !(if last { md.file_type().is_file() } else { md.file_type().is_dir() }) {
-            return false;
+            return None;
         }
+        mtime = md.modified().ok();
     }
-    true
+    Some(mtime?.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64)
+}
+
+// ── the fold's file ─────────────────────────────────────────────────────────
+
+/// What `fold.md` says: the fixed template, filled with paths of the engine's
+/// own, every one absolute. No text a person or an agent wrote is in it.
+pub fn fold_text(folder: &Path, c: &Chat) -> String {
+    let memory = folder.join(MEMORY_DIR);
+    let note = folder.join(note_path(&c.started, &c.id));
+    format!(
+        "# Fold this chat into the workspace's memory\n\
+         \n\
+         The person is closing this chat. Keep what is worth keeping from it, then stop. The memory is the\n\
+         folder `{memory}`, which is NOT Claude Code's own auto memory: use these absolute paths.\n\
+         \n\
+         1. Write this chat's note, whole, at exactly `{note}`.\n\
+            If the file is there, it is this same chat's earlier note: rewrite it for the whole chat. Do not\n\
+            append to it and do not make a second one. A first-level heading says what the chat was about,\n\
+            and these four headings follow, a few lines each, `Nothing.` under one that has none:\n\
+            \n\
+            `## Asked` — `## Decided` — `## Done` — `## Open`\n\
+         2. Update `{memory}/{MEMORY_INDEX}`: one line and a link for each durable fact, and correct a line\n\
+            that is no longer true. Keep it short: move anything long to a file in `{memory}/topics/` and\n\
+            link to it. Links are relative to the file they are in.\n\
+         3. Write nowhere else. Do not commit: the app does. Start no new work and ask no question.\n\
+         4. Then say in two lines what you changed.\n\
+         \n\
+         If nothing in this chat is worth keeping, change no file at all, the note included, and reply with\n\
+         exactly `{NOTHING}`\n",
+        memory = memory.display(),
+        note = note.display(),
+    )
+}
+
+/// The fold's fixed opener: the absolute path of a file the engine wrote.
+pub fn fold_opener(folder: &Path, conv: &str) -> String {
+    format!("Read {} and do what it says.", folder.join(CHATS_DIR).join(conv).join(FOLD).display())
+}
+
+/// Write chat `c`'s `fold.md` and answer the opener that reads it.
+pub fn write_fold_at(root: &Path, ws: &str, c: &Chat) -> Result<String, String> {
+    let folder = folder_at(root, ws)?;
+    let own = ws_desk(root, ws)?.make_conv_dir(&c.id)?;
+    crate::fsx::write_atomic(&own.join(FOLD), fold_text(&folder, c).as_bytes(), None).map_err(|e| format!("{FOLD}: {e}"))?;
+    Ok(fold_opener(&folder, &c.id))
+}
+
+/// Whether the newest turn of a fold's transcript is the fold's, and its
+/// reply says there was nothing to keep. `turn` is the newest: its prompt
+/// must be this fold's opener, written no earlier than the fold (`asked_ms`),
+/// or an earlier fold's answer would end this one.
+pub fn said_nothing(turn: &crate::turns::Turn, opener: &str, asked_ms: u64) -> bool {
+    turn.user.as_deref().map(str::trim) == Some(opener)
+        && turn.at.is_some_and(|at| at >= (asked_ms / 1000) as i64)
+        && turn.reply.lines().map(str::trim).filter(|l| !l.is_empty()).last() == Some(NOTHING)
 }
 
 /// The other chats of `ws` that have a note, oldest first, for `context.md`.
@@ -667,6 +753,18 @@ pub fn launch_at(root: &Path, w: &crate::workspaces::Workspace, conv: &str, how:
     };
     launch(&cwd, &c, &session, how, opener, settings).run()?;
     Ok(session)
+}
+
+/// Whether chat `conv` could be relaunched now, its own session aside: asked
+/// before a fold ends that session.
+pub fn may_relaunch_at(root: &Path, w: &crate::workspaces::Workspace, conv: &str) -> Result<(), String> {
+    check_conv(conv)?;
+    let cwd = folder_at(root, &w.id)?;
+    let reg = crate::registry::read_lenient();
+    check_root(root, &reg.roots())?;
+    let c = find_at(root, &w.id, conv)?;
+    let session = session_name(&c.id);
+    launch(&cwd, &c, &session, Start::Resume, None, settings(w, &reg)?).admit()
 }
 
 /// A new chat: [`prepare_at`], then the launch. A launch that is refused takes
@@ -1137,6 +1235,38 @@ mod tests {
         assert!(note_exists(&root, &ws, &c));
         assert_eq!(earlier_notes(&root, &ws, None), vec![(c.started.clone(), c.title.clone(), c.note.clone())]);
         assert!(earlier_notes(&root, &ws, Some(&c.id)).is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The fold's file names every path absolutely, its note's exact one, and
+    /// the four headings; no text of the chat's is in it.
+    #[test]
+    fn the_folds_file_names_the_note_and_the_memory_by_absolute_paths() {
+        let root = tmp("fold");
+        let ws = crate::ulid::new();
+        let c = prepare_at(&root, &ws, |_| String::new()).unwrap();
+        rename_at(&root, &ws, &c.id, "A title with `backticks`").unwrap();
+        let c = find_at(&root, &ws, &c.id).unwrap();
+        let opener = write_fold_at(&root, &ws, &c).unwrap();
+        let folder = root.join(&ws);
+        assert_eq!(opener, format!("Read {}/chats/{}/fold.md and do what it says.", folder.display(), c.id));
+        let t = fs::read_to_string(folder.join("chats").join(&c.id).join(FOLD)).unwrap();
+        for p in [c.note.as_str(), "memory/MEMORY.md", "memory/topics/"] {
+            assert!(t.contains(&format!("`{}/{p}`", folder.display())), "{p}: {t}");
+        }
+        for h in ["## Asked", "## Decided", "## Done", "## Open", NOTHING, "Do not commit", "rewrite it", "NOT Claude Code's own auto memory"] {
+            assert!(t.contains(h), "{h}: {t}");
+        }
+        assert!(!t.contains("backticks"));
+        // Written whole each time, and never through a link.
+        let p = folder.join("chats").join(&c.id).join(FOLD);
+        fs::remove_file(&p).unwrap();
+        let elsewhere = root.join("elsewhere");
+        fs::write(&elsewhere, "keep").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &p).unwrap();
+        write_fold_at(&root, &ws, &c).unwrap();
+        assert_eq!(fs::read_to_string(&elsewhere).unwrap(), "keep");
+        assert_eq!(fs::read_to_string(&p).unwrap(), t);
         let _ = fs::remove_dir_all(&root);
     }
 

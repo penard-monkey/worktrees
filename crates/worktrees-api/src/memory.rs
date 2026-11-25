@@ -226,7 +226,12 @@ pub fn workspace_memory_revert(ctx: &Ctx, id: String, commit: String) -> Result<
     if ctx.memory.is_held(&id) {
         return Err("a chat is folding into this memory: wait for it, or stop it".into());
     }
-    store::revert_at(root(ctx), &id, &commit)
+    let done = store::revert_at(root(ctx), &id, &commit)?;
+    // An undone fold says so in its chat's record, and a redone one no longer.
+    if done.change.is_some() {
+        crate::workspacefolds::mark_reverted(ctx, &id);
+    }
+    Ok(done)
 }
 
 /// Commit what is dirty, for whoever starts a chat or a fold.
