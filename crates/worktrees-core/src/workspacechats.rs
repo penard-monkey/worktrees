@@ -235,8 +235,8 @@ pub struct Fold {
     /// nothing.
     #[serde(default)]
     pub state: String,
-    /// [`Fold::asked`] as milliseconds since the epoch: what a note's mtime is
-    /// compared to, across a restart too.
+    /// [`Fold::asked`] as milliseconds since the epoch, for a client's clock.
+    /// Nothing is decided by it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asked_ms: Option<u64>,
     /// Which attempt this is, a ULID made when it was asked: its opener and its
