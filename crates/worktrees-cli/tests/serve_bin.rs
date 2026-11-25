@@ -867,7 +867,7 @@ fn a_workspace_chat_from_start_to_the_workspaces_removal() {
     assert_eq!(got[0], home.to_string_lossy(), "the cwd is the workspace's folder");
     assert_eq!(&got[1..5], ["--name", &session, "--session-id", sid]);
     assert_eq!(got.last().unwrap(), &format!("Read chats/{conv}/start.md and begin."));
-    let rules = format!(r#"{{"autoMemoryEnabled":false,"permissions":{{"allow":["Read(/{a}/**)"],"deny":["Edit(/{a}/**)"]}}}}"#);
+    let rules = format!(r#"{{"autoMemoryEnabled":false,"permissions":{{"allow":["Read(/{a}/**)"],"deny":["Edit(/{a}/**)","Read(/{private}/**)"]}}}}"#);
     assert!(got.windows(2).any(|w| w == ["--settings", rules.as_str()]), "{got:?}");
     assert!(!got.iter().any(|w| w.starts_with("--add-dir")), "{got:?}");
     let own = folder.join(&id).join("chats").join(&conv);
