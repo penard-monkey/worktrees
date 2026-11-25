@@ -98,7 +98,7 @@ export function MemoryDoc(props: {
       float={(to) => props.dock(to.name)}
       floated={props.docked}
       floatAs={{ label: "Dock", title: `Dock: put it back in ${at.name || "its workspace"}`, asking: "Opening it in the main window…", to: "the main window" }}
-      history={(close) => <MemoryHistory ws={at.ws} view={props.view} chat={(id) => (titles ? titles.get(id) ?? null : "…")} path={at.path} at={null} tick={props.tick} open={(p) => { close(); props.follow(p); }} close={close} />}
+      history={(close) => <MemoryHistory ready={async () => !props.api.current || props.api.current.leave()} ws={at.ws} view={props.view} chat={(id) => (titles ? titles.get(id) ?? null : "…")} path={at.path} at={null} tick={props.tick} open={(p) => { close(); props.follow(p); }} close={close} />}
     />
   );
 }

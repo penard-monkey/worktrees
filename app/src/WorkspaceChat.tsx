@@ -131,6 +131,8 @@ export function WorkspaceChatColumn(props: {
   openMemory(path: string | null): void;
   /** How a memory file is called in a sentence. */
   nameOf(path: string): string;
+  /** What is open of the workspace's documents is saved: asked before any act. */
+  ready(): Promise<boolean>;
   memoryTick: number;
   memoryChanged(): void;
   onError(msg: string): void;
@@ -176,9 +178,9 @@ export function WorkspaceChatColumn(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [first, conv]);
 
-  const act = async (what: string, run: () => Promise<void>) => {
+  const act = async (what: string, run: () => Promise<void>, gated = true) => {
     setBusy(true);
-    try { await run(); } catch (e) { props.onError(`Could not ${what}: ${String(e)}`); }
+    try { if (!gated || (await props.ready())) await run(); } catch (e) { props.onError(`Could not ${what}: ${String(e)}`); }
     finally { setBusy(false); }
   };
   if (!c || !row) {
@@ -203,14 +205,14 @@ export function WorkspaceChatColumn(props: {
   const fold = async () => {
     setSaid(null);
     setBusy(true);
-    try { if ((await live.fold(ws.id, conv)).reattach) setAttach((n) => n + 1); } catch (e) { setSaid(String(e)); }
+    try { if ((await props.ready()) && (await live.fold(ws.id, conv)).reattach) setAttach((n) => n + 1); } catch (e) { setSaid(String(e)); }
     finally { setBusy(false); }
   };
   const ended = endedLine(c, transcriptGone(reason));
-  const remove = () => arm.confirm("delete", () => { setMenu(null); void act("delete it", async () => { await live.remove(ws.id, conv); props.away(); }); });
+  const remove = () => arm.confirm("delete", () => { setMenu(null); void act("delete it", async () => { await live.remove(ws.id, conv); props.away(); }, row.live); });
   const rename = (t: string) => {
     setRenaming(null);
-    if (t.trim() && t.trim() !== c.title) void act("rename it", () => live.rename(ws.id, conv, t.trim()));
+    if (t.trim() && t.trim() !== c.title) void act("rename it", () => live.rename(ws.id, conv, t.trim()), false);
   };
   const term = view === "terminal" && row.live;
   return (
@@ -276,7 +278,7 @@ export function WorkspaceChatColumn(props: {
             onTerminal={() => setView("terminal")} onOpenPath={() => {}} reloadToken={0} onError={props.onError}
             insert={c.fold?.state === "done" && c.fold.commit && !running ? {
               at: change?.at ?? Number.MAX_SAFE_INTEGER,
-              node: <Receipt ws={ws.id} chat={c} change={change} show={props.showChange} note={chatNote(c)} openNote={props.openMemory} nameOf={props.nameOf} changed={() => { props.memoryChanged(); void live.refresh(ws.id); }} />,
+              node: <Receipt ws={ws.id} chat={c} change={change} show={props.showChange} note={chatNote(c)} openNote={props.openMemory} nameOf={props.nameOf} ready={props.ready} changed={() => { props.memoryChanged(); void live.refresh(ws.id); }} />,
             } : null}
             readOnly={running && now ? (
               <div className="wsc-ended" data-testid="ws-chat-folding" data-fold={now.state} role="status">
@@ -330,11 +332,11 @@ export function WorkspaceChatColumn(props: {
 
 /** What a fold left, in its chat for good: how much it changed, and the way to
  *  see it, undo it and put it back. */
-function Receipt(props: { ws: string; chat: WsChat; change: MemoryChange | null; show(commit: string): void; note: string | null; openNote(path: string | null): void; nameOf(path: string): string; changed(): void }) {
+function Receipt(props: { ws: string; chat: WsChat; change: MemoryChange | null; show(commit: string): void; note: string | null; openNote(path: string | null): void; nameOf(path: string): string; ready(): Promise<boolean>; changed(): void }) {
   const { chat } = props;
   const f = chat.fold!;
   const { change } = props;
-  const rv = useRevert(props.ws, props.changed, props.nameOf);
+  const rv = useRevert(props.ws, props.changed, props.nameOf, props.ready);
   return (
     <div className={"wsc-receipt" + (change?.reverted_by ? " undone" : "")} data-testid="ws-chat-receipt" data-commit={f.commit}>
       <p><b>{change?.reverted_by ? "Folded into memory, and undone" : "Folded into memory"}</b> <span className="wsm-change-d">{change ? whenWords(new Date(change.at * 1000).toISOString()) : ""} · {f.files ?? 0} file{f.files === 1 ? "" : "s"}{f.lines?.added ? ` +${f.lines.added}` : ""}{f.lines?.removed ? ` −${f.lines.removed}` : ""}</span></p>

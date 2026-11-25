@@ -6943,9 +6943,27 @@ function App() {
   const openWsOverview = (id: string) => { void showWsRef.current(id, "overview", { chat: null }); };
   /** A chat, in the middle. The documents keep their tab. */
   const openChat = (id: string, conv: string) => void showWs(id, wsShown?.id === id ? wsTabNow : "memory", { chat: conv });
+  /** Before an act of workspace `id`'s chats or of its memory's history: the
+   *  document of it that is open here is in its file. `false`: it cannot be, the act
+   *  does not start, and the text is shown with why. */
+  const docSaved = async (id: string): Promise<boolean> => {
+    const cur = mainDocRef.current;
+    if (!cur || cur.ws !== id || !mainDocApi.current || await mainDocApi.current.leave()) return true;
+    const now = mainDocRef.current;
+    if (now) void showWsRef.current(now.ws, now.tab);
+    setWsSide("docs");
+    setNotice("Not done: a document of this workspace has text that is not saved. Keep yours or reload it first.");
+    return false;
+  };
+  const startingChat = useRef(false);
   const startChat = async (id: string) => {
-    if (wsStart && wsStart.why === null) return;
-    if (!(await showWs(id, wsShown?.id === id ? wsTabNow : "memory", { chat: null }))) return;
+    if ((wsStart && wsStart.why === null) || startingChat.current) return;
+    // One press at a time: what follows may wait for a save.
+    startingChat.current = true;
+    try {
+      if (!(await docSaved(id))) return;
+      if (!(await showWs(id, wsShown?.id === id ? wsTabNow : "memory", { chat: null }))) return;
+    } finally { startingChat.current = false; }
     setWsSide("chat");
     setWsStart({ ws: id, why: null });
     const got = await wsChats.start(id);
@@ -9297,7 +9315,7 @@ function App() {
           // dot says it.
           landed={(commit) => { if (!mainDocApi.current?.editing()) void showChange(wsShown.id, commit).then(() => setWsSide("chat")); }}
           showChange={(commit) => void showChange(wsShown.id, commit)}
-          openMemory={(path) => openMemory(wsShown.id, path)} nameOf={(p) => nameAt(memView, p)}
+          openMemory={(path) => openMemory(wsShown.id, path)} nameOf={(p) => nameAt(memView, p)} ready={() => docSaved(wsShown.id)}
           memoryTick={wsMem.tick(wsShown.id)}
           memoryChanged={() => void wsMem.refresh(wsShown.id)}
           openTerminalApp={(session) => { invoke("open_terminal", { cmd: settings.terminal_cmd, session }).catch((e) => fail(e)); }}
@@ -10913,7 +10931,7 @@ function App() {
                       : !memView ? <p className="ws-ov-none">Reading…</p>
                       : !memView.made ? <NoMemory make={() => void makeMemory(wsShown.id)} busy={memBusy} />
                       : (
-                        <MemoryCard ws={wsShown.id} chat={(c) => chatNavName(wsShown.id, c)} view={memView} ago={ago} open={(path) => openMemory(wsShown.id, path)} diff={(commit) => void showChange(wsShown.id, commit)}
+                        <MemoryCard ready={() => docSaved(wsShown.id)} ws={wsShown.id} chat={(c) => chatNavName(wsShown.id, c)} view={memView} ago={ago} open={(path) => openMemory(wsShown.id, path)} diff={(commit) => void showChange(wsShown.id, commit)}
                           follow={(href) => { const to = memoryDocs(wsShown.id).target("MEMORY.md", href); if (to) followDoc(to); }}
                           changed={() => void wsMem.refresh(wsShown.id)} />
                       )}
@@ -10989,7 +11007,7 @@ function App() {
                       linkNote: memLinkNote,
                       historyAsk: memAt?.ws === mainDoc.ws ? memAt.n : 0,
                       history: (close: () => void) => (
-                        <MemoryHistory view={memView} chat={(c) => chatNavName(mainDoc.ws, c)} key={`${mainDoc.ws}|${mainDoc.name}|${memAt?.ws === mainDoc.ws ? memAt.n : 0}`} ws={mainDoc.ws} path={mainDoc.name} at={memAt?.ws === mainDoc.ws ? memAt.commit : null} tick={wsMem.tick(mainDoc.ws)}
+                        <MemoryHistory ready={() => docSaved(mainDoc.ws)} view={memView} chat={(c) => chatNavName(mainDoc.ws, c)} key={`${mainDoc.ws}|${mainDoc.name}|${memAt?.ws === mainDoc.ws ? memAt.n : 0}`} ws={mainDoc.ws} path={mainDoc.name} at={memAt?.ws === mainDoc.ws ? memAt.commit : null} tick={wsMem.tick(mainDoc.ws)}
                           open={(path) => { close(); setMemAt(null); openMemory(mainDoc.ws, path); }} close={() => { close(); setMemAt(null); }} />
                       ),
                       strips: (mode: "edit" | "read") => (

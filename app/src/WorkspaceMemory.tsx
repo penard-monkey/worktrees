@@ -227,7 +227,7 @@ const Lines = ({ added, removed }: { added: number | null; removed: number | nul
 
 /** Undo a change, or Redo one that was undone: two presses, and a refusal names
  *  the files. Shared by History, the Overview's line and a chat's receipt. */
-export function useRevert(ws: string, done: (r: MemoryChange) => void, name: (path: string) => string) {
+export function useRevert(ws: string, done: (r: MemoryChange) => void, name: (path: string) => string, ready: () => Promise<boolean>) {
   const arm = useArmed<string>();
   const [busy, setBusy] = useState(false);
   const [said, setSaid] = useState<{ commit: string; text: string } | null>(null);
@@ -235,6 +235,7 @@ export function useRevert(ws: string, done: (r: MemoryChange) => void, name: (pa
     setBusy(true);
     setSaid(null);
     try {
+      if (!(await ready())) return;
       const r = await memoryDocs(ws).revert(c.revert);
       if (r.conflicts.length) setSaid({ commit: c.commit, text: conflictWords(r.conflicts.map(name)) });
       else if (r.change) done(r.change);
@@ -271,6 +272,8 @@ export function MemoryHistory(props: {
   close(): void;
   /** A chat's title, by id; null: it was deleted. */
   chat(id: string): string | null;
+  /** The open document is saved, before an Undo. */
+  ready(): Promise<boolean>;
 }) {
   const { ws, path } = props;
   const src = memoryDocs(ws);
@@ -282,7 +285,7 @@ export function MemoryHistory(props: {
   const [file, setFile] = useState<string | null>(null);
   const [diff, setDiff] = useState<MemoryFileDiff | null>(null);
   const named = (p: string) => nameAt(props.view, p);
-  const rv = useRevert(ws, (c) => { setCur(c); setFile(null); }, named);
+  const rv = useRevert(ws, (c) => { setCur(c); setFile(null); }, named, props.ready);
   const want = all ? undefined : path ?? undefined;
   const pick = useCallback((c: MemoryChange) => {
     setCur(c);
@@ -392,10 +395,12 @@ export function MemoryCard(props: {
   follow(href: string): void;
   changed(): void;
   chat(id: string): string | null;
+  /** The open document is saved, before an Undo. */
+  ready(): Promise<boolean>;
 }) {
   const { view } = props;
   const last = view.last && view.last.kind !== "made" ? view.last : null;
-  const rv = useRevert(props.ws, props.changed, (p) => nameAt(props.view, p));
+  const rv = useRevert(props.ws, props.changed, (p) => nameAt(props.view, p), props.ready);
   const [box, setBox] = useState<HTMLElement | null>(null);
   const [cut, setCut] = useState(false);
   useEffect(() => {
