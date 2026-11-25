@@ -7,30 +7,48 @@
 //! the SAME conversation again on a fixed opener that reads that file. Nothing
 //! is typed. The poll does the rest ([`tick`]).
 //!
-//! **When it lands.** When the chat's note is NEWER than the fold's start and
-//! its Claude has been idle for one tick (seen idle twice running). "The note
-//! exists" is not the test: on a second fold of one chat it exists before
-//! Claude has read a word, and a session that has just launched reads idle.
-//! Claude saying there is nothing to keep, in `fold.md`'s words and in this
-//! fold's own turn, with no new note, closes it with no change.
+//! **When it lands.** When the chat's note has been written since (its revision
+//! is not the one before, whatever any clock says), its Claude has been idle
+//! for one tick (seen idle twice running), and its own turn in the transcript
+//! has said its last words: the turn that this ATTEMPT's opener began, found by
+//! the attempt's id, ended by Claude's own text and not by a stop or an error.
+//! A note that is there is not enough, and neither is a session that reads
+//! idle: one that has just launched does. The turn ending with the line
+//! `fold.md` gives for it closes the fold with no change.
 //!
-//! **When it fails.** Five minutes with no new note, on a clock that does not
-//! run while Claude waits on a prompt, or its Claude exited without one. The
-//! session stays open, the hold is let go, and what memory holds is COUNTED
-//! from its dirty tree: the words never say "unchanged" without that look.
+//! **When it fails.** Five minutes with no new note, and five more with a note
+//! and no end, on a clock that stands still while Claude waits on a prompt; or
+//! its Claude exited before its last words. A tmux that does not answer, or
+//! finds no server (it looks the same when one refuses), is UNKNOWN, never gone: it counts toward the five minutes and nothing else. The
+//! session stays open, and what memory holds is COUNTED from its dirty tree:
+//! the words never say "unchanged" without that look. Try again folds it again;
+//! closing the chat keeps what was written, under its own subject.
 //!
-//! **One at a time in a workspace**, so a fold's commit is one chat's work.
+//! **One at a time in a workspace, in any engine.** The reservation is the
+//! record itself (`chats::folding_at`), read and written under the workspace's
+//! cross-process lock (`wslock`) together with the baseline commit. Undo and
+//! the quiet commit ask the same record under the same lock.
 //!
-//! **What is running is in memory** ([`Folds`]); `chats.json` says which chats
-//! were folding, and the engine takes them up again when it starts
-//! ([`ensure`]), hold and all. Until the first tick has looked they read
-//! `checking`. The record is in the chat's own working directory, so it only
-//! ever says WHICH chats to look at: nothing in it names a path or reaches git.
+//! **Landing survives a crash at each step.** The commit carries the attempt's
+//! id, so an engine that died before the receipt finds its own commit and makes
+//! no second one; the receipt is written before the session is ended, and says
+//! that it still is to be. A receipt that cannot be written ends nothing: the
+//! next tick tries again.
+//!
+//! **What is running is in memory** ([`Folds`]); the record says which chats
+//! were folding, and the engine takes them up again when it starts, each
+//! workspace until its record has been read ([`ensure`]): one that cannot be
+//! read is held, not skipped. Until the first tick has looked they read
+//! `checking`.
+//!
+//! **Order of the locks**, outermost first: a workspace's `life_lock`, the
+//! chat's own lock, `wslock`, the record's. Nothing takes an earlier one while
+//! it holds a later one, and no lock but the first two is held across a launch.
 //!
 //! Every row here runs under the workspace's `life_lock`, and the poll only
 //! TRIES it: a start that is launching is not waited for, the next tick is.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
@@ -38,9 +56,10 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::{json, Value};
 use worktrees_core::memory::{self as memory, Change};
-use worktrees_core::workspacechats::{self as chats, Chat, Fold, FoldLines};
+use worktrees_core::workspacechats::{self as chats, Chat, Fold, FoldLines, FoldTurn};
 use worktrees_core::workspaces::{self as store, Workspace};
-use worktrees_core::{activity, desksessions, tmux, turns, wsfolder};
+use worktrees_core::tmux::Up;
+use worktrees_core::{activity, desksessions, tmux, turns, ulid, wsfolder, wslock};
 
 use crate::agents::{self, Locus};
 use crate::watch::{FoldOf, WorkspaceSessions};
@@ -56,6 +75,7 @@ const TICKS: u32 = 2;
 pub const ERR_WORKING: &str = "it is working: stop it or wait";
 pub const ERR_WAITING: &str = "it is waiting on you: answer it first";
 pub const ERR_STARTING: &str = "it has not started yet: wait for it, or close it without folding";
+pub const ERR_UNSEEN: &str = "tmux did not answer, so whether it is running cannot be told: try again";
 pub const ERR_ALREADY: &str = "this chat is folding already";
 
 /// What a fold does outside the files: a test scripts it.
@@ -66,13 +86,18 @@ pub trait FoldIo: Send + Sync {
     fn today(&self) -> String;
     /// The poll's clock, for what it counts.
     fn clock(&self) -> Duration;
-    fn live(&self, session: &str) -> bool;
+    /// The sessions that are up, as tmux said it.
+    fn sessions(&self) -> Up;
     /// Whether the chat could be relaunched (the limits), before it is ended.
     fn admit(&self, root: &Path, ideas: &Path, w: &Workspace, conv: &str) -> Result<(), String>;
     /// End the chat's session; whether it ran.
     fn close(&self, conv: &str) -> Result<bool, String>;
     /// Launch the conversation again, resumed on `opener`.
     fn relaunch(&self, root: &Path, ideas: &Path, w: &Workspace, conv: &str, opener: String) -> Result<String, String>;
+    /// Whether the engine dies here: a test's, at each step of a landing.
+    fn dies(&self, _at: &'static str) -> bool {
+        false
+    }
 }
 
 struct Live;
@@ -88,8 +113,8 @@ impl FoldIo for Live {
         static START: OnceLock<Instant> = OnceLock::new();
         START.get_or_init(Instant::now).elapsed()
     }
-    fn live(&self, session: &str) -> bool {
-        tmux::session_exists(session)
+    fn sessions(&self) -> Up {
+        tmux::sessions_up()
     }
     fn admit(&self, root: &Path, ideas: &Path, w: &Workspace, conv: &str) -> Result<(), String> {
         chats::may_relaunch_at(root, ideas, w, conv)
@@ -111,48 +136,56 @@ enum Said {
     /// On a prompt: the clock stands still.
     Waiting,
     Failed { why: String, left: Option<u32> },
+    /// Its receipt is written; its session is still to be ended.
+    Closing,
 }
 
 /// One chat's fold, running or failed.
 #[derive(Clone, Debug)]
 struct Run {
     workspace: String,
-    /// When it was asked, as the note's mtime is read.
-    asked_ms: u64,
+    /// The attempt its opener and its commit carry. Empty for a record of a
+    /// build before attempts: no turn and no commit is ever that one's.
+    attempt: String,
+    /// The note's revision as it was asked.
+    before: Option<String>,
     said: Said,
     /// Its clock: what has run of [`LIMIT`], and the last tick's reading.
     spent: Duration,
     last: Option<Duration>,
+    /// A new note has been seen: the five minutes began again.
+    noted: bool,
     idle: u32,
     gone: u32,
 }
 
 impl Run {
-    fn new(workspace: &str, asked_ms: u64, said: Said) -> Run {
-        Run { workspace: workspace.into(), asked_ms, said, spent: Duration::ZERO, last: None, idle: 0, gone: 0 }
+    fn new(workspace: &str, attempt: &str, before: Option<String>, said: Said) -> Run {
+        Run { workspace: workspace.into(), attempt: attempt.into(), before, said, spent: Duration::ZERO, last: None, noted: false, idle: 0, gone: 0 }
     }
-    fn failed(&self) -> bool {
-        matches!(self.said, Said::Failed { .. })
+    fn running(&self) -> bool {
+        matches!(self.said, Said::Checking | Said::Folding | Said::Waiting)
     }
 }
 
 /// What one tick sees of a fold.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Seen {
-    live: bool,
+    /// `None`: tmux did not say.
+    live: Option<bool>,
     busy: bool,
     waiting: bool,
     /// Its session is up and its Claude has written nothing to say so yet.
     starting: bool,
-    note_ms: Option<u64>,
+    /// Its note is not the one that was there before.
+    new: bool,
 }
 
 /// What a tick decides.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Next {
     Wait,
-    Land,
-    /// Idle, with no new note: see whether it said there was nothing.
+    /// Idle: see what its own turn came to.
     Ask,
     TimedOut,
     Gone,
@@ -163,40 +196,46 @@ fn step(r: &mut Run, seen: Seen, now: Duration) -> Next {
     let since = r.last.map_or(Duration::ZERO, |l| now.saturating_sub(l));
     r.last = Some(now);
     let was_waiting = r.said == Said::Waiting;
-    let idle = seen.live && !seen.busy && !seen.waiting && !seen.starting;
+    let up = seen.live == Some(true);
+    let idle = up && !seen.busy && !seen.waiting && !seen.starting;
     r.idle = if idle { r.idle + 1 } else { 0 };
-    r.gone = if seen.live { 0 } else { r.gone + 1 };
-    if seen.live && seen.waiting {
+    r.gone = if seen.live == Some(false) { r.gone + 1 } else { 0 };
+    if up && seen.waiting {
         r.said = Said::Waiting;
         return Next::Wait;
     }
     if !was_waiting {
         r.spent += since;
     }
-    if seen.live {
+    if up {
         r.said = Said::Folding;
     }
-    let new = seen.note_ms.is_some_and(|m| m > r.asked_ms);
-    if new {
-        return if r.idle >= TICKS || r.gone >= TICKS { Next::Land } else { Next::Wait };
+    if seen.new && !r.noted {
+        r.noted = true;
+        r.spent = Duration::ZERO;
     }
     if r.gone >= TICKS {
         return Next::Gone;
     }
-    if r.spent >= LIMIT {
-        return Next::TimedOut;
-    }
     if r.idle >= TICKS {
         return Next::Ask;
     }
-    Next::Wait
+    if r.spent >= LIMIT { Next::TimedOut } else { Next::Wait }
+}
+
+/// Which workspaces' records this engine has read for folds it must take up.
+#[derive(Default)]
+struct Taken {
+    done: HashSet<String>,
+    /// Held because their record could not be read, and what it said.
+    unknown: BTreeMap<String, String>,
 }
 
 /// The folds of this engine, by chat id: running, and failed ones a client is
 /// still to be told of. One per engine.
 pub struct Folds {
     runs: Mutex<BTreeMap<String, Run>>,
-    taken_up: OnceLock<()>,
+    taken: Mutex<Taken>,
     io: Arc<dyn FoldIo>,
 }
 
@@ -208,34 +247,38 @@ impl Default for Folds {
 
 impl Folds {
     pub fn new(io: Arc<dyn FoldIo>) -> Folds {
-        Folds { runs: Mutex::new(BTreeMap::new()), taken_up: OnceLock::new(), io }
+        Folds { runs: Mutex::new(BTreeMap::new()), taken: Mutex::default(), io }
     }
     fn runs(&self) -> MutexGuard<'_, BTreeMap<String, Run>> {
         self.runs.lock().unwrap_or_else(|e| e.into_inner())
     }
     /// The chat of workspace `ws` that is folding now.
     fn running_in(&self, ws: &str) -> Option<String> {
-        self.runs().iter().find(|(_, r)| r.workspace == ws && !r.failed()).map(|(c, _)| c.clone())
+        self.runs().iter().find(|(_, r)| r.workspace == ws && r.running()).map(|(c, _)| c.clone())
     }
     /// Whether chat `conv` is folding now.
     pub fn is_folding(&self, conv: &str) -> bool {
-        self.runs().get(conv).is_some_and(|r| !r.failed())
+        self.runs().get(conv).is_some_and(Run::running)
     }
     /// How chat `conv`'s fold stands, when there is something to say.
     pub fn of(&self, conv: &str) -> Option<FoldOf> {
-        self.runs().get(conv).map(|r| fold_of(conv, r))
+        self.runs().get(conv).filter(|r| r.said != Said::Closing).map(|r| fold_of(conv, r))
     }
     /// End chat `conv`'s session; whether it ran.
     pub fn close(&self, conv: &str) -> Result<bool, String> {
         self.io.close(conv)
     }
-    /// Workspace `ws` is gone: nothing more is said of its chats.
-    pub fn forget(&self, ws: &str) {
+    /// Nothing more is said of workspace `ws`'s chats until its record is read
+    /// again, if it still has one.
+    fn forget(&self, ws: &str) {
         self.runs().retain(|_, r| r.workspace != ws);
+        let mut t = self.taken.lock().unwrap_or_else(|e| e.into_inner());
+        t.done.remove(ws);
+        t.unknown.remove(ws);
     }
     /// The event's map, by session.
     fn by_session(&self) -> BTreeMap<String, FoldOf> {
-        self.runs().iter().map(|(c, r)| (chats::session_name(c), fold_of(c, r))).collect()
+        self.runs().iter().filter(|(_, r)| r.said != Said::Closing).map(|(c, r)| (chats::session_name(c), fold_of(c, r))).collect()
     }
 }
 
@@ -245,6 +288,7 @@ fn fold_of(conv: &str, r: &Run) -> FoldOf {
         Said::Folding => ("folding", None, None),
         Said::Waiting => ("waiting", None, None),
         Said::Failed { why, left } => ("failed", Some(why.clone()), *left),
+        Said::Closing => ("done", None, None),
     };
     FoldOf { workspace: r.workspace.clone(), chat: conv.to_string(), state: state.into(), why, left }
 }
@@ -260,33 +304,57 @@ pub struct FoldNote {
     pub commit: Option<String>,
 }
 
-/// Take up the folds a restart left, once per engine: the hold again, and
-/// `checking` until a tick has looked. A failed one is shown again. Called by
-/// every row that reads or starts something a fold bears on, and by the poll.
-pub fn ensure(ctx: &Ctx) {
-    ctx.folds.taken_up.get_or_init(|| {
-        let Ok(f) = store::read_at(ctx.workspaces_file()) else { return };
-        for w in f.workspaces {
-            for c in chats::list_at(ctx.workspaces_dir(), &w.id).unwrap_or_default() {
-                let Some(fold) = &c.fold else { continue };
-                let said = match fold.state.as_str() {
-                    chats::FOLDING if ctx.folds.running_in(&w.id).is_none() => Said::Checking,
-                    chats::FOLD_FAILED => Said::Failed { why: fold.why.clone().unwrap_or_default(), left: fold.left },
-                    _ => continue,
-                };
-                if said == Said::Checking {
-                    ctx.memory.hold(&w.id);
-                }
-                ctx.folds.runs().insert(c.id.clone(), Run::new(&w.id, asked_ms(fold), said));
-            }
-        }
-    });
+/// Workspace `ws`'s chats are being removed, or are gone: no run of it, and no
+/// hold. If it is still there after all, its record is read again and what it
+/// says is taken up, so neither half can be left without the other.
+pub fn forget(ctx: &Ctx, ws: &str) {
+    ctx.folds.forget(ws);
+    ctx.memory.release(ws);
 }
 
-/// When a fold was asked. A record with no usable time (an agent's edit)
-/// reads as just now: its note must still be written to land it.
-fn asked_ms(f: &Fold) -> u64 {
-    f.asked_ms.unwrap_or_else(|| Live.now_ms())
+/// Take up the folds an engine left: the hold again, and `checking` until a
+/// tick has looked; a failed one is shown again, and one whose session was
+/// still to be ended has it ended. Each workspace until its record has been
+/// read: one that cannot be is HELD meanwhile, for what it cannot say. Called
+/// by every row that reads or starts something a fold bears on, and by the poll.
+pub fn ensure(ctx: &Ctx) {
+    let Ok(f) = store::read_at(ctx.workspaces_file()) else { return };
+    let mut t = ctx.folds.taken.lock().unwrap_or_else(|e| e.into_inner());
+    t.done.retain(|id| f.workspaces.iter().any(|w| w.id == *id));
+    for w in f.workspaces.iter().filter(|w| !t.done.contains(&w.id)).map(|w| w.id.clone()).collect::<Vec<_>>() {
+        let list = match chats::list_at(ctx.workspaces_dir(), &w) {
+            Ok(l) => l,
+            Err(e) => {
+                if t.unknown.get(&w) != Some(&e) {
+                    crate::log::warn(&format!("workspace {w}: whether a chat was folding cannot be read, so its memory is held: {e}"));
+                    ctx.memory.hold(&w);
+                    t.unknown.insert(w, e);
+                }
+                continue;
+            }
+        };
+        let was_unknown = t.unknown.remove(&w).is_some();
+        let mut folding = false;
+        for c in list {
+            let Some(fold) = &c.fold else { continue };
+            let said = match fold.state.as_str() {
+                chats::FOLDING if !folding => Said::Checking,
+                chats::FOLD_FAILED => Said::Failed { why: fold.why.clone().unwrap_or_default(), left: fold.left },
+                chats::FOLDED if fold.closing => Said::Closing,
+                _ => continue,
+            };
+            if said == Said::Checking {
+                folding = true;
+                ctx.memory.hold(&w);
+            }
+            let run = Run::new(&w, fold.attempt.as_deref().unwrap_or_default(), fold.before.clone(), said);
+            ctx.folds.runs().entry(c.id.clone()).or_insert(run);
+        }
+        if was_unknown && !folding {
+            ctx.memory.release(&w);
+        }
+        t.done.insert(w);
+    }
 }
 
 fn title_of(ctx: &Ctx, ws: &str, conv: &str) -> String {
@@ -327,25 +395,23 @@ pub fn workspace_chat_fold(ctx: &Ctx, id: String, conv: String) -> Result<Value,
     let w = workspace(ctx, &id)?;
     let root = ctx.workspaces_dir();
     let c = chats::find_at(root, &id, &conv)?;
-    match ctx.folds.running_in(&id) {
-        Some(x) if x == conv => return Err(ERR_ALREADY.into()),
-        Some(x) => return Err(format!("“{}” is folding. Close this one after.", title_of(ctx, &id, &x))),
-        None => {}
-    }
+    free(ctx, &id, &conv)?;
     let io = ctx.folds.io.clone();
     let at = locus_of(ctx, &id, &c)?;
     // No line or answer reaches the chat between the look and its end.
     let chat_lock = ctx.agents.place_lock(&at.lock_key());
     let _chat = chat_lock.lock().unwrap_or_else(|e| e.into_inner());
-    let live = io.live(&chats::session_name(&conv));
+    let live = match io.sessions() {
+        Up::Are(s) => s.contains(&chats::session_name(&conv)),
+        // An ended chat, and the last session of all ended with it.
+        Up::NoServer => false,
+        Up::Unknown => return Err(ERR_UNSEEN.into()),
+    };
     if live {
         quiet(ctx, &at)?;
     }
     io.admit(root, ctx.ideas_dir(), &w, &conv)?;
-    crate::memory::before_launch(ctx, &w)?;
-    crate::memory::memory_commit_if_dirty(ctx, &id, None).map_err(|e| format!("the memory could not be committed, so nothing was folded: {e}"))?;
-    ctx.memory.hold(&id);
-    let began = begin(ctx, &w, &c, live);
+    let began = reserve(ctx, &w, &c, &at, live).and_then(|(opener, fold)| launch(ctx, &w, &c, live, opener, fold));
     match began {
         Ok((session, fold)) => {
             touched(ctx, &id, &conv);
@@ -358,31 +424,66 @@ pub fn workspace_chat_fold(ctx: &Ctx, id: String, conv: String) -> Result<Value,
     }
 }
 
-/// The fold's own part, with the memory held: the file, the record, and the
-/// relaunch. A record is undone while the session still runs; once it has been
-/// ended, a relaunch that fails is a failed fold.
-fn begin(ctx: &Ctx, w: &Workspace, c: &Chat, live: bool) -> Result<(String, Fold), String> {
+/// Whether no chat of workspace `id` is folding, in this engine or, by the
+/// record, in any other.
+fn free(ctx: &Ctx, id: &str, conv: &str) -> Result<(), String> {
+    let here = ctx.folds.running_in(id);
+    match here.map_or_else(|| chats::folding_at(ctx.workspaces_dir(), id), |c| Ok(Some(c)))? {
+        Some(x) if x == conv => Err(ERR_ALREADY.into()),
+        Some(x) => Err(format!("“{}” is folding. Close this one after.", title_of(ctx, id, &x))),
+        None => Ok(()),
+    }
+}
+
+/// The reservation, under the workspace's lock: whether it is free and the chat
+/// still quiet, asked again inside it; the baseline commit, so the fold's holds
+/// only the fold; and the attempt, in the record. What is dirty from here on is
+/// the fold's.
+fn reserve(ctx: &Ctx, w: &Workspace, c: &Chat, at: &Locus, live: bool) -> Result<(String, Fold), String> {
     let (root, io) = (ctx.workspaces_dir(), ctx.folds.io.clone());
+    let _lock = wslock::take(root, &w.id)?;
+    free(ctx, &w.id, &c.id)?;
+    if live {
+        quiet(ctx, at)?;
+    }
+    crate::memory::before_launch(ctx, w)?;
+    crate::memory::memory_commit_if_dirty(ctx, &w.id, None).map_err(|e| format!("the memory could not be committed, so nothing was folded: {e}"))?;
+    let attempt = ulid::new();
     // Its note is named the first time, by what the chat is called by then.
     let mut named = c.clone();
     chats::name_note(&mut named, &io.today());
-    let opener = chats::write_fold_at(root, &w.id, &named)?;
+    let opener = chats::write_fold_at(root, &w.id, &named, &attempt)?;
     // A relaunch is a launch: what it is told is as fresh as its rules.
     chats::write_context_at(root, &w.id, &c.id, &chats::context_text(&crate::workspacechats::context(ctx, w, &chats::policy(w)?, &c.id)))?;
-    let asked = io.now_ms();
-    let fold = Fold { asked: desksessions::now_iso(), asked_ms: Some(asked), state: chats::FOLDING.into(), ..Fold::default() };
-    let before = c.fold.clone();
+    let fold = Fold {
+        asked: desksessions::now_iso(),
+        asked_ms: Some(io.now_ms()),
+        before: chats::note_rev(root, &w.id, &named),
+        attempt: Some(attempt),
+        state: chats::FOLDING.into(),
+        ..Fold::default()
+    };
     chats::update_at(root, &w.id, &c.id, |x| {
         x.note = named.note.clone();
         x.fold = Some(fold.clone());
     })?;
+    ctx.memory.hold(&w.id);
+    ctx.folds.runs().insert(c.id.clone(), Run::new(&w.id, fold.attempt.as_deref().unwrap_or_default(), fold.before.clone(), Said::Folding));
+    Ok((opener, fold))
+}
+
+/// End the session that is reserved and launch it again. The reservation is
+/// undone while the session still runs; once it has been ended, a relaunch that
+/// fails is a failed fold.
+fn launch(ctx: &Ctx, w: &Workspace, c: &Chat, live: bool, opener: String, fold: Fold) -> Result<(String, Fold), String> {
+    let (root, io) = (ctx.workspaces_dir(), ctx.folds.io.clone());
     if live {
         if let Err(e) = io.close(&c.id) {
-            let _ = chats::update_at(root, &w.id, &c.id, |x| x.fold = before);
+            ctx.folds.runs().remove(&c.id);
+            chats::update_at(root, &w.id, &c.id, |x| x.fold = c.fold.clone())?;
             return Err(e);
         }
     }
-    ctx.folds.runs().insert(c.id.clone(), Run::new(&w.id, asked, Said::Folding));
     match io.relaunch(root, ctx.ideas_dir(), w, &c.id, opener) {
         Ok(session) => Ok((session, fold)),
         Err(e) => {
@@ -407,8 +508,9 @@ fn holds(ctx: &Ctx, ws: &str) -> (Option<u32>, String) {
 }
 
 /// Mark chat `conv`'s fold failed: its session is left as it is, and the hold
-/// let go.
-fn fail(ctx: &Ctx, ws: &str, conv: &str, why: String) {
+/// let go. One whose record cannot be written is not failed yet: it is looked
+/// at again next tick. Answers whether it is.
+fn fail(ctx: &Ctx, ws: &str, conv: &str, why: String) -> bool {
     let (left, holds) = holds(ctx, ws);
     let why = format!("{}. {holds}", why.trim_end_matches('.'));
     if let Err(e) = chats::update_at(ctx.workspaces_dir(), ws, conv, |c| {
@@ -418,11 +520,13 @@ fn fail(ctx: &Ctx, ws: &str, conv: &str, why: String) {
         f.left = left;
     }) {
         crate::log::warn(&format!("workspace {ws}: could not record chat {conv}'s failed fold: {e}"));
+        return false;
     }
     if let Some(r) = ctx.folds.runs().get_mut(conv) {
         r.said = Said::Failed { why, left };
     }
     ctx.memory.release(ws);
+    true
 }
 
 /// A title as a commit's subject may carry it after `head`.
@@ -438,7 +542,10 @@ fn subject(head: &str, title: &str) -> String {
 /// Answers whether a fold was stopped, and the commit if there was one.
 pub fn closed(ctx: &Ctx, ws: &str, c: &Chat, ran: bool) -> Result<(bool, Option<Change>), String> {
     let run = ctx.folds.runs().remove(&c.id);
-    let stopped = run.as_ref().is_some_and(|r| !r.failed());
+    let stopped = run.as_ref().is_some_and(Run::running);
+    // With what another engine's fold may be writing, one lock for the look and
+    // the commit.
+    let _lock = wslock::take(ctx.workspaces_dir(), ws)?;
     if run.is_some() || c.fold.as_ref().is_some_and(|f| [chats::FOLDING, chats::FOLD_FAILED].contains(&f.state.as_str())) {
         let r = chats::update_at(ctx.workspaces_dir(), ws, &c.id, |x| {
             x.fold = Some(Fold { asked: x.fold.take().map(|f| f.asked).unwrap_or_default(), state: chats::FOLD_NONE.into(), ..Fold::default() });
@@ -452,7 +559,7 @@ pub fn closed(ctx: &Ctx, ws: &str, c: &Chat, ran: bool) -> Result<(bool, Option<
         ctx.memory.release(ws);
         return Ok((true, done?));
     }
-    if !ran || ctx.memory.is_held(ws) {
+    if !ran || ctx.memory.is_held(ws) || !matches!(chats::folding_at(ctx.workspaces_dir(), ws), Ok(None)) {
         return Ok((false, None));
     }
     Ok((false, crate::memory::memory_commit_if_dirty(ctx, ws, Some(&subject("Chat closed", &c.title)))?))
@@ -484,12 +591,12 @@ pub fn mark_reverted(ctx: &Ctx, ws: &str) {
 
 // ── the poll ────────────────────────────────────────────────────────────────
 
-/// Whether the fold's own turn says there was nothing to keep.
-fn nothing_said(ctx: &Ctx, ws: &str, c: &Chat, at: &Locus, asked_ms: u64) -> bool {
-    let Ok(folder) = wsfolder::folder_at(ctx.workspaces_dir(), ws) else { return false };
-    let Some(lane) = agents::ended_lane(at) else { return false };
-    let Ok(lines) = ctx.agents.io().transcript(at, &lane) else { return false };
-    turns::claude(&lines, 1).last().is_some_and(|t| chats::said_nothing(t, &chats::fold_opener(&folder, &c.id), asked_ms))
+/// What the fold's own turn came to.
+fn own_turn(ctx: &Ctx, ws: &str, c: &Chat, at: &Locus, attempt: &str) -> FoldTurn {
+    let Ok(folder) = wsfolder::folder_at(ctx.workspaces_dir(), ws) else { return FoldTurn::Open };
+    let Some(lane) = agents::ended_lane(at).filter(|_| !attempt.is_empty()) else { return FoldTurn::Open };
+    let Ok(lines) = ctx.agents.io().transcript(at, &lane) else { return FoldTurn::Open };
+    chats::fold_turn(&turns::claude(&lines, turns::MAX_TURNS), &chats::fold_opener(&folder, &c.id, attempt))
 }
 
 /// The poll's part for the folds: each running one is looked at, and the ones
@@ -498,7 +605,7 @@ fn nothing_said(ctx: &Ctx, ws: &str, c: &Chat, at: &Locus, asked_ms: u64) -> boo
 pub fn tick(ctx: &Ctx, now: &mut WorkspaceSessions) -> Vec<FoldNote> {
     ensure(ctx);
     let mut notes = Vec::new();
-    let running: Vec<(String, String)> = ctx.folds.runs().iter().filter(|(_, r)| !r.failed()).map(|(c, r)| (c.clone(), r.workspace.clone())).collect();
+    let running: Vec<(String, String)> = ctx.folds.runs().iter().filter(|(_, r)| r.running() || r.said == Said::Closing).map(|(c, r)| (c.clone(), r.workspace.clone())).collect();
     for (conv, ws) in running {
         let lock = life_lock(ctx, &ws);
         // A start, a close or a fold of this workspace is under way: next tick.
@@ -516,84 +623,175 @@ pub fn tick(ctx: &Ctx, now: &mut WorkspaceSessions) -> Vec<FoldNote> {
 /// One fold's tick, under the workspace's `life_lock`.
 fn look(ctx: &Ctx, now: &WorkspaceSessions, ws: &str, conv: &str) -> Option<FoldNote> {
     let root = ctx.workspaces_dir();
+    let io = ctx.folds.io.clone();
     let note = |event, commit| Some(FoldNote { workspace: ws.into(), chat: conv.into(), event, commit });
-    // Ended while the lock was waited for, or recorded as over by another
-    // engine: nothing of this one's to decide.
-    let c = chats::find_at(root, ws, conv).ok().filter(|c| c.fold.as_ref().is_some_and(|f| f.state == chats::FOLDING));
-    let Some(c) = c.filter(|_| ctx.folds.is_folding(conv)) else {
-        if ctx.folds.runs().remove(conv).is_some() {
-            ctx.memory.release(ws);
-        }
+    let (closing, attempt, before) = ctx.folds.runs().get(conv).map(|r| (r.said == Said::Closing, r.attempt.clone(), r.before.clone()))?;
+    if closing {
+        end(ctx, ws, conv);
         return None;
+    }
+    // A record that cannot be read says nothing: the fold and its hold stay,
+    // and the next tick asks again.
+    let rec = match chats::read_record_at(root, ws) {
+        Ok(r) => r,
+        Err(e) => {
+            crate::log::warn(&format!("workspace {ws}: chat {conv} is folding and its record cannot be read: {e}"));
+            return None;
+        }
     };
+    let mine = |c: &Chat| c.fold.as_ref().is_some_and(|f| f.state == chats::FOLDING && f.attempt.as_deref().unwrap_or_default() == attempt);
+    if !rec.conversations.iter().any(|c| c.id == conv && mine(c)) {
+        // Ended, or over in another engine: nothing of this one's to decide.
+        ctx.folds.runs().remove(conv);
+        ctx.memory.release(ws);
+        return None;
+    }
+    let c = chats::find_at(root, ws, conv).ok()?;
     let session = chats::session_name(conv);
     let at = locus_of(ctx, ws, &c).ok()?;
     let has = |v: &[String]| v.iter().any(|s| *s == session);
-    let live = has(&now.live);
-    let state = if live { ctx.agents.io().activity(&at).state } else { activity::State::None };
+    // The poll's panes are empty when tmux did not answer: only a list it did
+    // give says a session is not there.
+    let live = if has(&now.live) {
+        Some(true)
+    } else {
+        match io.sessions() {
+            Up::Are(s) => Some(s.contains(&session)),
+            Up::NoServer | Up::Unknown => None,
+        }
+    };
+    let state = if live == Some(true) { ctx.agents.io().activity(&at).state } else { activity::State::None };
+    let rev = chats::note_rev(root, ws, &c);
     let seen = Seen {
         live,
         busy: has(&now.busy) || state == activity::State::Busy,
         waiting: has(&now.waiting) || state == activity::State::Waiting,
         starting: state == activity::State::None,
-        note_ms: chats::note_mtime_ms(root, ws, &c),
+        new: rev.is_some() && rev != before,
     };
-    let (next, asked) = {
+    let (next, over, noted) = {
         let mut runs = ctx.folds.runs();
         let r = runs.get_mut(conv)?;
-        (step(r, seen, ctx.folds.io.clock()), r.asked_ms)
+        let next = step(r, seen, io.clock());
+        (next, r.spent >= LIMIT, r.noted)
     };
-    match next {
-        Next::Wait => None,
-        Next::Land => match crate::memory::memory_commit_if_dirty(ctx, ws, Some(&subject("fold", &c.title))) {
-            Ok(change) => {
-                let commit = change.as_ref().map(|c| c.commit.clone());
-                land(ctx, ws, &c, change);
-                note(if commit.is_some() { "landed" } else { "nothing" }, commit)
-            }
-            Err(e) => {
-                fail(ctx, ws, conv, format!("its note was written, and the memory could not be committed: {e}"));
-                note("failed", None)
-            }
+    let next = match next {
+        Next::Ask => match own_turn(ctx, ws, &c, &at, &attempt) {
+            FoldTurn::Finished if seen.new => return land(ctx, ws, conv, &attempt, true),
+            FoldTurn::Nothing => return land(ctx, ws, conv, &attempt, seen.new),
+            _ if over => Next::TimedOut,
+            _ => Next::Wait,
         },
-        Next::Ask if nothing_said(ctx, ws, &c, &at, asked) => {
-            land(ctx, ws, &c, None);
-            note("nothing", None)
-        }
-        Next::Ask => None,
-        Next::TimedOut => {
-            fail(ctx, ws, conv, "it wrote no note in five minutes, and the chat is still open".into());
-            note("failed", None)
-        }
-        Next::Gone => {
-            fail(ctx, ws, conv, "its Claude exited before it wrote a note".into());
-            note("failed", None)
-        }
-    }
+        n => n,
+    };
+    let why = match next {
+        Next::Wait | Next::Ask => return None,
+        Next::TimedOut if live.is_none() => "tmux did not answer for five minutes, so whether it was done could not be told",
+        Next::TimedOut if noted => "it wrote its note and did not finish in five minutes, and the chat is still open",
+        Next::TimedOut => "it wrote no note in five minutes, and the chat is still open",
+        Next::Gone if noted => "its Claude exited after it wrote its note and before it was done",
+        Next::Gone => "its Claude exited before it wrote a note",
+    };
+    if fail(ctx, ws, conv, why.into()) { note("failed", None) } else { None }
 }
 
-/// A fold is over: its record, its session, its hold.
-fn land(ctx: &Ctx, ws: &str, c: &Chat, change: Option<Change>) {
-    let root = ctx.workspaces_dir();
-    // With no commit, what memory is left with is said only if it was looked at.
-    let left = if change.is_none() { holds(ctx, ws).0 } else { None };
-    if let Err(e) = chats::update_at(root, ws, &c.id, |x| {
-        let f = x.fold.get_or_insert_with(Fold::default);
-        f.state = chats::FOLDED.into();
-        f.commit = change.as_ref().map(|c| c.commit.clone());
-        f.files = Some(change.as_ref().map_or(0, |c| c.files.len() as u32));
-        f.lines = Some(change.as_ref().map_or(FoldLines::default(), |c| FoldLines { added: c.added as u32, removed: c.removed as u32 }));
-        f.left = left;
-        f.why = None;
-    }) {
-        crate::log::warn(&format!("workspace {ws}: could not record chat {}'s fold: {e}", c.id));
+/// A fold is over: its commit, its receipt, and then its session. Under the
+/// workspace's lock to the receipt, with the record read again inside it, so
+/// two engines land it once. `wrote`: there is something to commit, and it is
+/// looked for first by the attempt's id, for an engine that died after it.
+fn land(ctx: &Ctx, ws: &str, conv: &str, attempt: &str, wrote: bool) -> Option<FoldNote> {
+    let (root, io) = (ctx.workspaces_dir(), ctx.folds.io.clone());
+    let commit = {
+        // Someone is in the memory: next tick.
+        let _lock = match wslock::try_take(root, ws) {
+            Ok(Some(l)) => l,
+            Ok(None) => return None,
+            Err(e) => {
+                crate::log::warn(&format!("workspace {ws}: chat {conv}'s fold could not take the memory: {e}"));
+                return None;
+            }
+        };
+        let c = chats::find_at(root, ws, conv).ok()?;
+        if !c.fold.as_ref().is_some_and(|f| f.state == chats::FOLDING && f.attempt.as_deref() == Some(attempt)) {
+            return None;
+        }
+        if io.dies("before the commit") {
+            return None;
+        }
+        let made = if wrote {
+            memory::fold_commit_at(root, ws, attempt).and_then(|found| match found {
+                Some(c) => Ok(Some(c)),
+                None => memory::commit_fold_at(root, ws, &subject("fold", &c.title), attempt),
+            })
+        } else {
+            Ok(None)
+        };
+        let change = match made {
+            Ok(c) => c,
+            Err(e) => {
+                let failed = fail(ctx, ws, conv, format!("its note was written, and the memory could not be committed: {e}"));
+                return failed.then(|| FoldNote { workspace: ws.into(), chat: conv.into(), event: "failed", commit: None });
+            }
+        };
+        if io.dies("after the commit") {
+            return None;
+        }
+        // With no commit, what memory is left with is said only if it was looked at.
+        let left = if change.is_none() { holds(ctx, ws).0 } else { None };
+        if let Err(e) = chats::update_at(root, ws, conv, |x| {
+            let f = x.fold.get_or_insert_with(Fold::default);
+            f.state = chats::FOLDED.into();
+            f.closing = true;
+            f.commit = change.as_ref().map(|c| c.commit.clone());
+            f.files = Some(change.as_ref().map_or(0, |c| c.files.len() as u32));
+            f.lines = Some(change.as_ref().map_or(FoldLines::default(), |c| FoldLines { added: c.added as u32, removed: c.removed as u32 }));
+            f.left = left;
+            f.why = None;
+        }) {
+            // No receipt: nothing is ended and nothing let go. The next tick
+            // finds the commit by its attempt and writes it.
+            crate::log::warn(&format!("workspace {ws}: could not record chat {conv}'s fold: {e}"));
+            return None;
+        }
+        change.map(|c| c.commit)
+    };
+    if let Some(r) = ctx.folds.runs().get_mut(conv) {
+        r.said = Said::Closing;
     }
-    if let Err(e) = ctx.folds.io.close(&c.id) {
-        crate::log::warn(&format!("workspace {ws}: chat {} folded and its session could not be ended: {e}", c.id));
-    }
-    ctx.folds.runs().remove(&c.id);
     ctx.memory.release(ws);
-    touched(ctx, ws, &c.id);
+    if !io.dies("after the receipt") {
+        end(ctx, ws, conv);
+    }
+    Some(FoldNote { workspace: ws.into(), chat: conv.into(), event: if commit.is_some() { "landed" } else { "nothing" }, commit })
+}
+
+/// End the session of a fold whose receipt is written, and say it is ended only
+/// once tmux says so: until then it is tried again, by this engine's poll or the
+/// next one's start.
+fn end(ctx: &Ctx, ws: &str, conv: &str) {
+    let io = ctx.folds.io.clone();
+    if let Err(e) = io.close(conv) {
+        crate::log::warn(&format!("workspace {ws}: chat {conv} folded and its session could not be ended: {e}"));
+    }
+    let ended = match io.sessions() {
+        Up::Are(s) => !s.contains(&chats::session_name(conv)),
+        // The last one, which we have just ended.
+        Up::NoServer => true,
+        Up::Unknown => false,
+    };
+    if io.dies("after the close") || !ended {
+        return;
+    }
+    if let Err(e) = chats::update_at(ctx.workspaces_dir(), ws, conv, |c| {
+        if let Some(f) = c.fold.as_mut() {
+            f.closing = false;
+        }
+    }) {
+        crate::log::warn(&format!("workspace {ws}: could not record that chat {conv} is closed: {e}"));
+        return;
+    }
+    ctx.folds.runs().remove(conv);
+    touched(ctx, ws, conv);
 }
 
 #[cfg(test)]
@@ -602,7 +800,7 @@ mod tests {
     use std::collections::HashSet;
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use worktrees_core::{fsx, ulid};
 
     /// The outside, scripted: the two clocks, which sessions are up, and what
@@ -614,6 +812,12 @@ mod tests {
         up: Mutex<HashSet<String>>,
         log: Mutex<Vec<String>>,
         refuse: Mutex<(Option<String>, Option<String>)>,
+        /// tmux does not answer.
+        dumb: AtomicBool,
+        /// It has no server once nothing is up.
+        no_server: AtomicBool,
+        /// Where the engine dies.
+        fatal: Mutex<Option<&'static str>>,
     }
 
     impl FoldIo for Script {
@@ -626,13 +830,26 @@ mod tests {
         fn clock(&self) -> Duration {
             Duration::from_secs(self.secs.load(Ordering::SeqCst))
         }
-        fn live(&self, session: &str) -> bool {
-            self.up.lock().unwrap().contains(session)
+        fn sessions(&self) -> Up {
+            let up = self.up.lock().unwrap().clone();
+            match self.dumb.load(Ordering::SeqCst) {
+                true => Up::Unknown,
+                // With the last session goes the server; a script that says so
+                // keeps one of its own.
+                false if up.is_empty() && self.no_server.load(Ordering::SeqCst) => Up::NoServer,
+                false => Up::Are(up.into_iter().collect()),
+            }
+        }
+        fn dies(&self, at: &'static str) -> bool {
+            *self.fatal.lock().unwrap() == Some(at)
         }
         fn admit(&self, _: &Path, _: &Path, _: &Workspace, _: &str) -> Result<(), String> {
             self.refuse.lock().unwrap().0.clone().map_or(Ok(()), Err)
         }
         fn close(&self, conv: &str) -> Result<bool, String> {
+            if self.dumb.load(Ordering::SeqCst) {
+                return Ok(false);
+            }
             let was = self.up.lock().unwrap().remove(&chats::session_name(conv));
             if was {
                 self.log.lock().unwrap().push("close".into());
@@ -754,12 +971,29 @@ mod tests {
             fs::create_dir_all(self.mem(path).parent().unwrap()).unwrap();
             fs::write(self.mem(path), text).unwrap();
         }
-        /// The chat's note, written `after` ms past the script's clock.
-        fn note(&self, conv: &str, text: &str, after: i64) {
+        /// The chat's note, written `after` ms past the script's clock, and no
+        /// word from Claude that it is done.
+        fn note_only(&self, conv: &str, text: &str, after: i64) {
             let p = self.base.join("ws").join(&self.ws).join(self.rec(conv).note);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
             fs::write(&p, text).unwrap();
             let at = std::time::UNIX_EPOCH + Duration::from_millis((self.io.now_ms() as i64 + after) as u64);
             fs::File::options().write(true).open(&p).unwrap().set_modified(at).unwrap();
+        }
+        /// The note, and the fold's own turn ended with what it changed.
+        fn note(&self, conv: &str, text: &str, after: i64) {
+            self.note_only(conv, text, after);
+            self.said(&self.opener(), "I wrote the note.\nAnd a line in the index.");
+        }
+        /// The newest fold's opener.
+        fn opener(&self) -> String {
+            self.acts().into_iter().rfind(|a| a.starts_with("Read ")).expect("a fold was launched")
+        }
+        fn said(&self, opener: &str, reply: &str) {
+            *self.agent.lines.lock().unwrap() = turn(opener, "2027-01-15T08:00:05Z", reply);
+        }
+        fn up(&self, conv: &str) -> bool {
+            self.io.up.lock().unwrap().contains(&chats::session_name(conv))
         }
         fn sees(&self, s: activity::State) {
             *self.agent.state.lock().unwrap() = s;
@@ -800,38 +1034,32 @@ mod tests {
         Duration::from_secs(n)
     }
 
-    const ON: Seen = Seen { live: true, busy: false, waiting: false, starting: false, note_ms: None };
+    const ON: Seen = Seen { live: Some(true), busy: false, waiting: false, starting: false, new: false };
 
-    /// The hole this closes: on a second fold the note is there before Claude
-    /// has read a word, and a session that has just launched reads idle.
+    fn run() -> Run {
+        Run::new("w", "", None, Said::Folding)
+    }
+
+    /// Idle is asked about, seen twice running; a Claude at work, on a prompt or
+    /// not started is not.
     #[test]
-    fn an_old_note_never_lands_and_a_new_one_lands_after_one_idle_tick() {
-        let mut r = Run::new("w", 1000, Said::Folding);
-        let old = Seen { note_ms: Some(1000), ..ON };
-        for t in 0..20 {
-            assert_ne!(step(&mut r, old, secs(t)), Next::Land, "{t}");
-        }
-        let new = Seen { note_ms: Some(1001), ..ON };
-        let mut r = Run::new("w", 1000, Said::Folding);
+    fn its_own_turn_is_asked_only_when_it_has_been_idle_one_tick() {
+        let mut r = run();
+        let new = Seen { new: true, ..ON };
         assert_eq!(step(&mut r, Seen { busy: true, ..new }, secs(0)), Next::Wait, "still writing");
         assert_eq!(step(&mut r, new, secs(3)), Next::Wait, "seen idle once");
         assert_eq!(step(&mut r, Seen { busy: true, ..new }, secs(6)), Next::Wait, "at work again");
         assert_eq!(step(&mut r, new, secs(9)), Next::Wait);
-        assert_eq!(step(&mut r, new, secs(12)), Next::Land);
-        // A Claude that has not started reads as nothing at all.
-        let mut r = Run::new("w", 1000, Said::Folding);
+        assert_eq!(step(&mut r, new, secs(12)), Next::Ask);
+        let mut r = run();
         for t in 0..5 {
-            assert_eq!(step(&mut r, Seen { starting: true, ..new }, secs(t)), Next::Wait);
+            assert_eq!(step(&mut r, Seen { starting: true, ..new }, secs(t)), Next::Wait, "a Claude that has not started");
         }
-        // With the note written and its Claude gone, what it wrote lands.
-        let mut r = Run::new("w", 1000, Said::Folding);
-        let gone = Seen { live: false, starting: true, ..new };
-        assert_eq!((step(&mut r, gone, secs(0)), step(&mut r, gone, secs(3))), (Next::Wait, Next::Land));
     }
 
     #[test]
     fn the_five_minutes_stand_still_while_it_waits_on_a_prompt() {
-        let mut r = Run::new("w", 1000, Said::Folding);
+        let mut r = run();
         let (work, wait) = (Seen { busy: true, ..ON }, Seen { waiting: true, ..ON });
         assert_eq!(step(&mut r, work, secs(0)), Next::Wait);
         assert_eq!(step(&mut r, work, secs(240)), Next::Wait, "four minutes of work");
@@ -842,16 +1070,45 @@ mod tests {
         assert_eq!(r.spent, secs(240));
         assert_eq!(step(&mut r, work, secs(3905)), Next::Wait, "4:59");
         assert_eq!(step(&mut r, work, secs(3906)), Next::TimedOut, "5:00");
-        // A note that is there is never timed out: it is being finished.
-        let mut r = Run::new("w", 1000, Said::Folding);
-        assert_eq!(step(&mut r, work, secs(0)), Next::Wait);
-        assert_eq!(step(&mut r, Seen { note_ms: Some(2000), ..work }, secs(900)), Next::Wait);
-        // Gone with no note, seen twice; one missed reading is not that.
-        let mut r = Run::new("w", 1000, Said::Folding);
-        let gone = Seen { live: false, starting: true, ..Seen::default() };
+    }
+
+    /// The note begins the five minutes again, once; they end too, and stand
+    /// still on a prompt too.
+    #[test]
+    fn a_note_with_no_end_has_five_minutes_of_its_own() {
+        let mut r = run();
+        let (work, wait) = (Seen { busy: true, new: true, ..ON }, Seen { waiting: true, new: true, ..ON });
+        assert_eq!(step(&mut r, Seen { new: false, ..work }, secs(0)), Next::Wait);
+        assert_eq!(step(&mut r, work, secs(290)), Next::Wait, "its note at 4:50");
+        assert_eq!(step(&mut r, work, secs(580)), Next::Wait, "4:50 after it");
+        assert_eq!(step(&mut r, wait, secs(583)), Next::Wait);
+        assert_eq!(step(&mut r, wait, secs(9000)), Next::Wait);
+        assert_eq!(step(&mut r, work, secs(9001)), Next::Wait);
+        assert_eq!(step(&mut r, work, secs(9010)), Next::Wait, "4:59");
+        assert_eq!(step(&mut r, work, secs(9011)), Next::TimedOut);
+    }
+
+    /// Gone is what tmux SAID, twice running, note or no note. One that does not
+    /// answer is unknown: it counts toward the five minutes and nothing else.
+    #[test]
+    fn a_tmux_that_does_not_answer_is_not_a_claude_that_is_gone() {
+        let (work, gone, unknown) = (Seen { busy: true, ..ON }, Seen { live: Some(false), starting: true, ..Seen::default() }, Seen { live: None, starting: true, ..Seen::default() });
+        let mut r = run();
         assert_eq!(step(&mut r, gone, secs(0)), Next::Wait);
-        assert_eq!(step(&mut r, work, secs(3)), Next::Wait);
+        assert_eq!(step(&mut r, work, secs(3)), Next::Wait, "one missed reading is not that");
         assert_eq!((step(&mut r, gone, secs(6)), step(&mut r, gone, secs(9))), (Next::Wait, Next::Gone));
+        let mut r = run();
+        assert_eq!(step(&mut r, Seen { new: true, ..gone }, secs(0)), Next::Wait);
+        assert_eq!(step(&mut r, Seen { new: true, ..gone }, secs(3)), Next::Gone, "a note is not an end");
+        let mut r = run();
+        for t in 0..60 {
+            assert_eq!(step(&mut r, unknown, secs(t * 5)), Next::Wait, "{t}");
+        }
+        assert_eq!(step(&mut r, unknown, secs(300)), Next::TimedOut);
+        let mut r = run();
+        assert_eq!(step(&mut r, gone, secs(0)), Next::Wait);
+        assert_eq!(step(&mut r, unknown, secs(3)), Next::Wait);
+        assert_eq!(step(&mut r, gone, secs(6)), Next::Wait, "gone twice RUNNING");
     }
 
     /// The whole of one: what was dirty is committed before and apart, the
@@ -867,9 +1124,10 @@ mod tests {
         assert_eq!(d.log()[0].subject, "Edited: topics/by-hand.md");
         assert!(d.held());
         let fold_md = d.base.join("ws").join(&d.ws).join("chats").join(&conv).join("fold.md");
-        assert_eq!(d.acts(), vec!["close".to_string(), format!("Read {} and do what it says.", fold_md.display())]);
+        assert_eq!(d.acts(), vec!["close".to_string(), format!("Read {} and do what it says. This is fold {}.", fold_md.display(), d.rec(&conv).fold.unwrap().attempt.unwrap())]);
         assert!(fs::read_to_string(&fold_md).unwrap().contains(&d.base.join("ws").join(&d.ws).join(d.rec(&conv).note).display().to_string()));
         assert_eq!(d.rec(&conv).fold.unwrap().asked_ms, Some(d.io.now_ms()));
+        assert_eq!(d.rec(&conv).fold.unwrap().before, None, "it had no note");
         d.sees(activity::State::Busy);
         let (n, now) = d.tick(3);
         assert!(n.is_empty());
@@ -887,7 +1145,7 @@ mod tests {
         let f = d.rec(&conv).fold.unwrap();
         assert_eq!((f.state.as_str(), f.commit, f.files, f.reverted), ("done", Some(top.commit), Some(2), false));
         assert_eq!(f.lines, Some(FoldLines { added: top.added as u32, removed: top.removed as u32 }));
-        assert!(!d.held() && now.fold.is_empty() && !d.io.live(&chats::session_name(&conv)));
+        assert!(!d.held() && now.fold.is_empty() && !d.up(&conv));
         assert!(d.tick(3).0.is_empty(), "once");
     }
 
@@ -912,6 +1170,7 @@ mod tests {
         }
         assert_eq!(d.says(&conv).as_deref(), Some("folding"));
         d.note(&conv, "second\n", 5);
+        d.tick(3);
         d.tick(3);
         assert_eq!(d.log()[0].subject, "fold: Another name");
         assert_eq!(d.log().iter().filter(|c| c.subject.starts_with("fold: ")).count(), 2);
@@ -987,34 +1246,290 @@ mod tests {
         ]
     }
 
-    /// Nothing to keep is what Claude SAID in this fold's own turn: an earlier
-    /// fold's answer, a question, or silence is not it.
+    /// Nothing to keep is what Claude SAID, at the end of this fold's own turn:
+    /// an earlier attempt's answer, a question, or words in the middle are not.
     #[test]
-    fn nothing_to_keep_is_said_in_this_folds_turn() {
+    fn nothing_to_keep_is_said_at_the_end_of_this_attempts_turn() {
         let d = Desk::new("nothing");
         let conv = d.chat("Chat 1", true);
         d.fold(&conv).unwrap();
-        let opener = d.acts()[1].clone();
-        // 2027-01-15T08:00:00Z is the script's 1_800_000_000_000.
-        let set = |u: &str, at: &str, r: &str| *d.agent.lines.lock().unwrap() = turn(u, at, r);
-        for (u, at, r) in [
-            (opener.as_str(), "2027-01-15T07:59:59Z", "No memory changes."),
-            ("something else", "2027-01-15T08:00:05Z", "No memory changes."),
-            (opener.as_str(), "2027-01-15T08:00:05Z", "Should I keep the part about disks?"),
-            (opener.as_str(), "2027-01-15T08:00:05Z", "No memory changes. But look at this."),
-            (opener.as_str(), "2027-01-15T08:00:05Z", "I would not say: No memory changes."),
+        let opener = d.opener();
+        let earlier = opener.replace(d.rec(&conv).fold.unwrap().attempt.as_deref().unwrap(), &ulid::new());
+        for (u, r) in [
+            (earlier.as_str(), "No memory changes."),
+            ("something else", "No memory changes."),
+            (opener.as_str(), "Should I keep the part about disks?"),
+            (opener.as_str(), "No memory changes. But look at this."),
+            (opener.as_str(), "I would not say: No memory changes."),
+            (opener.as_str(), "You asked me not to say\nNo memory changes.\nso I will look again."),
+            (opener.as_str(), "API Error: 529 overloaded"),
         ] {
-            set(u, at, r);
+            d.said(u, r);
             d.tick(3);
-            assert!(d.tick(3).0.is_empty(), "{u} {at} {r}");
+            assert!(d.tick(3).0.is_empty(), "{u} {r}");
         }
-        set(&opener, "2027-01-15T08:00:05Z", "I looked.\n\n`No memory changes.`");
+        d.said(&opener, "I looked.\n\n`No memory changes.`");
         let (n, _) = d.tick(3);
         assert_eq!((n[0].event, n[0].commit.clone()), ("nothing", None));
         let f = d.rec(&conv).fold.unwrap();
-        assert_eq!((f.state.as_str(), f.commit, f.files, f.left), ("done", None, Some(0), Some(0)));
+        assert_eq!((f.state.as_str(), f.commit, f.files, f.left, f.closing), ("done", None, Some(0), Some(0), false));
         assert_eq!(d.log().len(), 1, "no commit");
-        assert!(!d.held() && !d.io.live(&chats::session_name(&conv)));
+        assert!(!d.held() && !d.up(&conv));
+        // Again at once, in the same second: that answer is not this one's.
+        d.fold(&conv).unwrap();
+        for _ in 0..4 {
+            assert!(d.tick(3).0.is_empty(), "the first attempt's answer ended the second");
+        }
+    }
+
+    /// A note that is there is not an end: one from the future that nobody
+    /// touched, one written by a turn that was stopped or is still going.
+    #[test]
+    fn a_note_lands_only_when_it_was_written_and_the_turn_said_its_last_words() {
+        let d = Desk::new("witness");
+        let a = d.chat("A", true);
+        d.fold(&a).unwrap();
+        d.note(&a, "first\n", 3_600_000);
+        d.tick(3);
+        assert_eq!(d.tick(3).0[0].event, "landed");
+        d.fold(&a).unwrap();
+        d.said(&d.opener(), "I changed two files.");
+        for _ in 0..4 {
+            assert!(d.tick(3).0.is_empty(), "an untouched note from the future landed");
+        }
+        // Written now, and stopped before the index.
+        d.note_only(&a, "half\n", 10);
+        let mut lines = turn(&d.opener(), "2027-01-15T08:00:05Z", "The note is written. Now the index.");
+        lines.push(turn("[Request interrupted by user]", "2027-01-15T08:00:09Z", "").remove(0));
+        *d.agent.lines.lock().unwrap() = lines;
+        for _ in 0..4 {
+            assert!(d.tick(3).0.is_empty(), "a stopped turn landed");
+        }
+        // Between two calls: its last step is a tool's.
+        let mut lines = turn(&d.opener(), "2027-01-15T08:00:05Z", "The note is written.");
+        lines.push(
+            json!({ "type": "assistant", "uuid": ulid::new(), "timestamp": "2027-01-15T08:00:06Z", "message": { "role": "assistant", "content": [{ "type": "tool_use", "id": "toolu_1", "name": "Edit", "input": { "file_path": "/x" } }] } }).to_string(),
+        );
+        *d.agent.lines.lock().unwrap() = lines;
+        assert!(d.tick(3).0.is_empty(), "a turn that is still going landed");
+        // Ended by an error, not by its last words.
+        d.said(&d.opener(), "API Error: 529 overloaded_error");
+        assert!(d.tick(3).0.is_empty(), "a turn an error ended landed");
+        // No transcript to read is no witness.
+        d.agent.lines.lock().unwrap().clear();
+        assert!(d.tick(3).0.is_empty());
+        d.said(&d.opener(), "Two files changed.");
+        assert_eq!(d.tick(3).0[0].event, "landed");
+        // Never said: five minutes after the note.
+        d.fold(&a).unwrap();
+        d.note_only(&a, "again\n", 20);
+        d.tick(3);
+        let (n, now) = d.tick(LIMIT.as_secs());
+        assert_eq!(n[0].event, "failed");
+        assert!(now.fold[&chats::session_name(&a)].why.as_ref().unwrap().starts_with("it wrote its note and did not finish in five minutes"));
+    }
+
+    /// An engine that dies at any step of a landing leaves what the next one
+    /// finishes: one commit, its own receipt, and the session ended.
+    #[test]
+    fn a_landing_survives_the_engine_dying_at_every_step() {
+        for at in ["before the commit", "after the commit", "after the receipt", "after the close"] {
+            let d = Desk::new("crash");
+            let conv = d.chat("Naming", true);
+            d.fold(&conv).unwrap();
+            d.note(&conv, "note\n", 5);
+            d.tick(3);
+            *d.io.fatal.lock().unwrap() = Some(at);
+            d.tick(3);
+            *d.io.fatal.lock().unwrap() = None;
+            // Meanwhile someone edits: not the fold's.
+            let committed = d.log()[0].subject == "fold: Naming";
+            assert_eq!(committed, at != "before the commit", "{at}");
+            if committed {
+                d.put("topics/by-hand.md", "by hand\n");
+            }
+            let again = Desk::engine(&d.base, &d.io, &d.agent);
+            let mut notes = Vec::new();
+            for _ in 0..4 {
+                notes.extend(d.tick_on(&again, 3).0);
+            }
+            let f = d.rec(&conv).fold.unwrap();
+            let folds: Vec<Change> = d.log().into_iter().filter(|c| c.subject.starts_with("fold:")).collect();
+            assert_eq!(folds.len(), 1, "{at}: one commit");
+            assert_eq!((f.state.as_str(), f.commit.as_deref(), f.files, f.closing), ("done", Some(folds[0].commit.as_str()), Some(1), false), "{at}: its own receipt");
+            assert!(!folds[0].files.iter().any(|f| f.path.contains("by-hand")), "{at}");
+            assert!(!d.up(&conv) && !again.memory.is_held(&d.ws) && again.folds.of(&conv).is_none(), "{at}: ended and let go");
+        }
+    }
+
+    /// A receipt that cannot be written ends nothing and lets nothing go; the
+    /// next tick writes it, for the commit that is there.
+    #[test]
+    fn a_receipt_that_cannot_be_written_is_tried_again() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = Desk::new("receipt");
+        let conv = d.chat("Naming", true);
+        d.fold(&conv).unwrap();
+        d.note(&conv, "note\n", 5);
+        d.tick(3);
+        let dir = wsfolder::engine_dir_at(d.ctx.workspaces_dir(), &d.ws).unwrap();
+        let mode = |m: u32| fs::set_permissions(&dir, fs::Permissions::from_mode(m)).unwrap();
+        mode(0o555);
+        let through = fs::write(dir.join("probe"), "").is_ok();
+        let (n, _) = d.tick(3);
+        mode(0o700);
+        if through {
+            return; // root writes through the mode
+        }
+        assert!(n.is_empty(), "landed with no receipt");
+        assert!(d.up(&conv) && d.held(), "closed or let go with no receipt");
+        assert_eq!(d.says(&conv).as_deref(), Some("folding"), "still to be recorded");
+        assert_eq!(d.tick(3).0[0].event, "landed");
+        assert_eq!(d.rec(&conv).fold.unwrap().commit, Some(d.log()[0].commit.clone()));
+        assert_eq!(d.log().iter().filter(|c| c.subject.starts_with("fold:")).count(), 1);
+    }
+
+    /// Two engines on one folder: the record is the reservation, so one fold at
+    /// a time, and one that has just started refuses an Undo before any poll.
+    #[test]
+    fn another_engine_sees_the_fold_before_its_first_poll() {
+        let d = Desk::new("engines");
+        let (a, b) = (d.chat("A", true), d.chat("B", true));
+        d.put("topics/x.md", "x\n");
+        let edit = crate::memory::memory_commit_if_dirty(&d.ctx, &d.ws, None).unwrap().unwrap();
+        let other = Desk::engine(&d.base, &d.io, &d.agent);
+        ensure(&other);
+        d.fold(&a).unwrap();
+        assert_eq!(workspace_chat_fold(&other, d.ws.clone(), b.clone()).unwrap_err(), "“A” is folding. Close this one after.");
+        assert!(d.rec(&b).fold.is_none());
+        assert!(crate::memory::workspace_memory_revert(&other, d.ws.clone(), edit.commit.clone()).is_err(), "undone under another engine's fold");
+        let fresh = Desk::engine(&d.base, &d.io, &d.agent);
+        assert!(crate::memory::workspace_memory_revert(&fresh, d.ws.clone(), edit.commit).is_err(), "undone before its first poll");
+        // B closed there leaves A's dirty tree alone.
+        d.put("topics/half.md", "half of A's fold\n");
+        let before = d.log().len();
+        crate::workspacechats::workspace_chat_close(&other, d.ws.clone(), b).unwrap();
+        assert_eq!(d.log().len(), before);
+        // Both polls look: it lands once.
+        d.note(&a, "note\n", 5);
+        let mut n = Vec::new();
+        for _ in 0..3 {
+            n.extend(d.tick(3).0);
+            n.extend(d.tick_on(&other, 0).0);
+        }
+        assert_eq!(n.iter().filter(|n| n.event == "landed").count(), 1, "{n:?}");
+        assert_eq!(d.log().iter().filter(|c| c.subject.starts_with("fold:")).count(), 1);
+    }
+
+    /// A record that cannot be read says nothing: at a start its workspace is
+    /// held and asked again, and under a fold nothing is ended.
+    #[test]
+    fn an_unreadable_record_ends_no_fold_and_frees_no_memory() {
+        let d = Desk::new("unreadable");
+        let a = d.chat("A", true);
+        d.fold(&a).unwrap();
+        let p = wsfolder::engine_dir_at(d.ctx.workspaces_dir(), &d.ws).unwrap().join("chats.json");
+        let good = fs::read(&p).unwrap();
+        fs::write(&p, "{").unwrap();
+        d.tick(3);
+        assert!(d.held() && d.says(&a).is_some(), "a failed read ended the fold");
+        let again = Desk::engine(&d.base, &d.io, &d.agent);
+        ensure(&again);
+        assert!(again.memory.is_held(&d.ws), "unknown is not free");
+        assert!(workspace_chat_fold(&again, d.ws.clone(), a.clone()).is_err());
+        fs::write(&p, &good).unwrap();
+        ensure(&again);
+        assert_eq!(again.folds.of(&a).unwrap().state, "checking", "asked again, and taken up");
+        d.note(&a, "note\n", 5);
+        let mut n = Vec::new();
+        for _ in 0..3 {
+            n.extend(d.tick_on(&again, 3).0);
+        }
+        assert_eq!(n[0].event, "landed");
+        // One that had no fold lets go.
+        fs::write(&p, "{").unwrap();
+        let third = Desk::engine(&d.base, &d.io, &d.agent);
+        ensure(&third);
+        assert!(third.memory.is_held(&d.ws));
+        chats_put(&p, &good);
+        chats::update_at(d.ctx.workspaces_dir(), &d.ws, &a, |c| c.fold = None).unwrap();
+        ensure(&third);
+        assert!(!third.memory.is_held(&d.ws));
+    }
+
+    fn chats_put(p: &Path, text: &[u8]) {
+        fs::write(p, text).unwrap();
+    }
+
+    /// A removal that fails half way leaves neither half alone: no hold with no
+    /// fold, and no fold that nobody looks at.
+    #[test]
+    fn a_failed_removal_leaves_no_hold_without_a_fold() {
+        let d = Desk::new("removal");
+        let a = d.chat("A", true);
+        d.fold(&a).unwrap();
+        let p = wsfolder::engine_dir_at(d.ctx.workspaces_dir(), &d.ws).unwrap().join("chats.json");
+        let good = fs::read(&p).unwrap();
+        fs::write(&p, "{").unwrap();
+        fs::write(d.base.join("ws/.removed"), "a file where the folder goes").unwrap();
+        assert!(crate::workspaces::workspace_remove(&d.ctx, d.ws.clone()).is_err());
+        assert!(!d.held() && d.says(&a).is_none());
+        fs::write(&p, good).unwrap();
+        d.io.up.lock().unwrap().clear();
+        let mut n = Vec::new();
+        for _ in 0..4 {
+            n.extend(d.tick(3).0);
+        }
+        assert_eq!(n[0].event, "failed", "taken up again, and over");
+        assert!(!d.held());
+    }
+
+    /// The last session of all ended takes the server with it: a chat that has
+    /// ended is folded all the same, and one that lands is closed. A fold that
+    /// RUNS is not taken for gone by it.
+    #[test]
+    fn no_server_is_the_end_of_a_chat_and_not_of_a_fold() {
+        let d = Desk::new("noserver");
+        d.io.no_server.store(true, Ordering::SeqCst);
+        let a = d.chat("A", false);
+        d.fold(&a).unwrap();
+        d.note(&a, "note\n", 5);
+        d.tick(3);
+        assert_eq!(d.tick(3).0[0].event, "landed");
+        assert!(!d.rec(&a).fold.unwrap().closing && d.ctx.folds.of(&a).is_none());
+        d.fold(&a).unwrap();
+        d.io.up.lock().unwrap().clear();
+        for _ in 0..20 {
+            assert!(d.tick(3).0.is_empty(), "taken for gone");
+        }
+        d.io.secs.fetch_add(LIMIT.as_secs(), Ordering::SeqCst);
+        assert_eq!(d.tick(0).0[0].event, "failed");
+    }
+
+    /// tmux silent: nothing is started, and nothing is taken for gone.
+    #[test]
+    fn a_fold_is_not_asked_of_a_tmux_that_does_not_answer() {
+        let d = Desk::new("dumb");
+        let a = d.chat("A", true);
+        d.io.dumb.store(true, Ordering::SeqCst);
+        assert_eq!(d.fold(&a).unwrap_err(), ERR_UNSEEN);
+        assert!(d.rec(&a).fold.is_none() && d.acts().is_empty());
+        d.io.dumb.store(false, Ordering::SeqCst);
+        d.fold(&a).unwrap();
+        d.note(&a, "note\n", 5);
+        d.io.dumb.store(true, Ordering::SeqCst);
+        let silent = |d: &Desk| {
+            let mut now = WorkspaceSessions::default();
+            d.io.secs.fetch_add(3, Ordering::SeqCst);
+            tick(&d.ctx, &mut now)
+        };
+        for _ in 0..5 {
+            assert!(silent(&d).is_empty());
+        }
+        assert!(d.held() && d.up(&a));
+        d.io.secs.fetch_add(LIMIT.as_secs(), Ordering::SeqCst);
+        assert_eq!(silent(&d)[0].event, "failed");
+        assert!(d.rec(&a).fold.unwrap().why.unwrap().starts_with("tmux did not answer"));
     }
 
     /// The words count what memory holds, or say it could not be read: never
@@ -1039,7 +1554,7 @@ mod tests {
         assert_eq!((n[0].event, n[0].commit.clone()), ("failed", None));
         assert_eq!((e.state.as_str(), e.left), ("failed", Some(1)));
         assert_eq!(e.why.as_deref(), Some("it wrote no note in five minutes, and the chat is still open. Memory may hold part of it: 1 file changed."));
-        assert!(d.io.live(&chats::session_name(&conv)), "the session is left open");
+        assert!(d.up(&conv), "the session is left open");
         assert!(!d.held());
         assert_eq!((d.rec(&conv).fold.unwrap().state.as_str(), d.tick(3).0.len()), ("failed", 0), "said once");
         let (_, e) = run(None);
@@ -1081,7 +1596,7 @@ mod tests {
         let (n, _) = d.tick(3);
         assert_eq!(n[0].event, "failed");
         assert!(d.rec(&conv).fold.unwrap().why.unwrap().contains("could not be committed"));
-        assert!(d.io.live(&chats::session_name(&conv)) && !d.held());
+        assert!(d.up(&conv) && !d.held());
     }
 
     /// An engine restart mid-fold: the hold again and `checking`, before any
@@ -1224,6 +1739,9 @@ mod tests {
         let c = chats::find_at(d.ctx.workspaces_dir(), &other, &c.id).unwrap();
         let p = d.base.join("ws").join(&other).join(&c.note);
         fs::write(&p, "note\n").unwrap();
+        // Both turns, in the one transcript the script has.
+        let openers: Vec<String> = d.acts().into_iter().filter(|a| a.starts_with("Read ")).collect();
+        *d.agent.lines.lock().unwrap() = openers.iter().flat_map(|o| turn(o, "2027-01-15T08:00:05Z", "Two files changed.")).collect();
         let at = std::time::UNIX_EPOCH + Duration::from_millis(d.io.now_ms() + 5);
         fs::File::options().write(true).open(&p).unwrap().set_modified(at).unwrap();
         // The FIRST the poll comes to is locked; the one after it is not.

@@ -239,6 +239,19 @@ pub struct Fold {
     /// compared to, across a restart too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asked_ms: Option<u64>,
+    /// Which attempt this is, a ULID made when it was asked: its opener and its
+    /// commit's body carry it, so an earlier fold's answer or commit is never
+    /// taken for this one's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<String>,
+    /// The note's revision as it was asked ([`note_rev`]); none when there was
+    /// no note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+    /// Its receipt is written and its session is still to be ended: an engine
+    /// that starts and finds this ends it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub closing: bool,
     /// The fold's commit in the memory repository, a full id; none while it
     /// runs, and for one that changed nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -347,6 +360,7 @@ pub fn name_note(c: &mut Chat, date: &str) {
 fn checked(mut c: Chat) -> Chat {
     if let Some(f) = c.fold.as_mut() {
         f.commit = f.commit.take().filter(|s| crate::memory::is_sha(s));
+        f.attempt = f.attempt.take().filter(|s| crate::ulid::is_valid(s));
     }
     if !note_ok(&c) {
         c.note.clear();
@@ -1003,13 +1017,26 @@ pub fn note_exists(root: &Path, ws: &str, c: &Chat) -> bool {
 /// `None` unless it is a regular file at the path this module names, through
 /// no link.
 pub fn note_mtime_ms(root: &Path, ws: &str, c: &Chat) -> Option<u64> {
+    Some(note_stat(root, ws, c)?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64)
+}
+
+/// Which writing of chat `c`'s note is on disk: its time to the nanosecond, its
+/// size and its inode. Equal is untouched, whatever the clock says; a note
+/// rewritten with the same words is another one.
+pub fn note_rev(root: &Path, ws: &str, c: &Chat) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let m = note_stat(root, ws, c)?;
+    Some(format!("{}.{:09}-{}-{}", m.mtime(), m.mtime_nsec(), m.size(), m.ino()))
+}
+
+fn note_stat(root: &Path, ws: &str, c: &Chat) -> Option<fs::Metadata> {
     if !note_ok(c) {
         return None;
     }
     let rel = PathBuf::from(&c.note);
     let mut at = folder_at(root, ws).ok()?;
     let parts: Vec<_> = rel.components().collect();
-    let mut mtime = None;
+    let mut found = None;
     for (i, part) in parts.iter().enumerate() {
         let Component::Normal(n) = part else { return None };
         at.push(n);
@@ -1018,9 +1045,9 @@ pub fn note_mtime_ms(root: &Path, ws: &str, c: &Chat) -> Option<u64> {
         if !(if last { md.file_type().is_file() } else { md.file_type().is_dir() }) {
             return None;
         }
-        mtime = md.modified().ok();
+        found = Some(md);
     }
-    Some(mtime?.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64)
+    found
 }
 
 // ── the fold's file ─────────────────────────────────────────────────────────
@@ -1059,30 +1086,55 @@ pub fn fold_text(folder: &Path, c: &Chat) -> String {
     )
 }
 
-/// The fold's fixed opener: the absolute path of a file the engine wrote.
-pub fn fold_opener(folder: &Path, conv: &str) -> String {
-    format!("Read {} and do what it says.", folder.join(CHATS_DIR).join(conv).join(FOLD).display())
+/// The fold's fixed opener: the absolute path of a file the engine wrote, and
+/// the attempt's id, so the turn it opens is known from any other's.
+pub fn fold_opener(folder: &Path, conv: &str, attempt: &str) -> String {
+    format!("Read {} and do what it says. This is fold {attempt}.", folder.join(CHATS_DIR).join(conv).join(FOLD).display())
 }
 
 /// Write chat `c`'s `fold.md` and answer the opener that reads it.
-pub fn write_fold_at(root: &Path, ws: &str, c: &Chat) -> Result<String, String> {
+pub fn write_fold_at(root: &Path, ws: &str, c: &Chat, attempt: &str) -> Result<String, String> {
+    if !crate::ulid::is_valid(attempt) {
+        return Err(format!("not a fold's id: {attempt:?}"));
+    }
     if !note_ok(c) {
         return Err(format!("chat {} has no note to fold into", c.id));
     }
     let folder = folder_at(root, ws)?;
     let own = ws_desk(root, ws)?.make_conv_dir(&c.id)?;
     crate::fsx::write_atomic(&own.join(FOLD), fold_text(&folder, c).as_bytes(), None).map_err(|e| format!("{FOLD}: {e}"))?;
-    Ok(fold_opener(&folder, &c.id))
+    Ok(fold_opener(&folder, &c.id, attempt))
 }
 
-/// Whether the newest turn of a fold's transcript is the fold's, and its
-/// reply says, on a line of its own, that it changed nothing. `turn` is the newest: its prompt
-/// must be this fold's opener, written no earlier than the fold (`asked_ms`),
-/// or an earlier fold's answer would end this one.
-pub fn said_nothing(turn: &crate::turns::Turn, opener: &str, asked_ms: u64) -> bool {
-    turn.user.as_deref().map(str::trim) == Some(opener)
-        && turn.at.is_some_and(|at| at >= (asked_ms / 1000) as i64)
-        && turn.reply.lines().any(|l| l.trim().trim_matches(['`', '*', '_']) == NOTHING)
+/// What a fold's own turn came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FoldTurn {
+    /// Not there yet, still going, stopped, or ended by an error.
+    Open,
+    /// It said its last words: what it changed.
+    Finished,
+    /// Its last line says it changed nothing.
+    Nothing,
+}
+
+/// What the turn `opener` opened came to, in the transcript `turns`. The opener
+/// carries the attempt's id, so no other fold's turn is this one. It is over
+/// when its last step is Claude's own text: after a tool call it is still
+/// going, and one that was interrupted, or that an API error ended, never says
+/// its last words.
+pub fn fold_turn(turns: &[crate::turns::Turn], opener: &str) -> FoldTurn {
+    let Some(i) = turns.iter().rposition(|t| t.user.as_deref().map(str::trim) == Some(opener)) else { return FoldTurn::Open };
+    let t = &turns[i];
+    // Claude writes a stop as an entry of its own, after whatever it had said.
+    if turns.get(i + 1).is_some_and(|n| matches!(n.notice, Some(crate::turns::Notice::Interrupt))) {
+        return FoldTurn::Open;
+    }
+    let Some(crate::turns::Step::Text { text, .. }) = t.steps.last() else { return FoldTurn::Open };
+    let Some(last) = text.lines().map(str::trim).filter(|l| !l.is_empty()).last() else { return FoldTurn::Open };
+    if text.trim_start().starts_with("API Error") {
+        return FoldTurn::Open;
+    }
+    if last.trim_matches(['`', '*', '_']) == NOTHING { FoldTurn::Nothing } else { FoldTurn::Finished }
 }
 
 /// The other chats of `ws` that have a note, oldest first, for `context.md`.
@@ -2026,11 +2078,13 @@ mod tests {
         let ws = crate::ulid::new();
         let c = prepare_at(&root, &ws, |_| String::new()).unwrap();
         rename_at(&root, &ws, &c.id, "A title with `backticks`").unwrap();
-        assert!(write_fold_at(&root, &ws, &c).is_err(), "a chat with no note yet has nowhere to fold to");
+        assert!(write_fold_at(&root, &ws, &c, &crate::ulid::new()).is_err(), "a chat with no note yet has nowhere to fold to");
         let c = update_at(&root, &ws, &c.id, |c| name_note(c, "2026-11-24")).unwrap();
-        let opener = write_fold_at(&root, &ws, &c).unwrap();
+        let attempt = crate::ulid::new();
+        assert!(write_fold_at(&root, &ws, &c, "x; rm").is_err());
+        let opener = write_fold_at(&root, &ws, &c, &attempt).unwrap();
         let folder = root.join(&ws);
-        assert_eq!(opener, format!("Read {}/chats/{}/fold.md and do what it says.", folder.display(), c.id));
+        assert_eq!(opener, format!("Read {}/chats/{}/fold.md and do what it says. This is fold {attempt}.", folder.display(), c.id));
         let t = fs::read_to_string(folder.join("chats").join(&c.id).join(FOLD)).unwrap();
         for p in [c.note.as_str(), "memory/MEMORY.md", "memory/topics/"] {
             assert!(t.contains(&format!("`{}/{p}`", folder.display())), "{p}: {t}");
@@ -2048,7 +2102,7 @@ mod tests {
         let elsewhere = root.join("elsewhere");
         fs::write(&elsewhere, "keep").unwrap();
         std::os::unix::fs::symlink(&elsewhere, &p).unwrap();
-        write_fold_at(&root, &ws, &c).unwrap();
+        write_fold_at(&root, &ws, &c, &attempt).unwrap();
         assert_eq!(fs::read_to_string(&elsewhere).unwrap(), "keep");
         assert_eq!(fs::read_to_string(&p).unwrap(), t);
         let _ = fs::remove_dir_all(&root);

@@ -761,7 +761,14 @@ fn fake_chat_claude(dir: &Path) {
     let body = format!(
         "#!/bin/sh\nif [ \"$1\" = --help ]; then [ -e '{d}/nofloor' ] || echo '  --session-id <uuid>'; exit 0; fi\n\
          cat memory/MEMORY.md > '{d}/index' 2>/dev/null\n\
-         {{ pwd -P; for a in \"$@\"; do printf '%s\\n' \"$a\"; done; }} > '{d}/argv.tmp'\nmv '{d}/argv.tmp' '{d}/argv'\nexec cat\n"
+         {{ pwd -P; for a in \"$@\"; do printf '%s\\n' \"$a\"; done; }} > '{d}/argv.tmp'\nmv '{d}/argv.tmp' '{d}/argv'\n\
+         if [ -e '{d}/works' ]; then\n\
+         mkdir -p \"$HOME/.claude/sessions\"; s=$2\n\
+         printf '{{\"pid\":%s,\"cwd\":\"%s\",\"status\":\"idle\",\"kind\":\"interactive\",\"entrypoint\":\"cli\",\"tmux\":\"%s:@1.%s\"}}' $$ \"$(pwd -P)\" \"$s\" \"$TMUX_PANE\" > \"$HOME/.claude/sessions/$$.json\"\n\
+         for last; do :; done; case \"$last\" in *'This is fold '*)\n\
+         t=\"$HOME/.claude/projects/$(pwd -P | sed 's/[^A-Za-z0-9]/-/g')\"; mkdir -p \"$t\"\n\
+         printf '%s\\n%s\\n' \"{{\\\"type\\\":\\\"user\\\",\\\"uuid\\\":\\\"u1\\\",\\\"timestamp\\\":\\\"2027-01-15T08:00:00Z\\\",\\\"message\\\":{{\\\"role\\\":\\\"user\\\",\\\"content\\\":\\\"$last\\\"}}}}\" '{{\"type\":\"assistant\",\"uuid\":\"a1\",\"timestamp\":\"2027-01-15T08:00:01Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"I wrote the note.\"}}]}}}}' > \"$t/$4.jsonl\";; esac; fi\n\
+         exec cat\n"
     );
     let mut c = Command::new("sh").arg("-c").arg("cat > \"$1\" && chmod 755 \"$1\"").arg("sh").arg(dir.join("claude")).stdin(Stdio::piped()).spawn().unwrap();
     c.stdin.take().unwrap().write_all(body.as_bytes()).unwrap();
@@ -1061,7 +1068,7 @@ fn a_workspace_chat_from_start_to_the_workspaces_removal() {
     wait("the fold never launched", &|| !argv().is_empty());
     let got = argv();
     let abs = folder.join(&id).join("chats").join(&conv).join("fold.md");
-    assert_eq!(got.last().unwrap(), &format!("Read {} and do what it says.", abs.display()));
+    assert_eq!(got.last().unwrap(), &format!("Read {} and do what it says. This is fold {}.", abs.display(), r["fold"]["attempt"].as_str().unwrap()));
     assert!(got.windows(2).any(|w| w == ["--resume", sid]) && got.windows(2).any(|w| w == ["--settings", rules.as_str()]), "{got:?}");
     mem_file("topics/half.md", "half\n");
     let e = call("workspace_memory_revert", json!({ "id": id, "commit": "a".repeat(40) })).unwrap_err();
@@ -1075,16 +1082,30 @@ fn a_workspace_chat_from_start_to_the_workspaces_removal() {
     assert_eq!(r["conv"], json!(conv));
     let note = folder.join(&id).join(call("workspace_chats", json!({ "id": id })).unwrap()["chats"][0]["note"].as_str().unwrap());
     std::fs::write(&note, "# Chat 1\n\n## Asked\n").unwrap();
+    // A note is not an end: its Claude gone before its last words is a failed
+    // fold, and what it wrote is there to keep or to fold again.
+    // Another session keeps the server up: with none left tmux could not say
+    // that this one is gone, only that it found nobody.
+    assert!(tmux.run(&["new-session", "-d", "-s", "keep", "cat"]).status.success());
     assert!(tmux.run(&["kill-session", "-t", &format!("={session}")]).status.success());
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let landed = loop {
-        let l = call("workspace_chats", json!({ "id": id })).unwrap();
-        if l["chats"][0]["fold"]["state"] == json!("done") {
-            break l["chats"][0].clone();
+    let state = |call: &mut dyn FnMut(&str, Value) -> Result<Value, String>, want: &str| {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let l = call("workspace_chats", json!({ "id": id })).unwrap();
+            if l["chats"][0]["fold"]["state"] == json!(want) {
+                return l["chats"][0].clone();
+            }
+            assert!(Instant::now() < deadline, "the fold was never {want}: {l}");
+            std::thread::sleep(Duration::from_millis(200));
         }
-        assert!(Instant::now() < deadline, "the fold never landed: {l}");
-        std::thread::sleep(Duration::from_millis(200));
     };
+    let failed = state(&mut call, "failed");
+    assert!(failed["fold"]["why"].as_str().unwrap().starts_with("its Claude exited after it wrote its note"), "{failed}");
+    // Tried again, with a Claude that says it is done.
+    std::fs::write(fake.join("works"), "").unwrap();
+    call("workspace_chat_fold", json!({ "id": id, "conv": conv })).unwrap();
+    std::fs::write(&note, "# Chat 1\n\n## Asked\n\n## Decided\n").unwrap();
+    let landed = state(&mut call, "done");
     assert_eq!((&landed["fold"]["files"], &landed["state"], &landed["fold_now"]), (&json!(1), &json!("ended"), &Value::Null), "{landed}");
     let commit = landed["fold"]["commit"].as_str().unwrap().to_string();
     // Undone, and redone, by the memory's own row.
@@ -1117,7 +1138,7 @@ fn a_workspace_chat_from_start_to_the_workspaces_removal() {
     assert_eq!(std::fs::read_to_string(to.join("memory/MEMORY.md")).unwrap(), "kept");
     assert!(to.join("chats").join(&conv).join("start.md").exists());
     let o = Command::new("git").arg("-C").arg(to.join("memory")).env_remove("GIT_DIR").args(["log", "--format=%s"]).output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&o.stdout).lines().count(), 7, "its history went with it: {o:?}");
+    assert_eq!(String::from_utf8_lossy(&o.stdout).lines().count(), 8, "its history went with it: {o:?}");
     let e = call("workspace_chats", json!({ "id": id })).unwrap_err();
     assert!(e.contains("no workspace"), "{e}");
     assert_eq!(call("workspace_remove", json!({ "id": other })).unwrap()["moved_to"], Value::Null);

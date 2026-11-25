@@ -312,7 +312,7 @@ pub fn close_all(ctx: &Ctx, id: &str) -> Result<(), String> {
             crate::log::warn(&format!("workspace {id}: what chat {}'s fold left could not be committed: {e}", c.id));
         }
     }
-    ctx.folds.forget(id);
+    crate::workspacefolds::forget(ctx, id);
     Ok(())
 }
 

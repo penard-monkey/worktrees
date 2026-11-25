@@ -193,6 +193,31 @@ pub fn session_exists(name: &str) -> bool {
     }
 }
 
+/// What tmux said of the sessions that are up.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Up {
+    Are(Vec<String>),
+    /// It found no server. The ordinary state once the last session has ended,
+    /// and also what a server that refuses a connection looks like from here.
+    NoServer,
+    /// It did not say.
+    Unknown,
+}
+
+/// The sessions that are up: a failed read is not "none".
+pub fn sessions_up() -> Up {
+    let Ok(o) = tmux(&["list-sessions", "-F", "#{session_name}"]) else { return Up::Unknown };
+    if o.status.success() {
+        return Up::Are(String::from_utf8_lossy(&o.stdout).lines().map(str::to_string).collect());
+    }
+    up_of_error(&String::from_utf8_lossy(&o.stderr))
+}
+
+/// What `list-sessions` failing with `err` says (tmux 3.2 to 3.7).
+fn up_of_error(err: &str) -> Up {
+    if err.contains("no server running") || (err.contains("error connecting") && err.contains("No such file")) { Up::NoServer } else { Up::Unknown }
+}
+
 /// Sorted, newline-joined live session names — a cheap change signal the app
 /// polls (empty when tmux is down / no sessions). Sessions come and go as places
 /// are opened/closed even from a bare terminal, so a change here is worth a
@@ -1491,6 +1516,16 @@ pub fn kill_session(name: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_failed_list_is_not_an_empty_one() {
+        for gone in ["no server running on /tmp/tmux-501/default\n", "error connecting to /tmp/x/default (No such file or directory)\n"] {
+            assert_eq!(up_of_error(gone), Up::NoServer, "{gone}");
+        }
+        for unknown in ["", "lost server\n", "error connecting to /tmp/x (Connection refused)\n", "server exited unexpectedly\n", "error connecting to /x (File name too long)\n"] {
+            assert_eq!(up_of_error(unknown), Up::Unknown, "{unknown:?}");
+        }
+    }
+
     #[test]
     fn terminal_activity_parses_one_number_and_fails_closed() {
         assert_eq!(parse_activity("1794006790\n"), Ok(1794006790));
