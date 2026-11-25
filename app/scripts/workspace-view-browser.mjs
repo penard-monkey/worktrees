@@ -70,7 +70,7 @@ async function boot(page, betas, extra = {}) {
   await page.addInitScript((s) => {
     if (!sessionStorage.getItem("wt-mock-ui-state")) sessionStorage.setItem("wt-mock-ui-state", JSON.stringify(s));
   }, { places_side: "left", dock_side: "right", settings_rev: 5, nav_pinned: true, nav_view: "workspaces", ...Object.fromEntries(betas.map((b) => [b, true])), ...extra });
-  await page.goto(`${BASE}/?ideas=seed&workspaces=1`);
+  await page.goto(`${BASE}/?ideas=seed&workspaces=1&folding=0`);
   await page.waitForSelector("[data-testid=ws-group]");
 }
 /** The workspace with a plan and two ideas linked, its Overview up. */
@@ -379,7 +379,7 @@ async function elsewhere(page, tag) {
   // The Ideas window says so: the real one, in a second page of this context.
   const other = await page.context().newPage();
   await other.addInitScript(() => { window.__said = 0; const set = Storage.prototype.setItem; Storage.prototype.setItem = function (k, v) { if (k === "wt.workspaces.changed") window.__said++; return set.call(this, k, v); }; });
-  await other.goto(`${BASE}/companion/index.html?ideas=seed&workspaces=1`);
+  await other.goto(`${BASE}/companion/index.html?ideas=seed&workspaces=1&folding=0`);
   await other.click(`[data-idea='${JELLY}'] button.ix-row-main`, { button: "right" });
   await other.click("[data-testid=ideas-menu-link-ws]");
   await other.locator(".ix-dialog button, [data-testid=ideas-ws-pick-row]").filter({ hasText: "Everything" }).first().click();
@@ -393,7 +393,7 @@ async function relaunch(page, tag) {
     const p = await page.context().newPage();
     await p.addInitScript(([s]) => { if (!sessionStorage.getItem("wt-mock-ui-state")) sessionStorage.setItem("wt-mock-ui-state", JSON.stringify(s)); },
       [{ places_side: "left", dock_side: "right", settings_rev: 5, nav_pinned: true, nav_view: "workspaces", beta_ideas: true, beta_workspace_chats: true, restore_last: on }]);
-    await p.goto(`${BASE}/?ideas=seed&workspaces=1`);
+    await p.goto(`${BASE}/?ideas=seed&workspaces=1&folding=0`);
     await p.waitForSelector("[data-testid=ws-group]");
     await p.waitForTimeout(800);
     await p.locator("[data-testid=ws-chat-row]", { hasText: "Release order" }).first().click();

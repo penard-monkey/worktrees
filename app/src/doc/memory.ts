@@ -23,6 +23,8 @@ export type MemoryFileChange = { path: string; status: string; added: number | n
 export type MemoryChange = {
   commit: string; at: number; subject: string; kind: "made" | "fold" | "edit" | "undo" | "redo";
   files: MemoryFileChange[]; added: number; removed: number; reverts: string | null; reverted_by: string | null;
+  /** The chats that were live while it was made (an edit's), by id. */
+  live?: string[];
 };
 export type MemoryView = {
   made: boolean; dir: string; index: MemoryIndex | null; folders: MemoryFolder[]; count: number; bytes: number;

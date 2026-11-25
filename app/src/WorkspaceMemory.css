@@ -40,6 +40,7 @@
 /* Its own width first, not a share of nothing: WKWebView sizes what is in a
    <button> by its content (AGENTS.md), and a basis of 0 has none. */
 .wsm-row-n { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wsm-row-l { color: var(--txt); }
 .wsm-row.undone .wsm-row-n { color: var(--txt); text-decoration: line-through; }
 .wsm-row-u, .wsm-row-d { flex: none; color: var(--txt); font-size: var(--fs-meta); }
 .wsm-pm { flex: none; display: inline-flex; gap: 4px; font-size: var(--fs-meta); }
