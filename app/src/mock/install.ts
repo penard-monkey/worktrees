@@ -2127,11 +2127,19 @@ const CHAT_REPLY_MS = Number(new URLSearchParams(location.search).get("chatreply
 const chatSession = (c: MockChat) => `worktrees~ws~${c.id}`;
 const isoAgo = (min: number) => new Date(Date.now() - min * 60_000).toISOString().replace(/\.\d+Z$/, "Z");
 const MOCK_WS_DIR = "/Users/demo/.local/share/worktrees/workspaces";
+/** A chat's note (`workspacechats::note_name`): named when it is first folded,
+ *  by the day here and the words it is called by then, and kept. */
+function nameNote(c: MockChat, at = new Date()) {
+  if (c.note) return;
+  const words = c.title.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "").split("-").reduce((s, w) => (s && s.length + 1 + w.length > 40 ? s : s ? `${s}-${w}` : w.slice(0, 40)), "") || "chat";
+  const day = `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, "0")}-${String(at.getDate()).padStart(2, "0")}`;
+  c.note = `memory/notes/${day}-${words}-${c.id.slice(-6).toLowerCase()}.md`;
+}
 function mockChatNew(id: string, title: string, startedMin: number, activeMin: number, extra: Partial<MockChat> = {}): MockChat {
   const started = isoAgo(startedMin);
   return {
     id, harness: "claude", session_id: crypto.randomUUID(), title, started, last_activity: isoAgo(activeMin),
-    note: `memory/notes/${started.slice(0, 10)}-${id}.md`, note_exists: false, live: false, state: "idle", turns: [], prompt: null, ...extra,
+    note: "", note_exists: false, live: false, state: "idle", turns: [], prompt: null, ...extra,
   };
 }
 const chatTurn = (n: number, minAgo: number, user: string | null, reply: string) =>
@@ -2147,8 +2155,10 @@ function mockChatSeed(first: string) {
     mockChatNew(id(4), "Release order", 180, 1, { live: true, turns: [chatTurn(1, 180, null, "I read the index and what I may of the projects. What should we settle first?"), chatTurn(2, 4, "Which ships first?", "The role, before the app: its check names the role.")] }),
     mockChatNew(id(5), "Who can see what", 90, 12, { live: true, state: "waiting", prompt: { fp: `fp-${id(5)}`, ask: "Guests see the shared library only" }, turns: [chatTurn(1, 90, "Add who sees what to the memory.", "I'll add one line to the index.")] }),
   ]);
+  for (const c of mockChats.get(first)!) if (c.fold) nameNote(c, new Date(c.fold.asked));
   if (new URLSearchParams(location.search).get("folding") !== "0") {
     const c = mockChatNew(id(6), "Subtitles pipeline", 50, 0, { live: true, state: "busy", fold: { asked: isoAgo(0), state: "folding", reverted: false }, turns: [chatTurn(1, 50, "How do subtitles get made?", "Whisper on the box, then a review by hand.")] });
+    nameNote(c);
     mockChats.get(first)!.push(c);
     // Drawn, not run: unlike a fold that is started it holds no memory, so the
     // memory's own rows (Undo) still answer in this workspace.
@@ -2194,7 +2204,7 @@ const mockChatRecord = (c: MockChat) => ({
   ...(c.fold ? { fold: { ...c.fold, ...(c.fold.state === "done" && c.fold.commit ? mockMemory.fold(chatWs(c), c.title, c.fold.commit) : null) } } : {}),
 });
 const mockChatRow = (c: MockChat) => ({
-  ...mockChatRecord(c), session: chatSession(c), state: !c.live ? "ended" : c.state === "idle" ? "running" : c.state, note_exists: mockMemory.has(chatWs(c), c.note),
+  ...mockChatRecord(c), session: chatSession(c), state: !c.live ? "ended" : c.state === "idle" ? "running" : c.state, note_exists: !!c.note && mockMemory.has(chatWs(c), c.note),
   fold_now: mockChatFolds.get(chatSession(c)) ?? null,
 });
 // ── folds (api `workspacefolds.rs`), the rules simplified ──
@@ -2202,6 +2212,7 @@ const FOLD_RUNNING = ["folding", "waiting", "checking"];
 const foldRunning = (w: string) => [...mockChatFolds.values()].find((f) => f.workspace === w && FOLD_RUNNING.includes(f.state));
 /** A fold is over: landed with what it wrote, or with nothing to keep. */
 function foldLand(w: string, c: MockChat, wrote: boolean) {
+  nameNote(c);
   if (wrote) mockMemory.foldWrites(w, c.note, c.title);
   const commit = wrote ? mockMemory.commit(w, `fold: ${c.title}`, "fold") : null;
   c.fold = { asked: c.fold?.asked ?? isoAgo(0), state: "done", ...(commit ? { commit } : { files: 0, lines: { added: 0, removed: 0 }, left: mockMemory.dirty(w) }), reverted: false };
@@ -4892,6 +4903,7 @@ Phase 3: Frontend pane and mock harness
       const reattach = c.live;
       mockMemory.beforeLaunch(id);
       mockMemory.hold(id);
+      nameNote(c);
       c.fold = { asked: isoAgo(0), asked_ms: Date.now(), state: "folding", reverted: false };
       c.live = true; c.state = "busy"; c.last_activity = isoAgo(0);
       mockChatFolds.set(chatSession(c), { workspace: id, chat: c.id, state: "folding", why: null, left: null });

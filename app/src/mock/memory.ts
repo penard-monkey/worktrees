@@ -408,7 +408,7 @@ export function memoryMock(emit: Emit, nameOf: (id: unknown) => string, noteOf: 
       const p = note.replace(/^memory\//, "");
       m.files.set(p, { text: NOTE(chat, "What the chat was asked.", "What it decided."), b64: null, mtime: now() });
       const i = m.files.get("MEMORY.md");
-      const line = `- ${chat}. → [note](${p})\n`;
+      const line = `- [${chat}](${p}): what it decided.\n`;
       if (i?.text != null && !i.text.includes(`(${p})`)) m.files.set("MEMORY.md", { ...i, text: i.text.replace("## Decisions\n\n", `## Decisions\n\n${line}`), mtime: now() });
       touched(id, m);
     },
