@@ -184,6 +184,9 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
     // The ideas folder's stamp: one `readdir` and an `lstat` per entry a tick,
     // the folder read only when it moved (`ideas::tick`).
     let mut ideas_watch = crate::ideas::IdeasWatch::default();
+    // The workspaces' memories: a `readdir` a folder and an `lstat` an entry a
+    // tick, and a commit after a quiet minute (`memory::tick`).
+    let mut memory_watch = crate::memory::MemoryWatch::default();
     // One `Ctx` for the thread's whole life, and the registries out of it: the
     // dot poll is the hottest reader of both and must not re-resolve them 20
     // times a minute.
@@ -264,6 +267,7 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
             }
         }
         crate::ideas::tick(&pollctx, &mut ideas_watch);
+        crate::memory::tick(&pollctx, &mut memory_watch);
         crate::keepawake::tick(&pollctx);
         attach_ticks += 1;
         if attach_ticks >= 1200 {

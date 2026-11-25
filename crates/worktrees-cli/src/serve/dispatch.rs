@@ -1,4 +1,4 @@
-//! The 306 commands, each with its exposure, capability and objects, in ONE
+//! The 315 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -39,7 +39,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::sync::Arc;
-use worktrees_api::{agents, config, files, hostenv, ideas, ideasessions, keepawake, macprivacy, meta, ops, plans, prefs, presets, profiles, project, status, term, viewer, workspace, workspacechats, workspaces, Ctx};
+use worktrees_api::{agents, config, files, hostenv, ideas, ideasessions, keepawake, macprivacy, memory, meta, ops, plans, prefs, presets, profiles, project, status, term, viewer, workspace, workspacechats, workspaces, Ctx};
 use worktrees_core::authz::{self, Caller, Capability, Caps, DeviceId, Grant, Projects, Registry};
 use worktrees_core::fetchpolicy::Fetcher;
 
@@ -1490,6 +1490,19 @@ commands! { cx, a;
         cx.frames.note_term(id, session);
         Ok::<u32, String>(id)
     },
+    // ── a workspace's memory (`worktrees_api::memory`): desktop only ──
+    // A folder of the workspace's that is its own git repository, committed by
+    // the engine. Addressed by the workspace's id and a path INSIDE the memory,
+    // which the body resolves (`worktrees_core::memory`), never `.git`.
+    workspace_memory: HostConsole [console, workspace(id)] => memory::workspace_memory(&cx.ctx, a.get("id")?),
+    workspace_memory_make: HostConsole [console, workspace(id)] => memory::workspace_memory_make(&cx.ctx, a.get("id")?),
+    workspace_memory_file: HostConsole [console, workspace(id)] => memory::workspace_memory_file(&cx.ctx, a.get("id")?, a.get("path")?, a.get("commit")?),
+    workspace_memory_image: HostConsole [console, workspace(id)] => memory::workspace_memory_image(&cx.ctx, a.get("id")?, a.get("path")?, a.get("etag")?),
+    workspace_memory_write: HostConsole [console, workspace(id)] => memory::workspace_memory_write(&cx.ctx, a.get("id")?, a.get("path")?, a.get("content")?, a.get("expected_mtime")?, a.get("keep_history")?),
+    workspace_memory_put: HostConsole [console, workspace(id)] => memory::workspace_memory_put(&cx.ctx, a.get("id")?, a.get("name")?, a.get("data")?),
+    workspace_memory_log: HostConsole [console, workspace(id)] => memory::workspace_memory_log(&cx.ctx, a.get("id")?, a.get("path")?, a.get("before")?, a.get("n")?),
+    workspace_memory_diff: HostConsole [console, workspace(id)] => memory::workspace_memory_diff(&cx.ctx, a.get("id")?, a.get("commit")?, a.get("path")?),
+    workspace_memory_revert: HostConsole [console, workspace(id)] => memory::workspace_memory_revert(&cx.ctx, a.get("id")?, a.get("commit")?),
 }
 
 #[cfg(test)]
@@ -1533,7 +1546,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 306 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 315 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1562,13 +1575,14 @@ mod tests {
     /// chat's eighteen share rows (fourteen console with PR D's `share_used` and `share_check`, four
     /// `guest`), its thread's two (`thread_read`, `thread_post`, `guest`) and PR C's
     /// two `guest` history rows (`shared_turns`, `shared_tool_call`), and the host's sleep
-    /// hold (`get_keep_awake`, `set_keep_awake`); the check scripts
+    /// hold (`get_keep_awake`, `set_keep_awake`), and a workspace's memory's nine
+    /// console rows (`workspace_memory*`); the check scripts
     /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 306, "the table has 306 commands");
+        assert_eq!(TABLE.len(), 315, "the table has 315 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1909,6 +1923,11 @@ mod tests {
         ("workspace_link_idea", "id", "a named workspace's id (a console act)"),
         ("workspace_unlink_idea", "id", "a named workspace's id (a console act); `idea` may name an idea that is gone"),
         ("workspace_overview", "id", "a named workspace's id (a console act)"),
+        ("workspace_memory_file", "path", "a path in the workspace's MEMORY, not a project's: the body resolves it under that folder alone (`worktrees_core::memory`), and never its `.git` (a console act)"),
+        ("workspace_memory_image", "path", "a path in the workspace's memory (a console act)"),
+        ("workspace_memory_write", "path", "a path in the workspace's memory (a console act)"),
+        ("workspace_memory_log", "path", "a path in the memory's history, which need not be on disk (a console act)"),
+        ("workspace_memory_diff", "path", "a path the named change lists (a console act)"),
         ("read_place_image", "path", "a path in the PLACE (relative to its root, or absolute under it): the body resolves it under `place(repo, slug)`'s own root by `safepath::place_image`, which is not a `file(path)` judged against every project"),
     ];
 
@@ -1984,7 +2003,7 @@ mod tests {
     /// `push_allow_security`); Settings → Agent policy → Limits'
     /// `limits_settings` (`read`) and `set_limits` (`admin`); and the policy
     /// presets' `policy_preset_status` (`read`) and `apply_policy_preset`
-    /// (console); the named workspaces' seven (console); and the idea board's seven and phase 3's seven (console); phase 4's ten and phase 5's three (console); phase S's sixteen idea-session rows (console); the workspace chats' sixteen (console); `read_place_image` and `agent_call_image` are `read`; the host's sleep hold's `get_keep_awake` (`read`) and `set_keep_awake` (`admin`); and group chat's
+    /// (console); the named workspaces' seven (console); and the idea board's seven and phase 3's seven (console); phase 4's ten and phase 5's three (console); phase S's sixteen idea-session rows (console); the workspace chats' sixteen and a workspace's memory's nine (console); `read_place_image` and `agent_call_image` are `read`; the host's sleep hold's `get_keep_awake` (`read`) and `set_keep_awake` (`admin`); and group chat's
     /// shares: fourteen console rows (`share_*` for the owner, `share_used`, `share_check`, `guest_places_hide`,
     /// `shares_all`, `guests_list`, `guest_remove`, `owner_set_name`) and the
     /// four `guest` rows (`GUEST_ROWS`), the capability's first, the thread's
@@ -2006,7 +2025,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 71), ("write", 23), ("admin", 42), ("console", 128), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 71), ("write", 23), ("admin", 42), ("console", 137), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7), ("guest", 8),
         ]
         .into();
@@ -2175,6 +2194,29 @@ mod tests {
         ] {
             assert_eq!(exposure(cmd), Some(Exposure::HostConsole), "{cmd}: desktop only");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The memory rows are the console's, and a workspace `workspaces.json`
+    /// does not know is refused before any body runs: nothing is made. Their
+    /// bodies are tested in `worktrees_api::memory`, and one memory end to end
+    /// in `serve_bin`, whose serve has a `workspaces.json` of its own.
+    #[test]
+    fn the_memory_rows_are_the_consoles_and_name_a_known_workspace() {
+        let (c, dir, _rx) = call("memory");
+        let folder = dir.join("ws");
+        let c = Call { ctx: c.ctx.clone().with_workspaces_dir(folder.clone()), ..c };
+        let id = worktrees_core::ulid::new();
+        for cmd in [
+            "workspace_memory", "workspace_memory_make", "workspace_memory_file", "workspace_memory_image", "workspace_memory_write",
+            "workspace_memory_put", "workspace_memory_log", "workspace_memory_diff", "workspace_memory_revert",
+        ] {
+            assert_eq!(exposure(cmd), Some(Exposure::HostConsole), "{cmd}: desktop only");
+            let e = super::call(&c, cmd, &args(json!({"id": id, "path": "MEMORY.md", "content": "x", "name": "x.png", "data": "", "commit": "0"}))).unwrap_err();
+            assert!(e.as_str().unwrap().contains(&format!("no workspace {id}")), "{cmd}: {e}");
+        }
+        assert!(!folder.exists());
+        assert_eq!(scope::EVENTS.iter().find(|(n, _)| *n == "workspaces:memory").map(|(_, e)| matches!(e, scope::Event::Console)), Some(true));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

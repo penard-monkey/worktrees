@@ -41,6 +41,7 @@ pub mod kimi_usage;
 pub mod kimimodels;
 pub mod kimiplace;
 pub mod materialize;
+pub mod memory;
 pub mod mcpsetup;
 pub mod mcpmigrate;
 pub mod mention;
