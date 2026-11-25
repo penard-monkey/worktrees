@@ -284,6 +284,34 @@ async function back(page, tag) {
   ok(await colOf(page, "Release order"), `${tag} and Forward is the chat again`);
 }
 
+/** The folder-trust question, first of a workspace: taller than a short pane. */
+async function trust(page, tag, name) {
+  await boot(page);
+  await page.setViewportSize({ width: 1440, height: 560 });
+  await page.evaluate(() => {
+    const t = window.__TAURI_INTERNALS__, i = t.invoke;
+    const lines = ["Accessing workspace:", "", " /Users/demo/.local/share/worktrees/workspaces/01M8884X2QGG0A2ZJHEP1FKQ7J", "", ...Array.from({ length: 14 }, (_, n) => ` Quick safety check, line ${n}: is this a project you created or one you trust?`), "", " Claude Code'll be able to read, edit, and execute files here.", "", " Security guide"];
+    t.invoke = (c, a) => (c === "workspace_prompt" ? Promise.resolve({ waiting: true, readable: true, harness: "claude", session: "s", kind: "permission", fingerprint: "fp-trust", lines: window.__trust === false ? ["Edit file"] : lines, choices: [{ n: 1, label: "No, exit", highlighted: true }, { n: 2, label: "Yes, I trust this folder", highlighted: false }], note: "" })
+      : c === "workspace_answer" ? (window.__answered = a, Promise.resolve({ answered: true, confirmed: true, harness: "claude", session: "s", choice: a.choice, label: "Yes" })) : i(c, a));
+  });
+  await row(page, "Who can see what").click();
+  await page.waitForSelector("[data-testid=ws-chat-col] .chat-card");
+  await page.waitForTimeout(300);
+  const tall = await page.evaluate(() => document.querySelector(".chat-card").getBoundingClientRect().height > document.querySelector(".chat-scroll").getBoundingClientRect().height);
+  ok(tall, `${tag} the card is taller than the pane`);
+  await page.locator(".chat-scroll").evaluate((e) => { e.scrollTop = e.scrollTop - 60; });
+  await page.locator("[data-testid=ws-chat-col] .chat-choice", { hasText: "Yes, I trust this folder" }).first().evaluate((e) => e.click());
+  await page.waitForTimeout(200);
+  for (const at of ["where it was", "its top"]) {
+    if (at === "its top") await page.locator(".chat-scroll").evaluate((e) => { const c = e.querySelector(".chat-card"); e.scrollTop = c.offsetTop - 10; });
+    await page.waitForTimeout(150);
+    ok(await page.evaluate(() => { const b = document.querySelector("[data-testid=chat-send-answer]"); if (!b) return false; const q = b.getBoundingClientRect(), hit = document.elementFromPoint(q.x + q.width / 2, q.y + q.height / 2); return !!hit && (hit === b || b.contains(hit)); }), `${tag} a choice clicked, its Send answer is in view (scrolled to ${at})`);
+  }
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/wsc-trust-${name}.png` });
+  await page.click("[data-testid=chat-send-answer]");
+  ok(await until(page, () => window.__answered?.choice === 2 && window.__answered?.fingerprint === "fp-trust"), `${tag} …and answers`);
+}
+
 async function themes(page, tag, name) {
   await boot(page, ["beta_workspace_chats", "beta_ideas"]);
   await row(page, "Release order").click();
@@ -329,7 +357,7 @@ async function off(page, tag) {
 const only = process.env.ONLY?.split(",");
 for (const [engine, name] of [[chromium, "chromium"], [webkit, "webkit"]]) {
   const browser = await engine.launch();
-  for (const part of [nav, chat, start, narrow, back, themes, off]) {
+  for (const part of [nav, chat, start, narrow, back, trust, themes, off]) {
     if (only && !only.includes(part.name)) continue;
     const page = await (await browser.newContext({ viewport: { width: 1440, height: 900 } })).newPage();
     const errors = [];
