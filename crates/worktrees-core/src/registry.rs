@@ -291,7 +291,11 @@ fn unique_name(reg: &Registry, want: &str) -> String {
 
 /// Append `root` (already canonical) under a fresh unique name. Idempotent:
 /// a root already present keeps its entry and position. Returns its entry.
+///
+/// Refused for anything in the workspaces folder: a workspace's memory is a
+/// git repository and never a project (`workspacechats::refuse_project`).
 pub fn add(root: &str) -> Result<Entry, String> {
+    crate::workspacechats::refuse_project(Path::new(root), &crate::workspacechats::dir())?;
     add_at(&path(), root)
 }
 

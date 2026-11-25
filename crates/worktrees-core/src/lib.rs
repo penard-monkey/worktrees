@@ -86,9 +86,11 @@ pub mod tmux;
 pub mod turns;
 pub mod trust;
 pub mod ideas;
+pub mod desksessions;
 pub mod ideasessions;
 pub mod plans;
 pub mod ulid;
+pub mod workspacechats;
 pub mod workspaces;
 pub mod ui;
 

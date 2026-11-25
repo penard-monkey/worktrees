@@ -529,6 +529,12 @@ pub struct AiLaunch {
     /// (`ideasessions`) knows its transcript's path without a probe. Only a UUID
     /// is emitted, and never on a resume. `None` everywhere else.
     pub session_id: Option<String>,
+    /// Claude `--settings` JSON for THIS session alone, fixed text the engine
+    /// wrote (a workspace chat turns Claude's own auto memory off:
+    /// `workspacechats::SETTINGS`). Claude only, quoted where it is emitted,
+    /// after the prompt plugin. `None` everywhere else: a profile's settings
+    /// ride in `cmd`, and the two never meet (a desk session has no profile).
+    pub session_settings: Option<String>,
     /// Launch even though the model host did not answer (`--force`, the app's
     /// "launch anyway"). Never overrides a harness that cannot run at all.
     pub force: bool,
@@ -590,6 +596,7 @@ pub fn claude_launch(base: &AiLaunch, p: &Profile, m: &Materialized) -> AiLaunch
         resume: base.resume,
         resume_id: base.resume_id.clone(),
         session_id: base.session_id.clone(),
+        session_settings: base.session_settings.clone(),
         force: base.force,
     }
 }
@@ -664,6 +671,7 @@ impl AiLaunch {
             resume: false,
             resume_id: None,
             session_id: None,
+            session_settings: None,
             force: false,
         }
     }
@@ -740,6 +748,10 @@ impl AiLaunch {
         for w in args.tail.iter().chain(&self.prompt_hook) {
             cmd.push(' ');
             cmd.push_str(w);
+        }
+        if let Some(s) = self.session_settings.as_deref().filter(|_| adapter.provider().id == crate::provider::CLAUDE.id) {
+            cmd.push_str(" --settings ");
+            cmd.push_str(&shell_quote(s));
         }
         if let Some(o) = self.opener.as_deref().filter(|o| !o.trim().is_empty() && adapter.opener_in_argv()) {
             cmd.push(' ');
@@ -1755,6 +1767,7 @@ mod tests {
             resume: false,
             resume_id: None,
             session_id: None,
+            session_settings: None,
             force: false,
         };
         assert_eq!(l.match_word, "claude", "adoption matches the program, not the env prefix");
@@ -1793,6 +1806,7 @@ mod tests {
             resume: false,
             resume_id: None,
             session_id: None,
+            session_settings: None,
             force: false,
         };
         assert_eq!(
@@ -1840,6 +1854,7 @@ mod tests {
             resume: false,
             resume_id: None,
             session_id: None,
+            session_settings: None,
             force: false,
         };
         assert_eq!(
@@ -1914,6 +1929,7 @@ mod tests {
             resume: false,
             resume_id: None,
             session_id: None,
+            session_settings: None,
             force: false,
         };
         assert_eq!(l.shell_prefix(), "CLAUDE_CONFIG_DIR='/tmp/a dir/it'\\''s' ");

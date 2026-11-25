@@ -823,6 +823,25 @@ mod tests {
         }
     }
 
+    /// A workspace chat counts as an idea session does: once, by its session.
+    #[test]
+    fn a_workspace_chat_counts_against_the_cap_like_a_lane() {
+        let chat = crate::workspacechats::session_name("01JCB2Z4K3M9QX2T7VBN5R6WYH");
+        let panes = crate::tmux::PaneList::from_panes(vec![
+            crate::tmux::Pane { session: "repo-a".into(), path: "/r/a".into(), cmd: "claude".into(), id: Some("%1".into()), ..crate::tmux::Pane::default() },
+            crate::tmux::Pane { session: chat.clone(), path: "/ws/X".into(), cmd: "2.1.331".into(), id: Some("%2".into()), ..crate::tmux::Pane::default() },
+        ]);
+        let mut probes: Vec<crate::agent::ClaudeProbe> =
+            vec![serde_json::from_value(serde_json::json!({"pid": 10, "cwd": "/ws/X", "status": "busy", "tmux": format!("{chat}:@2.%2")})).unwrap()];
+        crate::agent::locate(&mut probes, &panes);
+        let live = live_agents(Some(&panes), &probes, &[]);
+        let labels: Vec<&str> = live.iter().map(|l| l.label.as_str()).collect();
+        assert_eq!(labels, ["repo-a", chat.as_str()]);
+        let why = decide(Some("claude"), &live, &Memory::default(), &lim(Some(2)), "HOW").unwrap();
+        assert!(why.contains(&chat), "{why}");
+        assert_eq!(live_agents(Some(&panes), &probes, std::slice::from_ref(&chat)).len(), 1);
+    }
+
     /// Review of #486, B1: `node` is claude only where something says so. A
     /// bare `node` session (a bundler, a dev server) with no claude probe
     /// naming it is not an agent; one a probe names is, once.
