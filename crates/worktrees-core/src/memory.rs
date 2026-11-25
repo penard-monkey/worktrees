@@ -33,13 +33,25 @@
 //! commits a dirty tree after a quiet minute, and so does whatever starts a
 //! chat, a fold or a revert ([`commit_if_dirty_at`]).
 //!
-//! **What a commit leaves out** (and [`list_at`] names in `skipped`): a folder
-//! holding a repository of its own (git would take it as a link, and looking
-//! inside it runs ITS config), and a file over [`MAX_COMMIT_BYTES`].
+//! **One set of files** ([`walk`]): what the list shows, the watch compares and
+//! a commit holds. A regular file whose name a client can send ([`rel_ok`]), at
+//! most [`MAX_DEPTH`] deep, no larger than [`MAX_COMMIT_BYTES`], in no folder
+//! that holds a repository of its own. Anything else is named in `skipped` (a
+//! dot name silently), and what the history already holds of it stays as it
+//! was: it is neither changed nor removed. No `.gitignore` is asked: what the
+//! app shows is in the history. A walk that stopped at [`MAX_ENTRIES`] says
+//! nothing about what it did not reach, and a tracked path is removed only
+//! when looking for that very path finds nothing ([`Presence`]).
+//!
+//! **Byte for byte**: no attribute of the folder's changes what is stored
+//! ([`ATTRIBUTES`]).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
+use std::io::Write;
 use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 use std::sync::{Mutex, MutexGuard};
@@ -74,6 +86,8 @@ const MADE: &str = "Memory made";
 const REVERTS: &str = "This reverts commit ";
 /// The trailer that names a chat, one a line, in a quiet-minute commit's body.
 const LIVE: &str = "Live-chat: ";
+/// The trailer that names the fold's attempt a commit is of.
+const ATTEMPT: &str = "Fold-attempt: ";
 /// The most chats one commit names.
 const LIVE_MAX: usize = 16;
 
@@ -122,7 +136,7 @@ pub struct Listing {
     pub folders: Vec<Folder>,
     pub count: usize,
     pub bytes: u64,
-    /// Present on disk and not in `folders`, or in it and out of the history.
+    /// Present on disk and in neither the list nor the history, by name.
     pub skipped: Vec<Skipped>,
     /// The walk stopped at [`MAX_ENTRIES`].
     pub truncated: bool,
@@ -366,7 +380,6 @@ struct Found {
 }
 
 fn sig_of(md: &fs::Metadata) -> Sig {
-    use std::os::unix::fs::MetadataExt;
     Sig { mtime_ms: mtime_ms(md), size: md.len(), changed_ns: i128::from(md.ctime()) * 1_000_000_000 + i128::from(md.ctime_nsec()), ino: md.ino() }
 }
 
@@ -377,15 +390,22 @@ struct Walk {
     truncated: bool,
 }
 
-/// Every regular file under `mem`: one `readdir` a folder and one `lstat` an
-/// entry, no link followed, no dot name entered, no `.git` at any depth.
+/// Whether the memory keeps a file of this name, by the name alone.
+fn name_kept(path: &str) -> bool {
+    rel_ok(path).is_ok() && path.split('/').count() <= MAX_DEPTH
+}
+
+/// Every file the memory keeps: one `readdir` a folder and one `lstat` an
+/// entry, no link followed, no dot name entered, no `.git` at any depth. By
+/// name, a folder's files before what is under it, so that a walk that stops
+/// at the limit stops at the same place each time.
 fn walk(mem: &Path) -> std::io::Result<Walk> {
     let mut out = Walk::default();
     let mut seen = 0usize;
-    let mut todo: Vec<(String, usize)> = vec![(String::new(), 0)];
-    while let Some((rel, depth)) = todo.pop() {
+    let mut todo = VecDeque::from([(String::new(), 0usize)]);
+    while let Some((rel, depth)) = todo.pop_front() {
         let dir = if rel.is_empty() { mem.to_path_buf() } else { mem.join(&rel) };
-        let entries = match fs::read_dir(&dir) {
+        let mut entries = match fs::read_dir(&dir) {
             Ok(r) => r.flatten().collect::<Vec<_>>(),
             // The folder itself must be readable, or an unreadable one would
             // read as "everything was removed".
@@ -399,13 +419,10 @@ fn walk(mem: &Path) -> std::io::Result<Walk> {
             out.skipped.push(Skipped { path: rel, why: "holds a git repository of its own" });
             continue;
         }
+        entries.sort_by_key(|e| e.file_name());
         for e in entries {
             let name = e.file_name();
-            let Some(name) = name.to_str() else {
-                out.skipped.push(Skipped { path: format!("{rel}/{}", name.to_string_lossy()), why: "its name is not UTF-8" });
-                continue;
-            };
-            if name.starts_with('.') {
+            if name.as_bytes().starts_with(b".") {
                 continue;
             }
             seen += 1;
@@ -413,22 +430,67 @@ fn walk(mem: &Path) -> std::io::Result<Walk> {
                 out.truncated = true;
                 return Ok(out);
             }
-            let path = if rel.is_empty() { name.to_string() } else { format!("{rel}/{name}") };
+            let shown = name.to_string_lossy();
+            let path = if rel.is_empty() { shown.to_string() } else { format!("{rel}/{shown}") };
+            if name.to_str().is_none() {
+                out.skipped.push(Skipped { path, why: "its name is not UTF-8" });
+                continue;
+            }
+            if rel_ok(&path).is_err() {
+                out.skipped.push(Skipped { path, why: "its name cannot be used here" });
+                continue;
+            }
             let Ok(md) = e.metadata() else { continue };
             if md.is_dir() {
                 if depth + 1 >= MAX_DEPTH {
                     out.skipped.push(Skipped { path, why: "too deep" });
                 } else {
-                    todo.push((path, depth + 1));
+                    todo.push_back((path, depth + 1));
                 }
-            } else if md.is_file() {
-                out.files.push(Found { path, sig: sig_of(&md) });
-            } else {
+            } else if !md.is_file() {
                 out.skipped.push(Skipped { path, why: "not a regular file" });
+            } else if md.len() > MAX_COMMIT_BYTES {
+                out.skipped.push(Skipped { path, why: "too large for the history" });
+            } else {
+                out.files.push(Found { path, sig: sig_of(&md) });
             }
         }
     }
     Ok(out)
+}
+
+/// What looking for one path finds.
+#[derive(Debug, PartialEq, Eq)]
+enum Presence {
+    /// Nothing there by that name: it is no file, and no folder on the way to
+    /// it is either.
+    Gone,
+    /// A regular file.
+    File { ino: u64, links: u64 },
+    /// Something else, or it cannot be told.
+    Other,
+}
+
+fn presence(mem: &Path, path: &str) -> Presence {
+    let mut cur = mem.to_path_buf();
+    let parts: Vec<&str> = path.split('/').collect();
+    for (i, p) in parts.iter().enumerate() {
+        cur.push(p);
+        let md = match fs::symlink_metadata(&cur) {
+            Ok(md) => md,
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => return Presence::Gone,
+            Err(_) => return Presence::Other,
+        };
+        let last = i + 1 == parts.len();
+        match (last, md.is_dir(), md.is_file()) {
+            (false, true, _) => continue,
+            // A folder where the file was, or a file where its folder was.
+            (true, true, _) | (false, _, true) => return Presence::Gone,
+            (true, _, true) => return Presence::File { ino: sig_of(&md).ino, links: md.nlink() },
+            _ => return Presence::Other,
+        }
+    }
+    Presence::Other
 }
 
 /// What a tick compares of one file. The mtime alone would miss a second write
@@ -443,24 +505,62 @@ pub struct Sig {
     pub ino: u64,
 }
 
-/// Every file's. A missing folder is no files; a folder that cannot be read is
-/// an error, never "all removed".
-pub type Stamp = BTreeMap<String, Sig>;
+/// What one walk saw. A missing folder is no files; a folder that cannot be
+/// read is an error, never "all removed".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Stamp {
+    files: BTreeMap<String, Sig>,
+    /// Passed over: what is at or under one of these is not known.
+    skipped: Vec<String>,
+    /// The walk stopped at the limit: nothing it did not reach is known.
+    truncated: bool,
+}
+
+impl Stamp {
+    pub fn of(files: impl IntoIterator<Item = (String, Sig)>) -> Stamp {
+        Stamp { files: files.into_iter().collect(), ..Stamp::default() }
+    }
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+    fn knows(&self, path: &str) -> bool {
+        let under = |s: &str| path.strip_prefix(s).is_some_and(|r| r.is_empty() || r.starts_with('/'));
+        !self.truncated && !self.skipped.iter().any(|s| under(s))
+    }
+}
 
 pub fn stamp_at(root: &Path, id: &str) -> Result<Stamp, String> {
     let mem = dir_at(root, id)?;
     match walk(&mem) {
-        Ok(w) => Ok(w.files.into_iter().map(|f| (f.path, f.sig)).collect()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Stamp::new()),
+        Ok(w) => Ok(Stamp {
+            files: w.files.into_iter().map(|f| (f.path, f.sig)).collect(),
+            skipped: w.skipped.into_iter().map(|s| s.path).collect(),
+            truncated: w.truncated,
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Stamp::default()),
         Err(e) => Err(format!("{}: {e}", mem.display())),
     }
 }
 
-/// What moved between two stamps: `(changed, removed)`.
-pub fn changed_since(before: &Stamp, now: &Stamp) -> (Vec<(String, Sig)>, Vec<String>) {
-    let changed = now.iter().filter(|(p, s)| before.get(*p) != Some(s)).map(|(p, s)| (p.clone(), *s)).collect();
-    let removed = before.keys().filter(|p| !now.contains_key(*p)).cloned().collect();
-    (changed, removed)
+/// What moved since `before`: `(what to compare with next, changed, removed)`.
+/// A file this walk could not answer for is kept as it was, and neither.
+pub fn advance(before: &Stamp, mut now: Stamp) -> (Stamp, Vec<(String, Sig)>, Vec<String>) {
+    let changed = now.files.iter().filter(|(p, s)| before.files.get(*p) != Some(s)).map(|(p, s)| (p.clone(), *s)).collect();
+    let mut removed = Vec::new();
+    for (p, s) in &before.files {
+        if now.files.contains_key(p) {
+            continue;
+        }
+        if now.knows(p) {
+            removed.push(p.clone());
+        } else {
+            now.files.insert(p.clone(), *s);
+        }
+    }
+    (now, changed, removed)
 }
 
 /// The workspaces under `root` that have a memory: one `readdir`, and a ULID
@@ -497,6 +597,12 @@ const FIXED: &[&str] = &[
     "core.attributesFile=/dev/null",
     "core.excludesFile=/dev/null",
     "core.autocrlf=false",
+    // A name as the folder spells it, and no mode but a plain file's.
+    "core.precomposeUnicode=false",
+    "core.fileMode=false",
+    // Whatever git tidies, it tidies before it answers.
+    "gc.autoDetach=false",
+    "maintenance.autoDetach=false",
     "core.quotePath=false",
     "core.bare=false",
     "log.showSignature=false",
@@ -508,6 +614,10 @@ const FIXED: &[&str] = &[
     "merge.conflictStyle=merge",
     "protocol.allow=never",
 ];
+
+/// `info/attributes`, which outranks every `.gitattributes` of the folder: no
+/// conversion, no filter, no driver, no encoding. What is stored is the bytes.
+const ATTRIBUTES: &str = "* -text -filter -ident !eol !working-tree-encoding !merge !diff\n";
 
 /// The edits a memory's git gets over the environment it would inherit: every
 /// `GIT_*` variable goes (`GIT_DIR`, `GIT_INDEX_FILE`, `GIT_AUTHOR_NAME`,
@@ -525,6 +635,8 @@ fn env_edits(inherited: impl Iterator<Item = String>) -> Vec<(String, Option<&'s
         ("GIT_ATTR_NOSYSTEM", "1"),
         ("GIT_ALLOW_PROTOCOL", "none"),
         ("GIT_NO_LAZY_FETCH", "1"),
+        ("GIT_NO_REPLACE_OBJECTS", "1"),
+        ("GIT_LITERAL_PATHSPECS", "1"),
         ("GIT_TERMINAL_PROMPT", "0"),
         ("GIT_EDITOR", "true"),
         ("LC_ALL", "C"),
@@ -560,6 +672,14 @@ fn neutralized(keys: &[String]) -> Result<Vec<String>, String> {
         }
     }
     Ok(out)
+}
+
+fn answered(args: &[&str], o: Output) -> Result<Vec<u8>, String> {
+    if !o.status.success() {
+        let cmd = args.iter().find(|a| !a.starts_with('-')).unwrap_or(&"");
+        return Err(format!("git {cmd} failed: {}", String::from_utf8_lossy(&o.stderr).trim()));
+    }
+    Ok(o.stdout)
 }
 
 /// One memory's repository, opened: what its config would run is known and off.
@@ -606,13 +726,31 @@ impl Repo {
         self.command().args(args).output().map_err(|e| format!("git: {e}"))
     }
 
-    fn bytes(&self, args: &[&str]) -> Result<Vec<u8>, String> {
-        let o = self.run(args)?;
-        if !o.status.success() {
-            let cmd = args.iter().find(|a| !a.starts_with('-')).unwrap_or(&"");
-            return Err(format!("git {cmd} failed: {}", String::from_utf8_lossy(&o.stderr).trim()));
+    /// With `input` for its stdin and, when given, an index of its own.
+    fn run_in(&self, args: &[&str], input: &[u8], index: Option<&Path>) -> Result<Output, String> {
+        let mut c = self.command();
+        if let Some(i) = index {
+            c.env("GIT_INDEX_FILE", i);
         }
-        Ok(o.stdout)
+        let mut child = c.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("git: {e}"))?;
+        let mut pipe = child.stdin.take().expect("piped");
+        // Beside the read: a git that answers before it has read it all would
+        // otherwise wait for us while we wait for it.
+        let wrote = std::thread::scope(|s| {
+            let w = s.spawn(move || pipe.write_all(input));
+            let o = child.wait_with_output();
+            let _ = w.join();
+            o
+        });
+        wrote.map_err(|e| format!("git: {e}"))
+    }
+
+    fn bytes(&self, args: &[&str]) -> Result<Vec<u8>, String> {
+        answered(args, self.run(args)?)
+    }
+
+    fn feed(&self, args: &[&str], input: &[u8], index: Option<&Path>) -> Result<String, String> {
+        Ok(String::from_utf8_lossy(&answered(args, self.run_in(args, input, index)?)?).into_owned())
     }
 
     fn text(&self, args: &[&str]) -> Result<String, String> {
@@ -631,19 +769,68 @@ impl Repo {
         }
     }
 
-    /// What `add` and `status` are asked about: everything but what a commit
-    /// leaves out.
-    fn pathspecs(&self) -> Result<Vec<String>, String> {
-        let w = walk(&self.mem).map_err(|e| format!("{}: {e}", self.mem.display()))?;
-        let nested = w.skipped.iter().filter(|s| s.why.contains("repository")).map(|s| s.path.clone());
-        let large = w.files.iter().filter(|f| f.sig.size > MAX_COMMIT_BYTES).map(|f| f.path.clone());
-        Ok(std::iter::once(":/".to_string()).chain(nested.chain(large).map(|p| format!(":(top,exclude,literal){p}"))).collect())
+    /// The tree of HEAD, or the empty one before the first commit.
+    fn base(&self) -> Result<String, String> {
+        if self.has_commits() {
+            return Ok("HEAD".into());
+        }
+        Ok(self.feed(&["hash-object", "-t", "tree", "--stdin"], b"", None)?.trim().to_string())
     }
 
-    fn dirty(&self, specs: &[String]) -> Result<Vec<String>, String> {
-        let mut args = vec!["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=all", "--no-renames", "--"];
-        args.extend(specs.iter().map(String::as_str));
-        Ok(self.text(&args)?.split('\0').filter_map(|l| l.get(3..)).filter(|p| !p.is_empty()).map(String::from).collect())
+    /// Make the index HEAD plus what the memory keeps of the folder now, and
+    /// answer the paths that differ. The lock is held. Whatever else the index
+    /// held, and whatever was slipped in between the walk and the add (a link
+    /// where a file was), is put back as HEAD has it.
+    fn stage(&self) -> Result<Vec<String>, String> {
+        let w = walk(&self.mem).map_err(|e| format!("{}: {e}", self.mem.display()))?;
+        let on: HashSet<&str> = w.files.iter().map(|f| f.path.as_str()).collect();
+        let inos: HashSet<u64> = w.files.iter().map(|f| f.sig.ino).collect();
+        // One more spelling of a file that is there under another: a disk that
+        // folds case or accents finds it by the old name too.
+        let gone = |p: &str| match presence(&self.mem, p) {
+            Presence::Gone => true,
+            Presence::File { ino, links } => links == 1 && inos.contains(&ino),
+            Presence::Other => false,
+        };
+        let tracked = self.text(&["ls-files", "-z", "--cached"])?;
+        let mut out = Vec::new();
+        for p in tracked.split('\0').filter(|p| !p.is_empty() && name_kept(p) && !on.contains(p) && gone(p)) {
+            out.extend_from_slice(p.as_bytes());
+            out.push(0);
+        }
+        self.feed(&["update-index", "--force-remove", "-z", "--stdin"], &out, None)?;
+        let add: Vec<u8> = w.files.iter().flat_map(|f| f.path.bytes().chain([0])).collect();
+        self.feed(&["update-index", "--add", "--remove", "--replace", "-z", "--stdin"], &add, None)?;
+        let raw = self.text(&["diff-index", "--cached", "--raw", "-z", "--no-renames", "--abbrev=40", "--ignore-submodules=none", &self.base()?])?;
+        let (mut dirty, mut back) = (Vec::new(), Vec::new());
+        let mut fields = raw.split('\0');
+        while let (Some(meta), Some(path)) = (fields.next(), fields.next()) {
+            let m: Vec<&str> = meta.trim_start_matches(':').split(' ').collect();
+            let [old_mode, new_mode, old, _, status] = m[..] else { continue };
+            let ours = if status == "D" { name_kept(path) && gone(path) } else { new_mode.starts_with("100") && on.contains(path) };
+            if ours {
+                dirty.push(path.to_string());
+            } else {
+                back.extend_from_slice(format!("{old_mode} {old} 0\t{path}").as_bytes());
+                back.push(0);
+            }
+        }
+        if !back.is_empty() {
+            self.feed(&["update-index", "--replace", "-z", "--index-info"], &back, None)?;
+        }
+        Ok(dirty)
+    }
+
+    /// What every act that writes needs in place.
+    fn prepare(&self) -> Result<(), String> {
+        let info = self.mem.join(".git").join("info");
+        fsx::make_dir(&info).map_err(|e| format!("{}: {e}", info.display()))?;
+        let at = info.join("attributes");
+        if fs::read(&at).ok().as_deref() != Some(ATTRIBUTES.as_bytes()) {
+            fsx::write_atomic(&at, ATTRIBUTES.as_bytes(), None).map_err(|e| format!("{}: {e}", at.display()))?;
+        }
+        self.recover();
+        Ok(())
     }
 }
 
@@ -710,10 +897,7 @@ pub fn init_at(root: &Path, id: &str, name: &str) -> Result<Status, String> {
     }
     let repo = Repo::open(&mem)?;
     if !repo.has_commits() {
-        // `.git` is the engine's: what a commit must never hold.
-        let info = git.join("info");
-        fsx::make_dir(&info).map_err(|e| format!("{}: {e}", info.display()))?;
-        fsx::write_atomic(&info.join("exclude"), b".DS_Store\n.*.tmp\n", None).map_err(|e| e.to_string())?;
+        repo.prepare()?;
         for d in ["notes", "topics", FILES] {
             fsx::make_dir(&mem.join(d)).map_err(|e| format!("{d}: {e}"))?;
         }
@@ -733,7 +917,9 @@ pub fn status_at(root: &Path, id: &str) -> Result<Status, String> {
         return Ok(Status { made: false, dirty: Vec::new() });
     }
     let repo = Repo::open(&mem)?;
-    Ok(Status { made: true, dirty: repo.dirty(&repo.pathspecs()?)? })
+    let _held = hold(&wsfolder::folder_at(root, id)?)?;
+    repo.prepare()?;
+    Ok(Status { made: true, dirty: repo.stage()? })
 }
 
 // ── read ────────────────────────────────────────────────────────────────────
@@ -763,9 +949,6 @@ pub fn list_at(root: &Path, id: &str) -> Result<Listing, String> {
     let mut by: BTreeMap<String, Vec<File>> = BTreeMap::new();
     for f in w.files {
         out.bytes += f.sig.size;
-        if f.sig.size > MAX_COMMIT_BYTES {
-            out.skipped.push(Skipped { path: f.path.clone(), why: "too large for the history" });
-        }
         let top = f.path.split_once('/').map(|(t, _)| t.to_string()).unwrap_or_default();
         let title = matches!(ext_of(&f.path).as_str(), "md" | "markdown").then(|| peek_title(&mem, &f.path)).flatten();
         by.entry(top).or_default().push(File { name: name_of(&f.path), kind: kind_of(&f.path), size: f.sig.size, mtime_ms: f.sig.mtime_ms, title, path: f.path });
@@ -804,7 +987,7 @@ pub fn index_at(root: &Path, id: &str) -> Result<Option<Index>, String> {
 /// opened. The walk from check to open is closed by the handle's own identity.
 fn open_read(f: &Path, path: &str, cap: u64) -> Result<(fs::Metadata, Vec<u8>), String> {
     use std::io::Read;
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::unix::fs::OpenOptionsExt;
     let want = fs::symlink_metadata(f).map_err(|_| format!("{ERR_GONE}: {path}"))?;
     let h = fs::OpenOptions::new()
         .read(true)
@@ -888,6 +1071,7 @@ pub fn write_at(root: &Path, id: &str, path: &str, content: &str, base: &Base, k
         return Err("this workspace has no memory yet".into());
     }
     let _held = hold(&folder)?;
+    let mut was = None;
     let dst = match base {
         Base::Rev(_) | Base::Mtime(_) => {
             let f = existing(&mem, path)?;
@@ -904,6 +1088,7 @@ pub fn write_at(root: &Path, id: &str, path: &str, content: &str, base: &Base, k
             if !same {
                 return Err(format!("{ERR_STALE}: {path}"));
             }
+            was = Some(bytes);
             f
         }
         Base::None => {
@@ -915,15 +1100,47 @@ pub fn write_at(root: &Path, id: &str, path: &str, content: &str, base: &Base, k
             f
         }
     };
-    if keep_history {
+    if let Some(bytes) = was.filter(|_| keep_history) {
         let repo = Repo::open(&mem)?;
-        repo.recover();
-        commit_specs(&repo, &[format!(":(top,literal){path}")], Some(&format!("Before keeping your text: {path}")), &[])?;
+        repo.prepare()?;
+        preserve(&repo, path, &bytes, &format!("Before keeping your text: {path}"))?;
+        // What was preserved is what is about to go.
+        if open_read(&dst, path, MAX_TEXT_BYTES + 1)?.1 != bytes {
+            return Err(format!("{ERR_STALE}: {path}"));
+        }
     }
     let mode = fs::symlink_metadata(&dst).ok().map(|m| m.permissions());
     fsx::write_atomic(&dst, content.as_bytes(), mode).map_err(|e| format!("{path}: {e}"))?;
     let md = fs::symlink_metadata(&dst).map_err(|e| format!("{path}: {e}"))?;
     Ok(saved(path, content, &md))
+}
+
+/// Put `bytes` in the history as the file at `path`, and answer only when the
+/// history gives them back. A commit of that path alone, made beside the
+/// index: no ignore rule, no conversion and nothing staged has a part in it.
+fn preserve(repo: &Repo, path: &str, bytes: &[u8], message: &str) -> Result<(), String> {
+    let lost = || format!("the text on disk could not be put in the history, so nothing was replaced: {path}");
+    if bytes.len() as u64 > MAX_TEXT_BYTES {
+        return Err(lost());
+    }
+    let holds = |rev: &str| blob(repo, rev, path, MAX_TEXT_BYTES).map(|b| b.is_some_and(|(_, b)| b == bytes));
+    if holds("HEAD")? {
+        return Ok(());
+    }
+    let sha = repo.feed(&["hash-object", "-w", "--stdin"], bytes, None)?;
+    let entry = format!("100644 {} 0\t{path}\0", sha.trim());
+    let index = repo.mem.join(".git").join(format!("keep.{:016x}", fsx::random_u64()));
+    let tree = (|| {
+        repo.feed(&["read-tree", "HEAD"], b"", Some(&index))?;
+        repo.feed(&["update-index", "--add", "--replace", "-z", "--index-info"], entry.as_bytes(), Some(&index))?;
+        repo.feed(&["write-tree"], b"", Some(&index))
+    })();
+    let _ = fs::remove_file(&index);
+    let head = repo.text(&["rev-parse", "--verify", "HEAD"])?;
+    let commit = repo.feed(&["commit-tree", tree?.trim(), "-p", head.trim()], subject(message).as_bytes(), None)?;
+    repo.bytes(&["update-ref", "HEAD", commit.trim(), head.trim()])?;
+    repo.feed(&["update-index", "--add", "--replace", "-z", "--index-info"], entry.as_bytes(), None)?;
+    if holds("HEAD")? { Ok(()) } else { Err(lost()) }
 }
 
 fn saved(path: &str, content: &str, md: &fs::Metadata) -> Saved {
@@ -984,31 +1201,24 @@ fn edited(paths: &[String]) -> String {
 
 /// Commit whatever is dirty, or answer `None`. The lock is held.
 fn commit_held(repo: &Repo, message: Option<&str>) -> Result<Option<Change>, String> {
-    commit_specs(repo, &repo.pathspecs()?, message, &[])
+    commit_with(repo, message, &[])
 }
 
-fn commit_specs(repo: &Repo, specs: &[String], message: Option<&str>, live: &[String]) -> Result<Option<Change>, String> {
-    let dirty = repo.dirty(specs)?;
+/// With a trailer a line, in the body.
+fn commit_with(repo: &Repo, message: Option<&str>, trailers: &[String]) -> Result<Option<Change>, String> {
+    let dirty = repo.stage()?;
     if dirty.is_empty() {
-        return Ok(None);
-    }
-    let mut add = vec!["add", "--all", "--"];
-    add.extend(specs.iter().map(String::as_str));
-    repo.bytes(&add)?;
-    // A file removed, or put back as it was, between the status and the add.
-    if repo.has_commits() && repo.run(&["diff", "--cached", "--quiet", "--ignore-submodules=all"])?.status.success() {
         return Ok(None);
     }
     let msg = message.map(subject).filter(|m| !m.is_empty()).unwrap_or_else(|| subject(&edited(&dirty)));
     let msg = format!("--message={msg}");
-    let named: Vec<String> = live.iter().filter(|c| crate::ulid::is_valid(c)).take(LIVE_MAX).map(|c| format!("{LIVE}{c}")).collect();
-    let trailer = format!("--message={}", named.join("\n"));
+    let body = format!("--message={}", trailers.join("\n"));
     let mut args = vec!["commit", "--quiet", "--no-verify", "--cleanup=whitespace", &msg];
-    if !named.is_empty() {
-        args.push(&trailer);
+    if !trailers.is_empty() {
+        args.push(&body);
     }
     repo.bytes(&args)?;
-    Ok(head(repo)?)
+    head(repo)
 }
 
 fn head(repo: &Repo) -> Result<Option<Change>, String> {
@@ -1026,7 +1236,7 @@ pub fn commit_if_dirty_at(root: &Path, id: &str, message: Option<&str>) -> Resul
     }
     let _held = hold(&folder)?;
     let repo = Repo::open(&mem)?;
-    repo.recover();
+    repo.prepare()?;
     commit_held(&repo, message)
 }
 
@@ -1043,9 +1253,51 @@ pub fn commit_quiet_at(root: &Path, id: &str, live: impl FnOnce(i64) -> Vec<Stri
     }
     let _held = hold(&folder)?;
     let repo = Repo::open(&mem)?;
-    repo.recover();
+    repo.prepare()?;
     let last = head(&repo)?.map_or(0, |c| c.at);
-    commit_specs(&repo, &repo.pathspecs()?, None, &live(last))
+    let named: Vec<String> = live(last).iter().filter(|c| crate::ulid::is_valid(c)).take(LIVE_MAX).map(|c| format!("{LIVE}{c}")).collect();
+    commit_with(&repo, None, &named)
+}
+
+/// A fold's commit: [`commit_if_dirty_at`] with the attempt it is of in the
+/// body, so that the commit of an attempt can be found again.
+pub fn commit_fold_at(root: &Path, id: &str, subject: &str, attempt: &str) -> Result<Option<Change>, String> {
+    wsfolder::refuse_real(root)?;
+    if !crate::ulid::is_valid(attempt) {
+        return Err(format!("not a fold's attempt: {attempt:?}"));
+    }
+    let folder = wsfolder::folder_at(root, id)?;
+    let mem = folder.join(DIR);
+    if !is_made(&mem) {
+        return Ok(None);
+    }
+    let _held = hold(&folder)?;
+    let repo = Repo::open(&mem)?;
+    repo.prepare()?;
+    commit_with(&repo, Some(subject), &[format!("{ATTEMPT}{attempt}")])
+}
+
+/// The commit HEAD reaches that says it is `attempt`'s, by a line of its body
+/// and not by a match anywhere in it. The oldest, should a later one repeat it.
+pub fn fold_commit_at(root: &Path, id: &str, attempt: &str) -> Result<Option<Change>, String> {
+    if !crate::ulid::is_valid(attempt) {
+        return Err(format!("not a fold's attempt: {attempt:?}"));
+    }
+    let mem = dir_at(root, id)?;
+    if !is_made(&mem) {
+        return Ok(None);
+    }
+    let repo = Repo::open(&mem)?;
+    if !repo.has_commits() {
+        return Ok(None);
+    }
+    let line = format!("{ATTEMPT}{attempt}");
+    let out = repo.text(&["log", "-z", "--first-parent", "--fixed-strings", "--grep", &line, "--format=tformat:%H%x02%b"])?;
+    let of = |rec: &str| rec.trim_start_matches('\n').split_once('\x02').filter(|(_, b)| b.lines().any(|l| l == line)).map(|(sha, _)| sha.to_string());
+    match out.split('\0').filter_map(of).last() {
+        Some(sha) => change_of(&repo, &sha).map(Some),
+        None => Ok(None),
+    }
 }
 
 // ── history ─────────────────────────────────────────────────────────────────
@@ -1282,7 +1534,7 @@ pub fn revert_at(root: &Path, id: &str, commit: &str) -> Result<Reverted, String
     let mem = folder.join(DIR);
     let repo = Repo::open(&mem)?;
     let _held = hold(&folder)?;
-    repo.recover();
+    repo.prepare()?;
     let change = change_of(&repo, commit)?;
     if change.kind == ChangeKind::Made || !repo.run(&["rev-parse", "--verify", "--quiet", &format!("{commit}^")])?.status.success() {
         return Err("the change that made this memory cannot be undone".into());
@@ -1291,6 +1543,13 @@ pub fn revert_at(root: &Path, id: &str, commit: &str) -> Result<Reverted, String
         return Err("that change is already undone".into());
     }
     commit_held(&repo, None)?;
+    // A file the memory does not keep where the undo would put one: git takes
+    // an ignored one for its own to overwrite.
+    let tracked = repo.text(&["ls-tree", "-r", "-z", "--name-only", "HEAD"])?;
+    let tracked: HashSet<&str> = tracked.split('\0').collect();
+    if let Some(f) = change.files.iter().find(|f| !tracked.contains(f.path.as_str()) && presence(&mem, &f.path) != Presence::Gone) {
+        return Err(format!("{} is in the way: it is not a file this memory keeps", f.path));
+    }
     let o = repo.run(&["revert", "--no-edit", commit])?;
     if !o.status.success() {
         let conflicts: Vec<String> =
@@ -1529,6 +1788,7 @@ mod tests {
         // The plant is live: with nothing switched off by name, git runs it.
         s.put("notes/o.md", "o\n");
         let bare = Repo { mem: s.mem(), off: Vec::new() };
+        fs::remove_file(git.join("info/attributes")).unwrap();
         s.put("topics/o.md", "o\n");
         for d in ["notes", "topics"] {
             let _ = bare.run(&["add", "--", d]);
@@ -1629,7 +1889,7 @@ mod tests {
         let listed: Vec<_> = l.folders.iter().flat_map(|f| f.files.iter().map(|x| x.path.as_str())).collect();
         assert_eq!(listed, vec![INDEX, "topics/t.md"]);
         assert!(l.skipped.iter().any(|x| x.path == "link.md" && x.why == "not a regular file"), "{:?}", l.skipped);
-        assert_eq!(stamp_at(&s.root, &s.id).unwrap().keys().collect::<Vec<_>>(), vec![INDEX, "topics/t.md"]);
+        assert_eq!(stamp_at(&s.root, &s.id).unwrap().files.keys().collect::<Vec<_>>(), vec![INDEX, "topics/t.md"]);
         // A path with a leading dash is only a path.
         assert!(s.write("--all.md", "x\n", None).is_ok());
         assert_eq!(s.commit("dash").files.iter().filter(|f| f.path == "--all.md").count(), 1);
@@ -1814,7 +2074,9 @@ mod tests {
         // A link is in the history as a link and shown as no image.
         fs::remove_file(s.mem().join("files/r.png")).unwrap();
         symlink("/etc/hosts", s.mem().join("files/r.png")).unwrap();
-        let c4 = s.commit("link");
+        s.git(&["update-index", "--add", "files/r.png"]);
+        s.git(&["commit", "--quiet", "--message=link"]);
+        let c4 = s.log().remove(0);
         let Some((_, FileDiff::Image { after, .. })) = show(&c4, Some("files/r.png")).file else { panic!() };
         assert!(after.is_none());
         // A long patch is cut at a line and says so.
@@ -1897,11 +2159,12 @@ mod tests {
         fs::write(&p, "longer than it was, and by a lot more than one byte or two").unwrap();
         fs::File::options().write(true).open(&p).unwrap().set_modified(t).unwrap();
         let b = at();
-        assert_eq!(changed_since(&a, &b).0.iter().map(|c| c.0.as_str()).collect::<Vec<_>>(), vec![INDEX], "same mtime, new size");
+        assert_eq!(advance(&a, b.clone()).1.iter().map(|c| c.0.as_str()).collect::<Vec<_>>(), vec![INDEX], "same mtime, new size");
         s.put("topics/t.md", "t\n");
         fs::remove_file(&p).unwrap();
         let c = at();
-        let (ch, rm) = changed_since(&b, &c);
+        let (kept, ch, rm) = advance(&b, c.clone());
+        assert_eq!(kept, c);
         assert_eq!((ch.len(), ch[0].0.as_str(), rm), (1, "topics/t.md", vec![INDEX.to_string()]));
         assert_eq!(ch[0].1.mtime_ms, s.read("topics/t.md").unwrap().mtime_ms, "the mtime a read answers with");
         assert_eq!(ids_at(&s.root), vec![s.id.clone()]);
@@ -1939,7 +2202,7 @@ mod tests {
             let before = stamp_at(&s.root, &s.id).unwrap();
             same_mtime(&s, INDEX, other);
             let now = stamp_at(&s.root, &s.id).unwrap();
-            assert_eq!(changed_since(&before, &now).0.iter().map(|c| c.0.as_str()).collect::<Vec<_>>(), vec![INDEX], "{other:?}");
+            assert_eq!(advance(&before, now).1.iter().map(|c| c.0.as_str()).collect::<Vec<_>>(), vec![INDEX], "{other:?}");
             assert_ne!(seen_at(&s.root, &s.id, INDEX).unwrap().2, Some(d.rev.clone()));
             let e = write_at(&s.root, &s.id, INDEX, "# Mine\n", &Base::Rev(d.rev), false).unwrap_err();
             assert!(e.starts_with(ERR_STALE), "{e}");
@@ -1959,6 +2222,221 @@ mod tests {
         s.put("big.md", &"x".repeat(MAX_TEXT_BYTES as usize + 1));
         assert_eq!(seen_at(&s.root, &s.id, "big.md").unwrap().2, None);
         assert!(write_at(&s.root, &s.id, "big.md", "x", &Base::Rev(rev_of(b"x")), false).is_err());
+    }
+
+    fn committed(s: &Scratch) -> Vec<String> {
+        s.commit("all").files.iter().map(|f| f.path.clone()).collect()
+    }
+    fn listed(s: &Scratch) -> Vec<String> {
+        list_at(&s.root, &s.id).unwrap().folders.into_iter().flat_map(|f| f.files).map(|f| f.path).collect()
+    }
+    fn watched(s: &Scratch) -> Vec<String> {
+        stamp_at(&s.root, &s.id).unwrap().files.into_keys().collect()
+    }
+    fn skipped(s: &Scratch) -> Vec<String> {
+        list_at(&s.root, &s.id).unwrap().skipped.into_iter().map(|x| x.path).collect()
+    }
+
+    /// Keep mine: the replaced bytes are in the history exactly, whatever the
+    /// folder's ignore rules, its attributes or the index say, and alone.
+    #[test]
+    fn keep_mine_puts_the_very_bytes_it_replaces_in_the_history_and_nothing_else() {
+        let s = Scratch::made("keep");
+        s.put(".gitignore", "topics/draft.md\n");
+        s.put(".gitattributes", "*.md text eol=lf ident working-tree-encoding=UTF-16\n");
+        s.put("topics/other.md", "staged\n");
+        s.git(&["-c", "core.attributesFile=/dev/null", "update-index", "--add", "--", "topics/other.md"]);
+        let keep = |path: &str, text: &str| {
+            let d = s.read(path).unwrap();
+            write_at(&s.root, &s.id, path, text, &Base::Rev(d.rev), true)
+        };
+        for (path, theirs) in [("topics/draft.md", "theirs\n"), (INDEX, "a\r\nb $Id$\r\n"), ("notes/n.md", "first\n"), ("notes/n.md", "")] {
+            s.put(path, theirs);
+            let n = s.log().len();
+            keep(path, "mine\n").unwrap();
+            let top = s.log().remove(0);
+            assert_eq!(s.log().len(), n + 1, "{path}");
+            assert_eq!(top.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), vec![path], "that file and no other");
+            assert_eq!(read_commit_at(&s.root, &s.id, path, &top.commit).unwrap().content, theirs);
+            assert_eq!(s.text(path), "mine\n");
+        }
+        // What the history already holds is not committed again.
+        assert!(committed(&s).contains(&"topics/other.md".to_string()));
+        let n = s.log().len();
+        keep("topics/draft.md", "mine again\n").unwrap();
+        assert_eq!(s.log().len(), n);
+        // A folder where the history has a file.
+        s.put("topics/d", "a file\n");
+        s.put("topics/d.md", "x\n");
+        s.commit("d");
+        fs::remove_file(s.mem().join("topics/d")).unwrap();
+        s.put("topics/d/in.md", "theirs\n");
+        keep("topics/d/in.md", "mine\n").unwrap();
+        assert_eq!(read_commit_at(&s.root, &s.id, "topics/d/in.md", &s.log()[0].commit).unwrap().content, "theirs\n");
+        // Nothing can be put in the history: nothing is replaced.
+        s.put(INDEX, "theirs\n");
+        let lock = s.mem().join(".git/refs/heads/main.lock");
+        fs::write(&lock, "").unwrap();
+        assert!(keep(INDEX, "mine\n").is_err());
+        assert_eq!(s.text(INDEX), "theirs\n");
+        fs::remove_file(&lock).unwrap();
+        assert!(fs::read_dir(s.mem().join(".git")).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with("keep.")));
+    }
+
+    /// The list, the watch and the history hold the same files, whatever they
+    /// are called and whatever the folder says to ignore.
+    #[test]
+    fn the_list_the_watch_and_the_history_hold_the_same_files() {
+        let s = Scratch::made("one-set");
+        s.put(".secret.md", "x");
+        s.put("topics/.hidden/x.md", "x");
+        s.put(".gitignore", "*.txt\n");
+        s.put("topics/ignored.txt", "x");
+        symlink("/etc/hosts", s.mem().join("topics/l.md")).unwrap();
+        symlink(s.base.clone(), s.mem().join("away")).unwrap();
+        s.put("topics/a\nb.md", "x");
+        s.put("topics/c\\d.md", "x");
+        s.put("topics/e\u{301}.md", "x");
+        s.put("--all", "x");
+        s.put(":(glob)*.md", "x");
+        s.put("topics/clone/in.md", "x");
+        fs::create_dir_all(s.mem().join("topics/clone/.git")).unwrap();
+        s.put("a/b/c/d/e/f/g/seven.md", "x");
+        s.put("a/b/c/d/e/f/g/h/deep.md", "x");
+        fs::File::create(s.mem().join("files/big.bin")).unwrap().set_len(MAX_COMMIT_BYTES + 1).unwrap();
+        // Staged by hand: in none of them either.
+        s.git(&["update-index", "--add", ".secret.md", "topics/l.md"]);
+        let mut want = vec!["--all", ":(glob)*.md", "a/b/c/d/e/f/g/seven.md", "topics/e\u{301}.md", "topics/ignored.txt"];
+        want.sort();
+        assert_eq!(committed(&s), want);
+        want.push(INDEX);
+        want.sort();
+        let sorted = |mut v: Vec<String>| {
+            v.sort();
+            v
+        };
+        assert_eq!((sorted(listed(&s)), sorted(watched(&s))), (want.iter().map(|x| x.to_string()).collect(), want.iter().map(|x| x.to_string()).collect()));
+        assert_eq!(skipped(&s), vec!["a/b/c/d/e/f/g/h", "away", "files/big.bin", "topics/a\nb.md", "topics/c\\d.md", "topics/clone", "topics/l.md"]);
+        assert_eq!(status_at(&s.root, &s.id).unwrap().dirty, Vec::<String>::new(), "and nothing stays dirty for good");
+        assert_eq!(log_at(&s.root, &s.id, Some(":(glob)*.md"), None, None).unwrap().changes.len(), 1);
+        for p in &want {
+            s.read(p).unwrap();
+        }
+    }
+
+    /// What the history holds and the memory no longer keeps is not removed
+    /// from it; what is gone is, by any spelling.
+    #[test]
+    fn only_a_file_that_is_gone_is_removed_from_the_history() {
+        let s = Scratch::made("removals");
+        for p in ["topics/nested/t.md", "notes/grew.md", "notes/linked.md", "notes/went.md", "notes/dir", "Case.md", "x/y/z.md"] {
+            s.put(p, p);
+        }
+        s.commit("all");
+        let before = stamp_at(&s.root, &s.id).unwrap();
+        fs::create_dir_all(s.mem().join("topics/nested/.git")).unwrap();
+        fs::File::create(s.mem().join("notes/grew.md")).unwrap().set_len(MAX_COMMIT_BYTES + 1).unwrap();
+        fs::remove_file(s.mem().join("notes/linked.md")).unwrap();
+        symlink("/etc/hosts", s.mem().join("notes/linked.md")).unwrap();
+        fs::remove_file(s.mem().join("notes/went.md")).unwrap();
+        // A file became a folder, a folder a file, and a name changed its case.
+        fs::remove_file(s.mem().join("notes/dir")).unwrap();
+        s.put("notes/dir/in.md", "x");
+        fs::remove_dir_all(s.mem().join("x")).unwrap();
+        s.put("x", "x");
+        fs::rename(s.mem().join("Case.md"), s.mem().join("case.md")).unwrap();
+        let (now, _, removed) = advance(&before, stamp_at(&s.root, &s.id).unwrap());
+        assert_eq!(removed, vec!["Case.md", "notes/dir", "notes/went.md", "x/y/z.md"]);
+        let mut c: Vec<(String, String)> = s.commit("moved").files.into_iter().map(|f| (f.status, f.path)).collect();
+        c.sort();
+        let want = [("A", "case.md"), ("A", "notes/dir/in.md"), ("A", "x"), ("D", "Case.md"), ("D", "notes/dir"), ("D", "notes/went.md"), ("D", "x/y/z.md")];
+        assert_eq!(c, want.map(|(a, b)| (a.to_string(), b.to_string())));
+        assert_eq!(status_at(&s.root, &s.id).unwrap().dirty, Vec::<String>::new());
+        // Really gone now, they are removed: they were kept until it was known.
+        fs::remove_dir_all(s.mem().join("topics/nested")).unwrap();
+        fs::remove_file(s.mem().join("notes/grew.md")).unwrap();
+        fs::remove_file(s.mem().join("notes/linked.md")).unwrap();
+        assert_eq!(advance(&now, stamp_at(&s.root, &s.id).unwrap()).2, vec!["notes/grew.md", "notes/linked.md", "topics/nested/t.md"]);
+        assert_eq!(s.commit("gone").files.iter().map(|f| f.status.as_str()).collect::<Vec<_>>(), vec!["D", "D", "D"]);
+    }
+
+    /// At the limit: what the walk did not reach is in none of the three, is
+    /// not taken for removed, and nothing over the cap slips in behind it.
+    #[test]
+    fn a_walk_cut_at_the_limit_is_incomplete_and_never_removes() {
+        let s = Scratch::made("limit");
+        for d in ["a", "b", "c"] {
+            for i in 0..MAX_ENTRIES / 2 {
+                s.put(&format!("{d}/{i}.md"), "x");
+            }
+            fs::File::create(s.mem().join(d).join("zbig.bin")).unwrap().set_len(MAX_COMMIT_BYTES + 1).unwrap();
+        }
+        assert!(list_at(&s.root, &s.id).unwrap().truncated);
+        let before = stamp_at(&s.root, &s.id).unwrap();
+        for i in 0..50 {
+            s.put(&format!("a/0new{i}.md"), "x");
+        }
+        let (kept, changed, removed) = advance(&before, stamp_at(&s.root, &s.id).unwrap());
+        assert_eq!((changed.len(), removed), (50, vec![]), "a file past the limit is not a removed one");
+        let c = committed(&s);
+        assert!(!c.iter().any(|p| p.contains("zbig")), "a file over the cap was committed");
+        let (mut l, w) = (listed(&s), watched(&s));
+        l.sort();
+        assert_eq!(l, w);
+        l.retain(|p| p != INDEX);
+        assert_eq!(c, l);
+        // More arrive before them, and what is pushed past the limit stays in
+        // the history; one that is gone past it goes from it.
+        for i in 0..50 {
+            s.put(&format!("a/1new{i}.md"), "x");
+        }
+        let last = c.iter().filter(|p| p.starts_with("b/")).next_back().unwrap().clone();
+        fs::remove_file(s.mem().join(&last)).unwrap();
+        let d = s.commit("more");
+        assert_eq!(d.files.iter().filter(|f| f.status == "D").map(|f| f.path.as_str()).collect::<Vec<_>>(), vec![last.as_str()]);
+        // Room again: the walk is whole, and what it does not see is gone.
+        for d in ["a", "c"] {
+            fs::remove_dir_all(s.mem().join(d)).unwrap();
+        }
+        let whole = stamp_at(&s.root, &s.id).unwrap();
+        assert!(!whole.truncated);
+        let removed = advance(&kept, whole).2;
+        assert!(removed.iter().all(|p| p.starts_with("a/") || *p == last) && removed.contains(&last), "{}", removed.len());
+    }
+
+    #[test]
+    fn an_undo_never_writes_over_a_file_the_memory_does_not_keep() {
+        let s = Scratch::made("in-the-way");
+        s.put("notes/n.md", "note\n");
+        s.commit("n");
+        fs::remove_file(s.mem().join("notes/n.md")).unwrap();
+        let gone = s.commit("gone");
+        s.put(".gitignore", "notes/\n");
+        fs::File::create(s.mem().join("notes/n.md")).unwrap().set_len(MAX_COMMIT_BYTES + 1).unwrap();
+        assert!(s.revert(&gone).unwrap_err().contains("in the way"));
+        assert_eq!(fs::metadata(s.mem().join("notes/n.md")).unwrap().len(), MAX_COMMIT_BYTES + 1);
+    }
+
+    /// A fold's commit is found by its attempt, and by nothing that only
+    /// mentions it.
+    #[test]
+    fn a_folds_commit_is_found_by_its_attempt() {
+        let s = Scratch::made("attempt");
+        let (a, b) = (crate::ulid::new(), crate::ulid::new());
+        let find = |x: &str| fold_commit_at(&s.root, &s.id, x).unwrap();
+        s.put("topics/t.md", "0\n");
+        s.commit(&format!("quotes Fold-attempt: {a}"));
+        assert_eq!(find(&a), None);
+        assert_eq!(commit_fold_at(&s.root, &s.id, "fold: A", &a).unwrap(), None, "clean");
+        s.put("topics/t.md", "1\n");
+        let c = commit_fold_at(&s.root, &s.id, "fold: A", &a).unwrap().unwrap();
+        assert_eq!((c.subject.as_str(), c.kind, find(&a).map(|x| x.commit)), ("fold: A", ChangeKind::Fold, Some(c.commit.clone())));
+        s.put("topics/t.md", "2\n");
+        s.commit("later");
+        s.revert(&s.log()[0].clone()).unwrap();
+        assert_eq!(find(&a).unwrap().commit, c.commit);
+        assert_eq!(find(&b), None);
+        assert!(fold_commit_at(&s.root, &s.id, ".*").is_err() && commit_fold_at(&s.root, &s.id, "x", "a\nb").is_err());
     }
 
     /// The poll's cost, measured: `cargo test -p worktrees-core --release

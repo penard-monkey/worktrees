@@ -343,16 +343,16 @@ fn tick_in(
                 w.seen.insert(id.clone(), Seen { stamp: at, moved: Some(now), live: BTreeMap::new() });
                 continue;
             }
-            Some(s) if s.stamp != at => {
-                let (changed, removed) = store::changed_since(&s.stamp, &at);
-                let changed = changed.into_iter().map(|(path, sig)| rev(id, &path, sig)).collect();
-                events.push(MemoryChanged { id: id.clone(), changed, removed });
-                s.stamp = at;
-                s.moved = Some(now);
-                s.live.extend(through);
-            }
             Some(s) => {
-                if held(id) {
+                let (at, changed, removed) = store::advance(&s.stamp, at);
+                s.stamp = at;
+                let moved = !changed.is_empty() || !removed.is_empty();
+                let changed = changed.into_iter().map(|(path, sig)| rev(id, &path, sig)).collect();
+                if moved {
+                    events.push(MemoryChanged { id: id.clone(), changed, removed });
+                    s.moved = Some(now);
+                    s.live.extend(through);
+                } else if held(id) {
                     // The whole minute is still owed once it is let go.
                     s.moved = Some(now);
                 } else if s.moved.is_some_and(|t| now.saturating_duration_since(t) >= QUIET) {
@@ -456,7 +456,7 @@ mod tests {
     }
 
     fn stamp(files: &[(&str, u64)]) -> Stamp {
-        files.iter().map(|(p, m)| (p.to_string(), Sig { mtime_ms: *m, size: 1, ..Sig::default() })).collect()
+        Stamp::of(files.iter().map(|(p, m)| (p.to_string(), Sig { mtime_ms: *m, size: 1, ..Sig::default() })))
     }
 
     /// The rows over one memory, as a client reads them.
@@ -640,7 +640,7 @@ mod tests {
         let t = Instant::now();
         let mut w = MemoryWatch::default();
         tick_in(&ids, &mut w, t, &|_| false, &|_| Ok(stamp(&[("x.md", 1)])), &plain);
-        tick_in(&[], &mut w, t, &|_| false, &|_| Ok(Stamp::new()), &plain);
+        tick_in(&[], &mut w, t, &|_| false, &|_| Ok(Stamp::default()), &plain);
         assert_eq!(tick_in(&ids, &mut w, t, &|_| false, &|_| Ok(stamp(&[("x.md", 9)])), &plain), (vec![], vec![]));
     }
 
