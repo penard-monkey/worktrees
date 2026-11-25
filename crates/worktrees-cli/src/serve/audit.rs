@@ -2153,6 +2153,9 @@ impl ConnAudit {
             // Free text into a prompt's field: like a line, its length and
             // hash and never the text — and which choice, of which prompt.
             "agent_answer_text" | "idea_answer_text" | "workspace_answer_text" => {
+                if let Some(Value::String(c)) = arg(args, "conv") {
+                    detail.insert("conv".into(), json!(ident(c)));
+                }
                 if let Some(Value::String(t)) = arg(args, "text") {
                     detail.insert("bytes".into(), json!(t.len()));
                     detail.insert("sha256".into(), json!(sha256_hex(t.as_bytes())));
@@ -2183,6 +2186,9 @@ impl ConnAudit {
             },
             // A multi-select's boxes: which, to which prompt.
             "agent_answer_many" | "idea_answer_many" | "workspace_answer_many" => {
+                if let Some(Value::String(c)) = arg(args, "conv") {
+                    detail.insert("conv".into(), json!(ident(c)));
+                }
                 if let Some(Value::Array(cs)) = arg(args, "choices") {
                     detail.insert("choices".into(), json!(cs.iter().filter_map(Value::as_u64).take(64).collect::<Vec<_>>()));
                 }
@@ -2193,6 +2199,9 @@ impl ConnAudit {
             // An answer (S7, §9.2): which of the prompt's choices, to which
             // prompt — the fingerprint is a hash of what the device saw.
             "agent_answer" | "idea_answer" | "workspace_answer" => {
+                if let Some(Value::String(c)) = arg(args, "conv") {
+                    detail.insert("conv".into(), json!(ident(c)));
+                }
                 if let Some(c) = arg(args, "choice").and_then(Value::as_u64) {
                     detail.insert("choice".into(), json!(c));
                 }
@@ -4184,7 +4193,7 @@ mod tests {
         assert_eq!(sent.len(), 6, "{sent:#?}");
         assert_eq!((&sent[0]["detail"]["bytes"], &sent[0]["detail"]["sha256"], &sent[0]["detail"]["conv"]), (&json!(text.len()), &json!(sha256_hex(text.as_bytes())), &json!(c0.id)));
         let answered = g.records("call", "workspace_answer_text");
-        assert_eq!((&answered[0]["detail"]["bytes"], &answered[0]["detail"]["sha256"]), (&json!(11), &json!(sha256_hex(b"SECRET-WS-7"))));
+        assert_eq!((&answered[0]["detail"]["bytes"], &answered[0]["detail"]["sha256"], &answered[0]["detail"]["conv"]), (&json!(11), &json!(sha256_hex(b"SECRET-WS-7")), &json!(c0.id)));
         for read in ["workspace_turns", "workspace_prompt", "workspace_chats"] {
             assert!(g.records("call", read).is_empty(), "{read} is a read");
         }
