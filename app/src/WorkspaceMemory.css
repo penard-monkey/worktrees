@@ -77,6 +77,12 @@
 .wsm-last { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2); padding: 6px var(--s3); border-bottom: 1px solid var(--line); border-left: 3px solid var(--done); color: var(--txt-hi); font-size: var(--fs-label); }
 .wsm-last-w { flex: 1 1 14rem; min-width: 0; overflow-wrap: anywhere; }
 .wsm-excerpt { max-height: max(260px, calc(100vh - 290px)); overflow: hidden; }
+/* A card in a page: its own name is over it, so the index's first heading is not
+   drawn, and the rest are a card's size. */
+.wsm-excerpt .md { padding: var(--s3) var(--s4); font-size: var(--fs-label); }
+.wsm-excerpt .md > .md-h1:first-child { display: none; }
+.wsm-excerpt .md :is(.md-h1, .md-h2) { font-size: 1.1em; border-bottom: 0; padding-bottom: 0; }
+.wsm-excerpt .md :is(.md-h3, .md-h4, .md-h5, .md-h6) { font-size: 1em; }
 .wsm-excerpt.cut { mask-image: linear-gradient(to bottom, #000 calc(100% - 56px), transparent); -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 56px), transparent); }
 .wsm-long { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; padding: var(--s1) var(--s4); border-bottom: 1px solid var(--line); border-left: 3px solid var(--warn); background: var(--bg-panel); color: var(--txt-hi); font-size: var(--fs-label); }
 .wsm-long > span { flex: 1 1 12rem; min-width: 0; }

@@ -46,7 +46,8 @@ async function overview(page, tag, eng) {
   ok(await until(page, () => !!document.querySelector("[data-testid=ws-doc-memory] [data-testid=memory-fresh]")) && !(await page.locator("[data-testid=ws-doc-memory]").first().evaluate((e) => e.classList.contains("none"))), `${tag} the Memory chip has something behind it, and the purple dot: it changed since you looked`);
   await name(page);
   await page.waitForSelector("[data-testid=memory-excerpt]");
-  ok((await page.locator("[data-testid=memory-excerpt] .md-h1").innerText()) === "Memory: Everything" && /MEMORY\.md · [\d.]+ (B|KB) · 5 files/.test(await page.locator("[data-testid=ws-ov-card-memory] .wsf-card-side").innerText()), `${tag} the Overview has the index as it reads, its size and the file count`);
+  ok(await page.evaluate(() => { const e = document.querySelector("[data-testid=memory-excerpt]"); const h1 = e.querySelector(".md-h1"), h2 = e.querySelector(".md-h2"), p = e.querySelector("p"); const px = (x) => parseFloat(getComputedStyle(x).fontSize); return h1.getBoundingClientRect().height === 0 && px(h2) <= px(p) * 1.15; }), `${tag} its headings are a card's, and its own title is not drawn twice`);
+  ok(/What this workspace is for/.test(await page.locator("[data-testid=memory-excerpt]").innerText()) && /MEMORY\.md · [\d.]+ (B|KB) · 5 files/.test(await page.locator("[data-testid=ws-ov-card-memory] .wsf-card-side").innerText()), `${tag} the Overview has the index as it reads, its size and the file count`);
   ok(/Edited by hand 4h ago/.test(await page.locator("[data-testid=memory-last]").innerText()) && /4 files/.test(await page.locator("[data-testid=memory-last]").innerText()), `${tag} what last changed it, and how much`);
   ok(await page.evaluate(() => { const e = document.querySelector("[data-testid=memory-excerpt]"); return e.scrollTop === 0 && getComputedStyle(e).overflowY === "hidden"; }), `${tag} never in a scroller of its own`);
   // A long one is cut, and says where the rest is.
