@@ -995,6 +995,37 @@ pub fn commit_quiet_at(root: &Path, id: &str, live: impl FnOnce(i64) -> Vec<Stri
     commit_specs(&repo, &repo.pathspecs()?, None, &live(last))
 }
 
+// TEMP-SHIM (the memory lane's own come next)
+pub fn commit_fold_at(root: &Path, id: &str, subj: &str, attempt: &str) -> Result<Option<Change>, String> {
+    wsfolder::refuse_real(root)?;
+    let folder = wsfolder::folder_at(root, id)?;
+    let mem = folder.join(DIR);
+    if !is_made(&mem) {
+        return Ok(None);
+    }
+    let _held = hold(&folder)?;
+    let repo = Repo::open(&mem)?;
+    if repo.dirty(&repo.pathspecs()?)?.is_empty() {
+        return Ok(None);
+    }
+    let specs = repo.pathspecs()?;
+    let mut add = vec!["add", "--all", "--"];
+    add.extend(specs.iter().map(String::as_str));
+    repo.bytes(&add)?;
+    repo.bytes(&["commit", "--quiet", "--no-verify", "--cleanup=whitespace", &format!("--message={}", subject(subj)), &format!("--message=Fold-attempt: {attempt}")])?;
+    head(&repo)
+}
+pub fn fold_commit_at(root: &Path, id: &str, attempt: &str) -> Result<Option<Change>, String> {
+    let mem = dir_at(root, id)?;
+    if !is_made(&mem) {
+        return Ok(None);
+    }
+    let repo = Repo::open(&mem)?;
+    let sha = repo.text(&["log", "--first-parent", "--fixed-strings", &format!("--grep=Fold-attempt: {attempt}"), "--max-count=1", "--format=%H"])?;
+    let sha = sha.trim().to_string();
+    if sha.is_empty() { Ok(None) } else { change_of(&repo, &sha).map(Some) }
+}
+
 // ── history ─────────────────────────────────────────────────────────────────
 
 pub fn is_sha(s: &str) -> bool {
