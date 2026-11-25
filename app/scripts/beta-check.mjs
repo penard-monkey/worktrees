@@ -167,7 +167,7 @@ ok(/<WorkspaceOverview[\s\S]{0,200}?ideasOn=\{ideasOn\}\s*chatsOn=\{wsChatsOn\}/
 // Chats are workspace chats' alone, wherever they show.
 ok(/const wsChats = useWsChats\(wsChatsOn && !!wsList,/.test(code) && /if \(!on\) return;\s*for \(const id of key/.test(read("../src/useWsChats.ts")), "workspace_chats is asked for, and workspaces:sessions heard, only with workspace chats on");
 ok(/\{wsChatsOn && \(\s*<NavChats/.test(code) && (code.match(/<NavChats\b/g) ?? []).length === 1, "a card's Chats group is drawn only with it on");
-ok(/const wsMiddle = !wsShown \|\| !wsChatsOn \? null/.test(code) && (code.match(/<WorkspaceChatColumn\b/g) ?? []).length === 1 && /newChat=\{wsShown && wsChatsOn \?/.test(code), "…and so are the middle column and New chat");
+ok(/const wsMiddle = !wsShown \|\| !wsChatsOn \? null/.test(code) && (code.match(/<WorkspaceChatColumn\b/g) ?? []).length === 1 && /newChat=\{wsShown && wsChatsOn && /.test(code), "…and so are the middle column and New chat");
 ok(/waits=\{wsChatsOn && chatWaits\}/.test(code) && /\.\.\.\(wsChatsOn \? wsChats\.rows\(w\.id\) : \[\]\)\.map/.test(code), "…and the switch's dot and ⌘K's chats");
 // A document opens in the view's tabs. The pane may stay mounted behind the
 // gate (a text that could not be saved waits in it), so what is held is that it
