@@ -1397,7 +1397,22 @@ pub fn read_place_image(ctx: &Ctx, repo: String, slug: String, path: String, max
         Some(cl) if unreadable(ctx, cl, canon).is_some() => Err(format!("not readable from this device: {path}")),
         _ => Ok(()),
     };
-    let (read, unchanged) = worktrees_core::safepath::open_place_image(&root, slug == "(main)", &path, cap, etag.as_deref(), &allow)?;
+    place_image_at(&root, slug == "(main)", &path, cap, etag.as_deref(), &allow)
+}
+
+/// [`read_place_image`] past the place: the image at `path` under the place's
+/// `root`, for a caller whose question about the resolved file is `allow`,
+/// asked before the file is opened. The one body behind the chat's row and a
+/// guest's `shared_image` (serve's `shareimage`), so both keep one rule.
+pub fn place_image_at(
+    root: &Path,
+    is_main: bool,
+    path: &str,
+    cap: u64,
+    etag: Option<&str>,
+    allow: &dyn Fn(&Path) -> Result<(), String>,
+) -> Result<PlaceImage, String> {
+    let (read, unchanged) = worktrees_core::safepath::open_place_image(root, is_main, path, cap, etag, allow)?;
     let etag = format!("{}-{}", read.mtime_ms, read.on_disk);
     let size = if unchanged { read.on_disk.min(cap) } else { read.bytes.len() as u64 };
     Ok(PlaceImage { b64: b64_encode(&read.bytes), size, truncated: read.truncated, mtime: read.mtime_ms, mime: read.mime, etag, unchanged })

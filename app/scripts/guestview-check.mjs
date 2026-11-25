@@ -87,6 +87,7 @@ function graph(roots) {
   const code = (f) => read(f).replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
   const naming = [...g.keys()].filter((f) => FORBIDDEN_ROWS.test(code(f))).map((f) => `${path.relative(SRC.dir, f)} (${code(f).match(FORBIDDEN_ROWS)[1]})`);
   check(naming.length === 0, `no module in the guest views' graph names a row that drives an agent${naming.length ? `: ${naming.join(", ")}` : ""}`);
+  check(names.includes("GuestImage.tsx") && names.includes("ImagePicture.tsx") && names.includes("imagecache.ts") && !names.includes("ImageView.tsx"), "the guest's pictures are drawn by the chat's own drawing and cache, without the module that asks the engine door");
   const s = read(SRC.session);
   const drawn = ["<Composer", "stopTurn", "<PromptCard", "SlashMenu", "sendDraft", "sendAnswer"].filter((w) => s.includes(w));
   check(drawn.length === 0, `the session view draws no composer, Stop, prompt card or slash menu${drawn.length ? `: ${drawn.join(", ")}` : ""}`);
@@ -108,6 +109,10 @@ const seqs = (ts) => ts.map((t) => `${t.seq}:${t.user}`);
   expect("the first page is the newest, oldest first", seqs(R.mergeNewest([], [T(9), T(8)])), ["8:u8", "9:u9"]);
   check(R.leavesGap([T(0), T(1)], [T(9), T(8)]) && !R.leavesGap([T(0), T(1)], [T(3), T(2)]) && !R.leavesGap([], [T(9)]), "a poll whose page does not reach what is held is a gap, and stands alone");
   expect("an older page goes before, never over, what is held", seqs(R.mergeOlder([T(5), T(6)], [T(5, "dup"), T(4), T(3)])), ["3:u3", "4:u4", "5:u5", "6:u6"]);
+  const keys = (ts) => R.turnKeys(ts).map(([k]) => k);
+  const some = [T(5), T(6)];
+  expect("a turn's key is its own: Earlier turns shifts none (its pictures stay mounted)", keys(R.mergeOlder(some, [T(4), T(3)])).slice(2), keys(some));
+  check(new Set(keys([T(7), T(7), T(8)])).size === 3, "turns sharing a seq have keys of their own");
   // Two turns can share one index seq (history_turns of one span): both stay.
   const twin = [{ ...T(7), user: "a" }, { ...T(7), user: "b" }];
   expect("turns sharing a seq are kept together", seqs(R.mergeNewest([T(6)], [...twin].reverse())), ["6:u6", "7:a", "7:b"]);

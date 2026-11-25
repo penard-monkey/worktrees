@@ -21,15 +21,20 @@
 //
 // A live permission prompt is the owner's alone (D8): a guest sees "waiting
 // for David" where an unanswered question or plan sits in the transcript.
+// Pictures: the images in the agent's text, and a Read of one inside the place,
+// are asked for over the same connection (`shared_image`, GuestImage.tsx).
 // David's host offline: the last page stays, in memory only (§3.4, §6).
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Notice, Step } from "./chat";
 import { chatLinkAction } from "./chatlink";
 import { closeShare, guestLinkOf, joinShare, useGuests, type GuestHostView, type GuestShare } from "./guest";
-import { leavesGap, mergeNewest, mergeOlder, piecesOf, removedWords, standing, type SharedPage, type SharedTurn } from "./guestview";
+import { SharedThumb, sharedImageNode, type SharedAt } from "./GuestImage";
+import { readImagePath } from "./imgsrc";
+import { leavesGap, mergeNewest, mergeOlder, piecesOf, removedWords, standing, turnKeys, type SharedPage, type SharedTurn } from "./guestview";
 import type { GuestLink } from "./guestdoor";
 import { Markdown } from "./markdown";
+import { BeforeCommit, useStickToBottom } from "./stickToBottom";
 import { ThreadPanel } from "./ThreadPanel";
 import type { ThreadAccess, ThreadEntry, ThreadPage } from "./thread";
 import "./ChatPane.css";
@@ -128,7 +133,7 @@ function noticeWords(n: Notice): string {
   }
 }
 
-function Call(props: { link: GuestLink | undefined; share: string; binding: number | undefined; name: string; call_id?: string; summary?: string; failed?: boolean; detail?: boolean }) {
+function Call(props: { link: GuestLink | undefined; share: string; binding: number | undefined; name: string; call_id?: string; summary?: string; failed?: boolean; detail?: boolean; at: SharedAt; turn: number }) {
   const [open, setOpen] = useState(false);
   const [read, setRead] = useState<{ text?: string; cut?: boolean; err?: string } | null>(null);
   const fetches = !!props.detail && !!props.call_id;
@@ -154,6 +159,7 @@ function Call(props: { link: GuestLink | undefined; share: string; binding: numb
   return (
     <li className={"chat-call-row" + (props.failed ? " failed" : "")} data-testid="guest-call">
       {fetches ? <button type="button" className="chat-call-btn" aria-expanded={open} onClick={() => void toggle()}>{head}</button> : <div className="chat-call">{head}</div>}
+      <SharedThumb at={props.at} turn={props.turn} path={readImagePath(props.name, props.summary, props.failed)} />
       {open && (
         <div className="chat-call-full">
           {read?.text !== undefined && <pre className="chat-call-text">{read.text}</pre>}
@@ -177,7 +183,11 @@ function Asked({ st, owner }: { st: Extract<Step, { kind: "question" | "permissi
   return <li className="chat-note" data-testid="guest-asked">{what} · {owner} {answer}</li>;
 }
 
-function TurnItems({ t, agent, owner, link, share, binding, onLink }: { onLink: (href: string) => void; t: SharedTurn; agent: string; owner: string; link: GuestLink | undefined; share: string; binding: number | undefined }) {
+function TurnItems({ t, agent, owner, at, onLink }: { t: SharedTurn; agent: string; owner: string; at: SharedAt; onLink: (href: string) => void }) {
+  const { link, share, binding } = at;
+  // The agent's text alone: a person's message draws no picture here, because a
+  // guest's own words reach it (*Use these*) and the host refuses its paths.
+  const renderImage = useCallback((src: string, alt: string) => sharedImageNode(src, alt, at, t.seq), [at, t.seq]);
   return (
     <>
       {piecesOf(t).map((p, n) => {
@@ -209,10 +219,10 @@ function TurnItems({ t, agent, owner, link, share, binding, onLink }: { onLink: 
               <li key={n} className="chat-row chat-row-agent">
                 <p className="chat-name" aria-hidden="true">{agent}{p.at ? <span className="chat-at"> · {clock(p.at)}</span> : null}</p>
                 <div className="chat-group" role="group" aria-label={agent} data-testid="guest-agent">
-                  {p.text && <div className="chat-bubble chat-bubble-agent"><Markdown src={p.text} onLink={onLink} /></div>}
+                  {p.text && <div className="chat-bubble chat-bubble-agent"><Markdown src={p.text} onLink={onLink} renderImage={renderImage} /></div>}
                   {p.calls.length > 0 && (
                     <ul className="chat-calls">
-                      {p.calls.map((c, j) => <Call key={c.call_id ?? `${j}`} link={link} share={share} binding={binding} name={c.name} call_id={c.call_id} summary={c.summary} failed={c.failed} detail={c.detail} />)}
+                      {p.calls.map((c, j) => <Call key={c.call_id ?? `${j}`} link={link} share={share} binding={binding} name={c.name} call_id={c.call_id} summary={c.summary} failed={c.failed} detail={c.detail} at={at} turn={t.seq} />)}
                     </ul>
                   )}
                 </div>
@@ -253,13 +263,15 @@ function ShareView({ hv, share, binding }: { hv: GuestHostView; share: GuestShar
   const access = useRef<{ key: string; a: ThreadAccess } | null>(null);
   if (access.current?.key !== `${hv.host.id}|${share.id}` || !link) access.current = { key: `${hv.host.id}|${share.id}`, a: threadAccess(link, share.id) };
 
+  const up = hv.link.kind === "up";
+  const at = useMemo<SharedAt>(() => ({ link, host: hv.host.id, share: share.id, binding, isMain: share.slug === "(main)", up }), [link, hv.host.id, share.id, binding, share.slug, up]);
+
   const name = share.title || share.slug;
   const scroll = useRef<HTMLDivElement>(null);
-  const atEnd = useRef(true);
-  useEffect(() => {
-    const el = scroll.current;
-    if (el && atEnd.current) el.scrollTop = el.scrollHeight;
-  }, [turns.length, turns[turns.length - 1]?.seq]);
+  // The chat's own scroll (stickToBottom.ts): a picture arrives after the turn
+  // that shows it and grows the column, and `.chat-scroll` is not anchored.
+  const last = turns[turns.length - 1];
+  const { take } = useStickToBottom(scroll, loaded, null, last ? `${last.seq}` : null);
 
   return (
     <div className="guest-session" data-testid="guest-session">
@@ -282,7 +294,7 @@ function ShareView({ hv, share, binding }: { hv: GuestHostView; share: GuestShar
         </header>
         {st.words && <div className={"guest-banner" + (hv.link.kind === "offline" || hv.link.kind === "removed" ? " offline" : "")} role="status" data-testid="guest-banner">{st.words}{(hv.link.kind === "offline" || hv.link.kind === "removed") && turns.length ? ". Showing the last page read." : "."}</div>}
         {joinErr && <div className="guest-banner" role="alert">Couldn’t ask to join: {joinErr}</div>}
-        <div className="chat-scroll guest-scroll" ref={scroll} onScroll={(e) => { const el = e.currentTarget; atEnd.current = el.scrollHeight - el.scrollTop - el.clientHeight < 32; }}>
+        <div className="chat-scroll guest-scroll" ref={scroll}>
           <div className="chat-col">
             {allowed && more && (
               <button className="chat-linkbtn guest-earlier" disabled={older} onClick={() => void earlier()} data-testid="guest-earlier">{older ? "Reading…" : "Earlier turns"}</button>
@@ -291,12 +303,13 @@ function ShareView({ hv, share, binding }: { hv: GuestHostView; share: GuestShar
             {error && <p className="chat-note" role="alert" data-testid="guest-error">Couldn’t read the session: {error}</p>}
             {allowed && loaded && turns.length === 0 && <p className="chat-note">No messages in this session yet.</p>}
             <ol className="chat-list" data-testid="guest-list">
-              {turns.map((t, i) => <TurnItems key={`${t.seq}|${t.at ?? "-"}|${i}`} t={t} agent={agent} owner={hv.owner} link={link} share={share.id} binding={binding} onLink={onLink} />)}
+              {turnKeys(turns).map(([key, t]) => <TurnItems key={key} t={t} agent={agent} owner={hv.owner} at={at} onLink={onLink} />)}
             </ol>
             {linkNote && <p className="chat-note" role="alert" data-testid="guest-link-note">{linkNote}</p>}
           </div>
         </div>
       </div>
+      <BeforeCommit take={take} />
       <div className="guest-thread">
         {share.state === "allowed" ? (
           <ThreadPanel
