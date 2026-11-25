@@ -3486,6 +3486,8 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     // The Ideas beta was turned off: close the tab `open_companion` opened, if
     // this page opened one (a tab it did not open, it cannot close).
     case "close_companion":
+      // Asked by its own page (Dock): that tab closes itself.
+      if (location.pathname.startsWith("/companion/")) { window.setTimeout(() => window.close(), 0); return null; }
       mockCompanionTab?.close();
       mockCompanionTab = null;
       return null;

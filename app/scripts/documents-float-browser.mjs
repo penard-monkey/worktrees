@@ -173,8 +173,49 @@ async function memories(page, tag, name) {
   ok(/Dock/.test(await w.locator("[data-testid=main-doc-float]").innerText()), `${tag} it has Dock`);
   await w.click("[data-testid=main-doc-float]");
   ok(await isDoc(page, "topics/nas-layout.md") && await until(page, () => document.querySelector("[data-testid=ws-tab].on")?.dataset.tab === "memory") && !(await page.$("[data-testid=ws-floated]")), `${tag} Dock opens it in its workspace again`);
-  ok(await until(w, () => !document.querySelector("[data-testid=ideas-memory-side]") && !!document.querySelector("[data-testid=ideas-list]")), `${tag} …and the Ideas window is the ideas again`);
+  await w.waitForEvent("close", { timeout: 4000 }).catch(() => {});
+  ok(w.isClosed(), `${tag} …and the window that was opened for it closes, so a relaunch does not bring it back empty`);
+}
+
+/** A window the person was in stays: Dock takes the file, not their window. */
+async function theirs(page, tag) {
+  const ctx = page.context();
+  await main(page);
+  const [w] = await Promise.all([ctx.waitForEvent("page"), page.click("[data-testid=ideas-rail]")]);
+  await w.waitForSelector("[data-testid=ideas-rows] li");
+  await page.bringToFront();
+  await noWindow(page);
+  await memory(page);
+  await floatBtn(page).click();
+  ok(await isDoc(w, "MEMORY.md") && await card(page), `${tag} floated to a window that was open`);
+  await w.bringToFront();
+  await w.click("[data-testid=main-doc-float]");
+  ok(await isDoc(page, "MEMORY.md") && await until(w, () => !document.querySelector("[data-testid=ideas-memory-side]") && !!document.querySelector("[data-testid=ideas-list]")), `${tag} Dock: the Ideas window is the ideas again`);
+  await w.waitForTimeout(400);
+  ok(!w.isClosed(), `${tag} …and stays open`);
+  // Opened for a file, and then used for an idea: theirs too.
   await w.close();
+  await page.bringToFront();
+  await page.evaluate(() => { localStorage.clear(); });
+  const p = await ctx.newPage();
+  await main(p);
+  await memory(p);
+  const [v] = await Promise.all([ctx.waitForEvent("page"), floatBtn(p).click()]);
+  await isDoc(v, "MEMORY.md");
+  await v.click("[data-testid=ideas-all]");
+  await v.locator(`.ix-row[data-idea='${JELLY}'] button`).first().click();
+  await v.waitForSelector(".cm-content");
+  await p.bringToFront();
+  await noWindow(p);
+  await p.click("[data-testid=ws-floated-here]");
+  await isDoc(p, "MEMORY.md");
+  await floatBtn(p).click();
+  await isDoc(v, "MEMORY.md");
+  await v.bringToFront();
+  await v.click("[data-testid=main-doc-float]");
+  await isDoc(p, "MEMORY.md");
+  await v.waitForTimeout(400);
+  ok(!v.isClosed(), `${tag} one opened for a file and then used for an idea stays too`);
 }
 
 async function docks(page, tag) {
@@ -209,7 +250,7 @@ async function betas(page, tag) {
 const only = process.env.ONLY?.split(",");
 for (const [engine, name] of [[chromium, "chromium"], [webkit, "webkit"]]) {
   const browser = await engine.launch();
-  for (const part of [waits, fails, silent, ideas, memories, docks, betas]) {
+  for (const part of [waits, fails, silent, ideas, memories, theirs, docks, betas]) {
     if (only && !only.includes(part.name)) continue;
     const page = await (await browser.newContext({ viewport: { width: 1440, height: 900 } })).newPage();
     const errors = [];

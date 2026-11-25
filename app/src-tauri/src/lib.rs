@@ -287,7 +287,9 @@ async fn open_companion(app: AppHandle) -> Result<(), String> {
 }
 
 /// Close the Ideas companion window if it is open (companion.rs). Main calls
-/// it when Settings → Beta features → Ideas is turned off.
+/// it when Settings → Beta features → Ideas is turned off, and the companion
+/// itself when Dock put back the one document it was opened for. A window closed
+/// so is closed at the next launch too.
 #[tauri::command]
 async fn close_companion(app: AppHandle) -> Result<(), String> {
     companion::close(&app)

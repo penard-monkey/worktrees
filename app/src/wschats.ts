@@ -150,20 +150,13 @@ export function titleFrom(message: string): string | null {
   const sp = cut.lastIndexOf(" ");
   return `${(sp > 20 ? cut.slice(0, sp) : cut).replace(/[\s.,;:—-]+$/, "")}…`;
 }
-/** The person's first message among a chat's turns: the first that is theirs.
- *  The opener is the engine's, and a notice is Claude's own entry. */
-export function firstMessage(turns: readonly { user: string | null; notice?: unknown }[], conv: string): string | null {
-  const t = turns.find((x) => x.user && !x.notice && !engineLine(x.user, conv));
-  return t?.user ?? null;
-}
-
-/** What the engine said to start a chat (or a fold), which is not the person's:
- *  a quiet line in the transcript. `null`: a message like any other. */
-export function engineLine(text: string, conv: string): string | null {
-  const t = text.trim();
-  if (t === `Read chats/${conv}/start.md and begin.`) return "The chat was started.";
-  return t.startsWith("Read ") && t.endsWith(`chats/${conv}/fold.md and do what it says.`) ? "The chat was asked to fold into memory." : null;
-}
+type Said = { user: string | null; notice?: unknown; engine?: "start" | "fold" };
+/** The person's first message among a chat's turns: not one the engine sent (it says
+ *  so; its words are never looked at), nor Claude's own entry. */
+export const firstMessage = (turns: readonly Said[]): string | null => turns.find((x) => x.user && !x.notice && !x.engine)?.user ?? null;
+/** What a turn the engine sent is in the transcript: a quiet line. */
+export const quietLine = (t: Pick<Said, "engine">): string | null =>
+  t.engine === "start" ? "The chat was started." : t.engine === "fold" ? "The chat was asked to fold into memory." : null;
 /** A prompt that asks whether the workspace's own folder is trusted. */
 export const asksTrust = (lines: readonly string[] | undefined): boolean => !!lines && /\btrust\b/i.test(lines.join(" ")) && /\bfolder\b|workspaces\//i.test(lines.join(" "));
 export const TRUST_WORDS = "This is the workspace's own folder. Worktrees made it, and it holds this workspace's chats and memory. Claude asks once.";

@@ -673,6 +673,10 @@ export function Companion() {
 
   // The main window asks for a document (Float): opened here, then answered by
   // name. It keeps its own until then, so a refusal here is said there.
+  const first = useRef(true);
+  /** It was opened to show a memory file, and has shown nothing else since. */
+  const cameFor = useRef(false);
+  useEffect(() => { if (open) cameFor.current = false; }, [open]);
   const showAsked = useRef(async (_a: Ask) => {});
   showAsked.current = async (a) => {
     const d = a.doc;
@@ -688,7 +692,12 @@ export function Companion() {
   unsavedHere.current = () => (session.current?.dirty() && open ? `The Ideas window has “${open.title || "Untitled"}” open with text that is not saved.` : memRef.current && memStuck.current ? `The Ideas window has “${memStuck.current}” open with text that is not saved.` : null);
   useEffect(() => {
     if (!up) return;
-    const look = () => { const a = take(windowEnv(), FLOAT); if (a) void showAsked.current(a); };
+    const look = () => {
+      const a = take(windowEnv(), FLOAT);
+      // The first thing this window has to show, before a person touched it.
+      if (first.current) { cameFor.current = a?.doc.kind === "memory"; first.current = false; }
+      if (a) void showAsked.current(a);
+    };
     const onStorage = (e: StorageEvent) => { if (e.key === FLOAT.ask) look(); };
     look();
     window.addEventListener("focus", look);
@@ -821,7 +830,7 @@ export function Companion() {
   return (
     <main className={`ix${open && chatOpen ? " ix-with-chat" : ""}`}>
       {mem ? (
-        <MemorySide at={mem} view={memView.view} error={memView.error} ago={(at) => age(at * 1000)} open={(path) => void openMemory({ ...mem, path })} all={() => void leave()} />
+        <MemorySide at={mem} view={memView.view} error={memView.error} ago={(at) => age(at * 1000)} open={(path) => void openMemory({ ...mem, path })} all={() => void leave().then((ok) => { if (ok) cameFor.current = false; })} />
       ) : <IdeaList
         listing={listing}
         openId={open?.id ?? null}
@@ -859,7 +868,7 @@ export function Companion() {
             idea={(id) => void openIdea(id)}
             stuck={(t) => { memStuck.current = t; }}
             dock={(path) => ask(windowEnv(), DOCK, { kind: "memory", ws: mem.ws, name: mem.name, path }, () => invoke("raise_window"), "The main window")}
-            docked={() => setMem(null)} closed={() => setMem(null)}
+            docked={() => { setMem(null); if (cameFor.current) invoke("close_companion").catch(() => {}); }} closed={() => setMem(null)}
             reveal={(p) => { revealOnHost(p).catch((e) => setNotice(`Could not show it in Finder: ${errText(e)}`)); }} />
         ) : open ? (
           <DocumentPane

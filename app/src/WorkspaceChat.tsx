@@ -13,7 +13,7 @@ import * as Icons from "./icons";
 import { DeskTerminalPane } from "./TerminalPane";
 import { useArmed } from "./useArmed";
 import {
-  accessWords, activeAt, ageWords, asksTrust, endedLine, engineLine, failedWords, firstMessage, foldOf, foldRuns, introWords, isDefaultTitle, monthOf, navRows, readsWords, stateWords, titleFrom, transcriptGone, TRUST_WORDS, whenWords,
+  accessWords, activeAt, ageWords, asksTrust, endedLine, failedWords, firstMessage, foldOf, foldRuns, introWords, isDefaultTitle, monthOf, navRows, quietLine, readsWords, stateWords, titleFrom, transcriptGone, TRUST_WORDS, whenWords,
   type ChatRow, type DocRead, type ProjectRead, type RowState, type WsChat, type WsChats,
 } from "./wschats";
 import type { WsChatsLive } from "./useWsChats";
@@ -169,12 +169,15 @@ export function WorkspaceChatColumn(props: {
   const data = useChat(key).turns.data;
   const turns = data?.turns, reason = data?.reason;
   const named = useRef(new Set<string>());
-  const first = c && isDefaultTitle(c.title) && turns ? firstMessage(turns, conv) : null;
+  const first = c && isDefaultTitle(c.title) && turns ? firstMessage(turns) : null;
   useEffect(() => {
     const t = first && titleFrom(first);
     if (!t || named.current.has(conv)) return;
     named.current.add(conv);
-    live.rename(ws.id, conv, t).catch((e) => props.onError(`Could not name the chat: ${String(e)}`));
+    live.rename(ws.id, conv, t).catch((e) => {
+      // Naming it was this window's idea: the engine's no to its own words is no news.
+      if (!/what the app told the chat/.test(String(e))) props.onError(`Could not name the chat: ${String(e)}`);
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [first, conv]);
 
@@ -272,7 +275,7 @@ export function WorkspaceChatColumn(props: {
         ) : (
           <ChatPane key={conv} repo="" slug="" path={key} root={info.folder} ws={{ id: ws.id, conv }} provider="claude" session={c.session}
             activity={row.state === "busy" ? "busy" : row.state === "waiting" ? "waiting" : ""}
-            doneAt={activeAt(c)} paneDraft={null} uiRem={props.uiRem} to="this chat" quiet={(t) => engineLine(t, conv)}
+            doneAt={activeAt(c)} paneDraft={null} uiRem={props.uiRem} to="this chat" quiet={quietLine}
             promptNote={(lines) => (asksTrust(lines) ? <p className="wsc-trust" data-testid="ws-chat-trust">{TRUST_WORDS}</p> : null)}
             intro={<>A chat of <b>{ws.name}</b>. {introWords(info.projects, info.limits)}</>}
             onTerminal={() => setView("terminal")} onOpenPath={() => {}} reloadToken={0} onError={props.onError}
