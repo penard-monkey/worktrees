@@ -1642,6 +1642,15 @@ impl Audit {
         self.record(Record::new("push", json!({ "event": "sends", "devices": devices })));
     }
 
+    /// A workspace chat's fold is over, as the poll decided it: no request did,
+    /// so the record names no actor. Ids, the commit and our own word; never
+    /// the memory's text nor the chat's title.
+    pub fn fold(&self, n: &worktrees_api::workspacefolds::FoldNote) {
+        let id = |s: &str| worktrees_core::ulid::is_valid(s).then(|| s.to_string());
+        let commit = n.commit.clone().filter(|c| worktrees_core::memory::is_sha(c));
+        self.record(Record::new("fold", json!({ "event": n.event, "workspace": id(&n.workspace), "chat": id(&n.chat), "commit": commit })));
+    }
+
     /// The listener is down. Open episodes end first, so their counts land.
     pub fn stopped(&self) {
         let mut st = guard(&self.st);
@@ -2120,7 +2129,7 @@ impl ConnAudit {
             // An idea conversation's terminal, a workspace chat's, and the
             // acts on a chat's life: which one, by its id.
             "idea_term_open" | "workspace_term_open" | "workspace_chat_resume" | "workspace_chat_close" | "workspace_chat_remove"
-            | "workspace_chat_rename" | "workspace_interrupt" => {
+            | "workspace_chat_rename" | "workspace_chat_fold" | "workspace_interrupt" => {
                 if let Some(Value::String(c)) = arg(args, "conv") {
                     detail.insert("conv".into(), json!(ident(c)));
                 }
@@ -2294,6 +2303,16 @@ impl ConnAudit {
         if let (true, Outcome::Ok(v)) = (p.cmd == "workspace_chat_start", &outcome) {
             if let Some(c) = v.pointer("/chat/id").and_then(Value::as_str).filter(|c| worktrees_core::ulid::is_valid(c)) {
                 detail.insert("conv".into(), json!(c));
+            }
+        }
+        // A close that stopped a fold, and the commit of what it left: only a
+        // full commit id.
+        if let (true, Outcome::Ok(v)) = (["workspace_chat_close", "workspace_chat_remove"].contains(&p.cmd), &outcome) {
+            if v.get("stopped_fold") == Some(&Value::Bool(true)) {
+                detail.insert("stopped_fold".into(), json!(true));
+            }
+            if let Some(c) = v.get("commit").and_then(Value::as_str).filter(|c| worktrees_core::memory::is_sha(c)) {
+                detail.insert("commit".into(), json!(c));
             }
         }
         // An attach's kind, the sniff's word — only one of its three, never
@@ -4231,6 +4250,24 @@ mod tests {
             assert_eq!(refused, Err(json!("console-only")), "{}", r.name);
         }
         assert_eq!(pane.sent.lock().unwrap().len(), 1);
+    }
+
+    /// A fold the poll landed or failed is a record of its own, with ids and
+    /// the commit and nothing else.
+    #[test]
+    fn a_fold_the_poll_decided_is_a_record() {
+        let d = dir("fold");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        let (ws, chat, sha) = (worktrees_core::ulid::new(), worktrees_core::ulid::new(), "a".repeat(40));
+        let note = |event, commit: Option<&str>| worktrees_api::workspacefolds::FoldNote { workspace: ws.clone(), chat: chat.clone(), event, commit: commit.map(String::from) };
+        a.fold(&note("landed", Some(&sha)));
+        a.fold(&note("failed", Some("--output=/etc/x")));
+        let l = live(&d);
+        assert_eq!((l[1]["kind"].as_str(), &l[1]["detail"]), (Some("fold"), &json!({ "event": "landed", "workspace": ws, "chat": chat, "commit": sha })));
+        assert_eq!(l[2]["detail"]["commit"], Value::Null, "only a commit id");
+        assert_eq!(l[1]["principal"], Value::Null, "no caller made it");
+        assert_eq!(verify(&d).broken, None);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// Idea board phase 5: a plan's Start is a console act whose brief reaches

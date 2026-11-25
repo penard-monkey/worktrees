@@ -1674,7 +1674,7 @@ pub(crate) fn turn_text_at(ctx: &Ctx, at: &Locus, turn_id: String) -> Result<Val
 /// The lane an ENDED desk session is read through: no pane, its transcript
 /// known by the record's session id. `None` for a place, whose rows read only
 /// a live lane.
-fn ended_lane(at: &Locus) -> Option<Lane> {
+pub(crate) fn ended_lane(at: &Locus) -> Option<Lane> {
     at.desk().map(|d| Lane { harness: provider::CLAUDE.id, session: d.session.to_string(), pane: String::new() })
 }
 

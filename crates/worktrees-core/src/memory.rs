@@ -964,7 +964,7 @@ pub fn commit_if_dirty_at(root: &Path, id: &str, message: Option<&str>) -> Resul
 
 // ── history ─────────────────────────────────────────────────────────────────
 
-fn is_sha(s: &str) -> bool {
+pub fn is_sha(s: &str) -> bool {
     s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
@@ -1055,6 +1055,20 @@ fn undone(repo: &Repo) -> Result<HashMap<String, String>, String> {
         }
     }
     Ok(map)
+}
+
+/// The commits of workspace `id`'s memory that are undone now, whatever undid
+/// them: one git call, for whoever keeps a commit and shows whether it stands.
+pub fn undone_at(root: &Path, id: &str) -> Result<std::collections::HashSet<String>, String> {
+    let mem = dir_at(root, id)?;
+    if !is_made(&mem) {
+        return Ok(Default::default());
+    }
+    let repo = Repo::open(&mem)?;
+    if !repo.has_commits() {
+        return Ok(Default::default());
+    }
+    Ok(undone(&repo)?.into_keys().collect())
 }
 
 fn log_in(repo: &Repo, path: Option<&str>, before: Option<&str>, n: usize) -> Result<Log, String> {

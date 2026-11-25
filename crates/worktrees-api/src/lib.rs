@@ -78,6 +78,7 @@ pub mod term;
 pub mod watch;
 pub mod workspace;
 pub mod workspacechats;
+pub mod workspacefolds;
 pub mod workspaces;
 pub mod util;
 pub mod viewer;
@@ -191,6 +192,9 @@ pub struct Ctx {
     /// root()` at start, so `WORKTREES_WORKSPACES_DIR` moves it for a spawned
     /// engine). A test moves it with [`Ctx::with_workspaces_dir`].
     workspaces_dir: Arc<PathBuf>,
+    /// The chats folding into a workspace's memory (`workspacefolds`). One
+    /// per engine.
+    pub folds: Arc<workspacefolds::Folds>,
     /// `workspaces.json`, which says which workspaces there are. A test
     /// moves it with [`Ctx::with_workspaces_file`].
     workspaces_file: Arc<PathBuf>,
@@ -219,6 +223,7 @@ impl Ctx {
             acting: Arc::new(None),
             ideas_dir: Arc::new(worktrees_core::ideas::dir()),
             workspaces_dir: Arc::new(worktrees_core::wsfolder::root()),
+            folds: Arc::new(workspacefolds::Folds::default()),
             memory: Arc::new(memory::Memory::default()),
             workspaces_file: Arc::new(worktrees_core::workspaces::path()),
         }
@@ -242,6 +247,11 @@ impl Ctx {
     /// This engine with its workspaces' folders in `dir`: a test's own.
     pub fn with_workspaces_dir(self, dir: PathBuf) -> Ctx {
         Ctx { workspaces_dir: Arc::new(dir), ..self }
+    }
+
+    /// This engine with its folds' outside replaced: a test's script.
+    pub fn with_folds(self, folds: workspacefolds::Folds) -> Ctx {
+        Ctx { folds: Arc::new(folds), ..self }
     }
 
     /// `workspaces.json`.

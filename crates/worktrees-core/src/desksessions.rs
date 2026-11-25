@@ -411,6 +411,15 @@ impl Launch<'_> {
         Ok(format!("exec \"${{SHELL:-/bin/sh}}\" -ic {}", crate::tmux::sq(&format!("exec {line}"))))
     }
 
+    /// Whether [`Launch::run`] would be refused for anything but its own
+    /// session: the plan window and the live-agent limit, its own session not
+    /// counted. Asked before that session is ended to be launched again.
+    pub fn admit(&self) -> Result<(), String> {
+        let ai = crate::profile::AiLaunch::plain(&crate::config::resolve_ai_cmd(Some(crate::provider::CLAUDE.id)));
+        crate::quota::gate(crate::harness::CLAUDE, &ai, crate::sysclock::now_epoch()).map_err(refusal)?;
+        crate::guard::admit(Some(crate::provider::CLAUDE.id), false, &[self.session.to_string()]).map_err(refusal).map(|_| ())
+    }
+
     /// Launch it: refused while its session runs, past the live-agent limit
     /// (a lane's words), under a spent plan window, and, for a fresh start,
     /// below Claude's `--session-id` floor. The caller checked that `cwd` is

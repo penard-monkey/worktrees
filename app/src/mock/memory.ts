@@ -203,6 +203,8 @@ export type MemoryMock = ReturnType<typeof memoryMock>;
  *  does; `noteOf` is where a workspace's chat of that title keeps its note. */
 export function memoryMock(emit: Emit, nameOf: (id: unknown) => string, noteOf: (id: string, title: string) => string | null) {
   const none = Q.get("memory") === "none";
+  // Workspaces a fold holds: no quiet commit and no undo there.
+  const held = new Set<string>();
   const get = (id: string): Mem | null => {
     const ws = nameOf(id);
     if (!mems.has(id) && !none) mems.set(id, seed(ws, (t) => noteOf(id, t)));
@@ -219,7 +221,7 @@ export function memoryMock(emit: Emit, nameOf: (id: unknown) => string, noteOf: 
   const row = (p: string, f: F) => ({ path: p, file: name(p), title: title(f.text) ?? name(p), mtime_ms: f.mtime, size: size(f) });
   function touched(id: string, m: Mem) {
     if (m.quiet !== null) clearTimeout(m.quiet);
-    m.quiet = window.setTimeout(() => { m.quiet = null; commit(m, null, "edit"); }, QUIET);
+    m.quiet = window.setTimeout(() => { m.quiet = null; if (!held.has(id)) commit(m, null, "edit"); }, QUIET);
     if (m.tick !== null) return;
     m.tick = window.setTimeout(() => {
       m.tick = null;
@@ -341,6 +343,7 @@ export function memoryMock(emit: Emit, nameOf: (id: unknown) => string, noteOf: 
         return { change: ch, file: { ...fc, diff } };
       }
       case "workspace_memory_revert": {
+        if (held.has(id)) throw "a chat is folding into this memory: wait for it, or stop it";
         const m = need(id);
         const c = find(m, a.commit);
         if (c.kind === "made") throw "the change that made this memory cannot be undone";
@@ -378,12 +381,36 @@ export function memoryMock(emit: Emit, nameOf: (id: unknown) => string, noteOf: 
       else commit(m, null, "edit");
     },
     /** What a chat's record says of the fold of that title, as git has it. */
-    fold(id: string, title: string): { commit: string; files: number; lines: { added: number; removed: number }; reverted: boolean } | null {
+    fold(id: string, title: string, sha?: string): { commit: string; files: number; lines: { added: number; removed: number }; reverted: boolean } | null {
       const m = get(id);
-      const c = m?.commits.find((x) => x.subject === `fold: ${title}`);
+      const c = m?.commits.find((x) => x.commit === sha) ?? m?.commits.filter((x) => x.subject === `fold: ${title}`).pop();
       if (!m || !c) return null;
       const ch = change(m, c);
       return { commit: ch.commit, files: ch.files.length, lines: { added: ch.added, removed: ch.removed }, reverted: ch.reverted_by !== null };
+    },
+    hold: (id: string) => { held.add(id); },
+    release: (id: string) => { held.delete(id); },
+    /** Commit what is dirty under `subject`: its id, or null for nothing. */
+    commit(id: string, subject: string | null, kind = "edit"): string | null {
+      const m = get(id);
+      return (m && commit(m, subject, kind)?.commit) || null;
+    },
+    /** How many files are changed and not committed. */
+    dirty(id: string): number {
+      const m = get(id);
+      if (!m) return 0;
+      const h = head(m);
+      return [...new Set([...h.keys(), ...m.files.keys()])].filter((p) => !same(h.get(p), m.files.get(p))).length;
+    },
+    /** What a fold's Claude writes: the chat's note, and a line in the index. */
+    foldWrites(id: string, note: string, chat: string) {
+      const m = need(id);
+      const p = note.replace(/^memory\//, "");
+      m.files.set(p, { text: NOTE(chat, "What the chat was asked.", "What it decided."), b64: null, mtime: now() });
+      const i = m.files.get("MEMORY.md");
+      const line = `- ${chat}. → [note](${p})\n`;
+      if (i?.text != null && !i.text.includes(`(${p})`)) m.files.set("MEMORY.md", { ...i, text: i.text.replace("## Decisions\n\n", `## Decisions\n\n${line}`), mtime: now() });
+      touched(id, m);
     },
     /** A note is on disk, by its path in the workspace's folder. */
     has: (id: string, path: string) => !!get(id)?.files.has(path.replace(/^memory\//, "")),
