@@ -47,6 +47,9 @@ export type Turn = {
   at: number | null; user: string | null; reply: string; tools: string[]; truncated: boolean;
   /** Claude's own entry, never the person's message. Older hosts omit it. */
   notice?: Notice;
+  /** The engine itself sent it (a workspace chat's start or fold), not a person.
+   *  Absent from a host that predates it. */
+  engine?: string;
   /** The turn in order (`turns::Step`): absent from a host that predates it. */
   steps?: Step[];
 };
@@ -439,7 +442,7 @@ export type ToolCall = { name: string; call_id?: string; summary?: string; faile
 export type Item =
   | { k: "sep"; key: string; at: number }
   | { k: "earlier"; key: string }
-  | { k: "user"; key: string; text: string; at: number | null; midTurn?: boolean; cut?: true; turnId?: string }
+  | { k: "user"; key: string; text: string; at: number | null; midTurn?: boolean; cut?: true; turnId?: string; engine?: string }
   | { k: "notice"; key: string; notice: Notice; at: number | null }
   | { k: "reply"; key: string; text: string; tools: string[]; calls: ToolCall[]; truncated: boolean; at: number | null; label: boolean; turnId?: string }
   | { k: "asked"; key: string; step: AskedStep; label: boolean }
@@ -519,7 +522,7 @@ export function itemsOf(shortTurns: Turn[], answered: Answered[], pending: Pendi
       lastWasAgent = t.notice.kind === "peer_message";
     } else if (t.user === null) out.push({ k: "earlier", key: `e${i}` });
     else {
-      out.push({ k: "user", key: `u${i}`, text: t.user, at: t.at, ...(userCut(t) ? { cut: true as const, ...(offer(t) ? { turnId: offer(t) } : {}) } : {}) });
+      out.push({ k: "user", key: `u${i}`, text: t.user, at: t.at, ...(t.engine ? { engine: t.engine } : {}), ...(userCut(t) ? { cut: true as const, ...(offer(t) ? { turnId: offer(t) } : {}) } : {}) });
       lastWasAgent = false;
     }
     if (!t.steps?.length) {

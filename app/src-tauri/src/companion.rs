@@ -146,13 +146,14 @@ pub fn reopens_at_launch(dir: &Path, was_open: bool) -> bool {
     was_open && winstate::enabled(ui.as_ref()) && beta(ui.as_ref())
 }
 
-/// Close the companion if it is open: the beta was turned off. `close`, not
+/// Close the companion if it is open: the beta was turned off, or Dock put back
+/// the one document the window was opened for. `close`, not
 /// `destroy`: it goes through `CloseRequested` like its own close button, so
 /// winstate marks it closed and keeps its frame for when it is next opened.
 pub fn close<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     match app.get_webview_window(LABEL) {
         Some(w) => {
-            crate::applog("info", "companion: closed (the Ideas beta was turned off)");
+            crate::applog("info", "companion: closed (asked)");
             w.close().map_err(|e| e.to_string())
         }
         None => Ok(()),

@@ -38,6 +38,23 @@ async function boot(page, query = "&folding=0&foldms=900", betas = ["beta_worksp
   return { ws, id };
 }
 
+/** A chat nobody has written to, folded: the opener is the engine's, not a message. */
+async function unsent(page, tag) {
+  const { ws } = await boot(page);
+  await page.locator("[data-testid=ws-name]", { hasText: "Everything" }).first().click();
+  await page.click("[data-testid=ws-frame-new-chat]");
+  const named = () => page.evaluate(() => document.querySelector("[data-testid=ws-chat-col] .wsc-name-t")?.textContent ?? "");
+  await until(page, () => /^Chat \d+$/.test(document.querySelector("[data-testid=ws-chat-col] .wsc-name-t")?.textContent ?? "") && document.querySelector("[data-testid=ws-chat-col]").dataset.state === "running", null, 10000);
+  const was = await named();
+  await page.click("[data-testid=ws-chat-close]");
+  ok(await until(page, () => /^Closed and folded/.test(document.querySelector("[data-testid=ws-chat-ended]")?.textContent ?? ""), null, 10000), `${tag} a chat with no message is folded`);
+  await page.waitForTimeout(400);
+  ok(await named() === was && /^Chat \d+$/.test(was), `${tag} …and keeps its name (${await named()})`);
+  ok(!/chats\/|fold\.md/.test(await page.locator("[data-testid=ws-chats], [data-testid=nav]").first().innerText().catch(() => "")) && !(await call(page, "workspace_chats", { id: ws })).chats.some((c) => /^Read /.test(c.title)), `${tag} …in the list too`);
+  const list = await page.locator("[data-testid=chat-list]").innerText();
+  ok(/The chat was asked to fold into memory\./.test(list) && !/fold\.md|\/Users\//.test(list) && await page.locator("[data-testid=chat-user]").count() === 0, `${tag} the opener is a quiet line: no bubble, no path, no id`);
+}
+
 async function land(page, tag, name) {
   const { ws, id } = await boot(page);
   const rel = await id("Release order");
@@ -283,7 +300,7 @@ async function themes(page, tag, name) {
 const only = process.env.ONLY?.split(",");
 for (const [engine, name] of [[chromium, "chromium"], [webkit, "webkit"]]) {
   const browser = await engine.launch();
-  for (const part of [land, edits, states, terminal, lists, themes]) {
+  for (const part of [unsent, land, edits, states, terminal, lists, themes]) {
     if (only && !only.includes(part.name)) continue;
     const page = await (await browser.newContext({ viewport: { width: 1440, height: 900 } })).newPage();
     const errors = [];

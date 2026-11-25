@@ -111,7 +111,7 @@ export type ChatPaneProps = {
   to?: string;
   /** A message that is not the person's (what the engine starts a chat with):
    *  the quiet line to draw for it. */
-  quiet?: (text: string) => string | null;
+  quiet?: (said: { user: string; engine?: string }) => string | null;
   /** Put among the turns, after the last one before its time. */
   insert?: { at: number; node: ReactNode } | null;
   /** What to say above a prompt, when there is something. */
@@ -223,7 +223,7 @@ export function ChatPane(props: ChatPaneProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per prompt
   }, [fp]);
 
-  const draw = (it: Item) => it.k === "user" && props.quiet?.(it.text) ? <li key={it.key} className="chat-note" data-testid="chat-quiet">{props.quiet(it.text)}</li> : <ChatItem key={it.key} it={it} agent={agent} target={target} root={root} reveal={reveal} fullOff={v.fullOff} full={v.full} onLink={onLink} pathLinks={pathLinks} />;
+  const draw = (it: Item) => it.k === "user" && props.quiet?.({ user: it.text, engine: it.engine }) ? <li key={it.key} className="chat-note" data-testid="chat-quiet">{props.quiet({ user: it.text, engine: it.engine })}</li> : <ChatItem key={it.key} it={it} agent={agent} target={target} root={root} reveal={reveal} fullOff={v.fullOff} full={v.full} onLink={onLink} pathLinks={pathLinks} />;
   // Where the inserted one goes: after the last turn before its time.
   const after = props.insert ? items.findIndex((it) => "at" in it && typeof it.at === "number" && it.k !== "sep" && it.at > props.insert!.at) : -1;
   const cut = !props.insert || after < 0 ? items.length : after;

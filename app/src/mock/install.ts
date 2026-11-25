@@ -3480,6 +3480,8 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     // The Ideas beta was turned off: close the tab `open_companion` opened, if
     // this page opened one (a tab it did not open, it cannot close).
     case "close_companion":
+      // Asked by its own page (Dock): that tab closes itself.
+      if (location.pathname.startsWith("/companion/")) { window.setTimeout(() => window.close(), 0); return null; }
       mockCompanionTab?.close();
       mockCompanionTab = null;
       return null;
@@ -4912,6 +4914,9 @@ Phase 3: Frontend pane and mock harness
       c.fold = { asked: isoAgo(0), asked_ms: Date.now(), state: "folding", reverted: false };
       c.live = true; c.state = "busy"; c.last_activity = isoAgo(0);
       mockChatFolds.set(chatSession(c), { workspace: id, chat: c.id, state: "folding", why: null, left: null });
+      // The engine's opener, word for word (core's `fold_opener`): an absolute path
+      // and the attempt's id.
+      c.turns.push(chatTurn(c.turns.length + 1, 0, `Read ${MOCK_WS_DIR}/${id}/chats/${c.id}/fold.md and do what it says. This is fold ${ideaId()}.`, ""));
       chatSessionsPush();
       setTimeout(() => {
         // Stopped, or moved by `__mock.wsFold`, meanwhile.
