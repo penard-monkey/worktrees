@@ -14,7 +14,7 @@
 .wsc-plus { flex: none; border: 0; border-radius: var(--r-sm); padding: 1px 5px; background: transparent; color: var(--txt-hi); }
 .wsc-plus:hover:not(:disabled) { background: var(--bg-elev); }
 .wsc-plus svg { display: block; }
-.wsc-nav-err { margin: 0; padding: 2px var(--s3); color: var(--txt); font-size: var(--fs-meta); }
+.wsc-nav-err { margin: 0; overflow-wrap: anywhere; padding: 2px var(--s3); color: var(--txt); font-size: var(--fs-meta); }
 .wsc-row { display: block; width: 100%; border: 0; border-radius: 0; background: transparent; padding: 4px var(--s3); color: var(--txt-hi); font: inherit; font-size: var(--fs-label); text-align: left; }
 .wsc-row.starting { display: flex; align-items: center; gap: var(--s2); color: var(--txt); }
 .wsc-row:hover { background: var(--bg-elev); }

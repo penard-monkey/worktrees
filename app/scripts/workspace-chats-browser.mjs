@@ -67,6 +67,13 @@ async function nav(page, tag, name) {
   await page.click("[data-testid=ws-chats-all]");
   ok(await isTab(page, "chats"), `${tag} …which opens the Chats tab`);
 
+  // ── chats that could not be read ──
+  await page.evaluate(() => { const t = window.__TAURI_INTERNALS__, i = t.invoke; window.__badChats = true; t.invoke = (c, a) => (c === "workspace_chats" && window.__badChats ? Promise.reject("not a workspace id: x") : i(c, a)); });
+  await page.evaluate(([w, c]) => window.__mock.wsFold(w, c, "folding"), [ws, rel]);
+  ok(await until(page, () => /could not be read: not a workspace id: x\./.test(document.querySelector("[data-testid=ws-chats-error]")?.textContent ?? "")), `${tag} chats that could not be read say why`);
+  await page.evaluate(([w, c]) => { window.__badChats = false; window.__mock.wsFold(w, c, null); }, [ws, rel]);
+  await until(page, () => !document.querySelector("[data-testid=ws-chats-error]"));
+
   // ── the filter ──
   const box = page.locator(".nav-filter input, input[placeholder^='filter places']").first();
   await box.fill("storage");
