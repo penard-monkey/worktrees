@@ -37,11 +37,15 @@ export type DocAct = {
   armed?: boolean;
   /** The menu stays up after it (an act that asks first). */
   stays?: boolean;
+  /** A press keeps the editor's focus and selection, which it is about (Split…).
+   *  Any other press leaves the editor, which saves. */
+  keeps?: boolean;
+  /** As one of the header's own buttons: before History. */
+  first?: boolean;
   run(): void;
 };
 
-/** The header's menu. A press in it keeps the editor's focus and selection,
- *  which some of the acts are about (Split…). `x` is the menu's RIGHT edge. */
+/** The header's menu. `x` is the menu's RIGHT edge. */
 export function DocMenu(props: { x: number; y: number; byKey: boolean; acts: readonly DocAct[]; close(): void }) {
   const ref = useRef<HTMLDivElement>(null);
   useEscape(props.close);
@@ -52,10 +56,10 @@ export function DocMenu(props: { x: number; y: number; byKey: boolean; acts: rea
   return (
     <>
       <div className="ix-catch" onPointerDown={props.close} onContextMenu={(e) => { e.preventDefault(); props.close(); }} />
-      <div ref={ref} className="ix-pop ix-menu" role="menu" data-testid="doc-menu" style={place(props.x - 220, props.y, 220, 40 + props.acts.length * 28)}
-        onMouseDown={(e) => e.preventDefault()}>
+      <div ref={ref} className="ix-pop ix-menu" role="menu" data-testid="doc-menu" style={place(props.x - 220, props.y, 220, 40 + props.acts.length * 28)}>
         {props.acts.map((a) => (
           <button key={a.testId} className={`ix-pop-item${a.armed ? " ix-btn-armed" : ""}`} role="menuitem" data-testid={a.testId} title={a.title} disabled={a.disabled}
+            onMouseDown={a.keeps ? (e) => e.preventDefault() : undefined}
             onClick={() => { if (!a.stays) props.close(); a.run(); }}>{a.label}</button>
         ))}
       </div>

@@ -9,8 +9,9 @@
 // and how a link or an image written in one of its files resolves.
 import { invoke, listen } from "../ipc";
 import type { Changed, Saved } from "./ideasave";
+import { ideaHref, readableLinks } from "./ideasrelate";
 import { isMemoryGone, isMemoryStale, memoryLink, topicPath, type MemoryLink } from "./memorypath";
-import type { Doc, DocSource, Version } from "./source";
+import { ideaDocs, type Doc, type DocImage, type DocSource, type DocTarget, type Version } from "./source";
 
 export type MemoryFile = { path: string; name: string; size: number; mtime_ms: number; kind: "text" | "image" | "other"; title: string | null };
 /** The files under one top folder; `""` is the memory's own. */
@@ -38,7 +39,7 @@ export type MemoryFileDiff = MemoryFileChange & { diff: MemoryDiff };
 /** `conflicts`: the files that changed since; nothing was done. */
 export type MemoryReverted = { change: MemoryChange | null; conflicts: string[] };
 /** An image as an `<img>` takes it, or why it is not shown. */
-export type MemoryImage = { src: string; size: number } | { note: string };
+export type MemoryImage = DocImage;
 
 type File = { path: string; file: string; title: string; content: string; mtime_ms: number; size: number };
 type Put = { path: string; file: string; title: string; mtime_ms: number; size: number };
@@ -68,7 +69,7 @@ export interface MemoryDocs extends DocSource {
   image(from: string, src: string): Promise<MemoryImage>;
 }
 
-const doc = (f: File): Doc => ({ id: f.path, title: f.title, file: f.file, mtime_ms: f.mtime_ms, content: f.content });
+const doc = (f: File): Doc => ({ kind: "memory", id: f.path, title: f.title, file: f.file, mtime_ms: f.mtime_ms, content: f.content });
 const errText = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : String(e));
 
 /** Bytes as the base64 the engine reads (`btoa`'s own spelling). In chunks:
@@ -92,11 +93,20 @@ function make(id: string): MemoryDocs {
   const show = (commit: string, path?: string) => invoke<{ change: MemoryChange; file: MemoryFileDiff | null }>("workspace_memory_diff", { id, commit, ...(path === undefined ? {} : { path }) });
   const create = async (path: string, content: string): Promise<Doc> => {
     const w = await write(path, content, null, false);
-    return { id: w.path, title: w.title, file: w.file, mtime_ms: w.mtime_ms, content };
+    return { kind: "memory", id: w.path, title: w.title, file: w.file, mtime_ms: w.mtime_ms, content };
   };
-  return {
+  const self: MemoryDocs = {
     workspace: id,
     noun: "file",
+    // Nothing is cut off: a memory file has no frontmatter of ours.
+    readBody: (text) => readableLinks(text),
+    target(from, href): DocTarget | null {
+      const idea = ideaHref(href);
+      if (idea) return { source: ideaDocs, name: idea };
+      const l = memoryLink(from, href);
+      if (l.kind === "idea") return { source: ideaDocs, name: l.id };
+      return l.kind === "file" ? { source: self, name: l.path } : null;
+    },
     refusals: { stale: isMemoryStale, gone: isMemoryGone },
     read,
     async write(path, content, expectedMtime, keepHistory): Promise<Saved> {
@@ -169,6 +179,7 @@ function make(id: string): MemoryDocs {
       return { src: pic.src, size: pic.size };
     },
   };
+  return self;
 }
 
 const sources = new Map<string, MemoryDocs>();

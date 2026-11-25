@@ -105,7 +105,7 @@ answer = {
 };
 const all = [];
 const go = async (f) => { const r = await run(f); all.push(...calls); return r; };
-eq(await go(() => D.read("topics/a.md")), { id: "topics/a.md", title: "T", file: "a.md", mtime_ms: 40, content: "new" }, "a document is named by its path");
+eq(await go(() => D.read("topics/a.md")), { kind: "memory", id: "topics/a.md", title: "T", file: "a.md", mtime_ms: 40, content: "new" }, "a document is named by its path");
 eq(await go(() => D.write("a.md", "x", 40, false)), { mtime_ms: 41, file: "a.md", title: "T" }, "a save answers what the session takes");
 eq(calls[0][1], { id: "W1", path: "a.md", content: "x", expectedMtime: 40 }, "an ordinary save sends no keepHistory");
 await go(() => D.write("a.md", "x", 40, true));

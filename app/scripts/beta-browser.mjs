@@ -92,10 +92,11 @@ async function run(engine, name) {
   await workspaces(page, tag, "every flag off");
   await ideasOff(page, tag, "Ideas off");
 
-  // Settings: Advanced and Expert only, findable by search, one checkbox each.
+  // Settings: on General in every mode (group chat start design S2 moved it to
+  // Beginner; beta-check.mjs holds the tier), findable by search, one checkbox each.
   await openSheet(page);
   await toGeneral(page);
-  ok(!(await has(page, ".settings-body [data-sec=beta]")), `${tag} Beginner: Beta features is not drawn`);
+  ok(await has(page, ".settings-body [data-sec=beta]"), `${tag} Beginner: Beta features is drawn on General`);
   await setMode(page, "advanced");
   ok(await has(page, ".settings-body [data-sec=beta]"), `${tag} Advanced: Beta features is drawn on General`);
   const boxes = await page.$$eval(".settings-body [data-sec=beta] input[type=checkbox]", (b) => b.map((x) => x.closest("label")?.innerText.trim()));

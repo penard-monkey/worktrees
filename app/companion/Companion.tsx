@@ -805,10 +805,11 @@ export function Companion() {
                 {small ? <Icons.MessageSquare size={13} /> : "Conversations"}
               </button>
             )}
+            buttons
             acts={[
-              { testId: "ideas-relate", label: "Relate…", disabled: busy, title: "Mark another idea as related to this one", run: () => setPick({ act: "relate", id: open.id }) },
-              { testId: "ideas-merge", label: "Merge into…", disabled: busy, title: "Move this idea's text into another idea; this one leaves the list", run: () => setPick({ act: "merge", id: open.id }) },
-              { testId: "ideas-split", label: "Split…", disabled: busy || !hasSel || mode !== "edit", title: "Split the selected text into a new idea (or drag the selection onto the list; ⌥ keeps a copy)", run: askSplit },
+              { testId: "ideas-relate", first: true, label: "Relate…", disabled: busy, title: "Mark another idea as related to this one", run: () => setPick({ act: "relate", id: open.id }) },
+              { testId: "ideas-merge", first: true, label: "Merge into…", disabled: busy, title: "Move this idea's text into another idea; this one leaves the list", run: () => setPick({ act: "merge", id: open.id }) },
+              { testId: "ideas-split", first: true, keeps: true, label: "Split…", disabled: busy || !hasSel || mode !== "edit", title: "Split the selected text into a new idea (or drag the selection onto the list; ⌥ keeps a copy)", run: askSplit },
               ...(listing?.dir ? [{ testId: "ideas-reveal", label: "Show in Finder", run: reveal }] : []),
               { testId: "ideas-remove", label: arm.armed === "remove" ? "Remove? Kept in .history" : "Remove", title: "Removes the file. A copy is kept in the folder's .history.", disabled: busy,
                 armed: arm.armed === "remove", stays: arm.armed !== "remove", run: remove },
