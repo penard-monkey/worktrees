@@ -30,7 +30,7 @@
 //! Every row here runs under the workspace's `life_lock`, and the poll only
 //! TRIES it: a start that is launching is not waited for, the next tick is.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
@@ -190,7 +190,7 @@ fn step(r: &mut Run, seen: Seen, now: Duration) -> Next {
 /// The folds of this engine, by chat id: running, and failed ones a client is
 /// still to be told of. One per engine.
 pub struct Folds {
-    runs: Mutex<HashMap<String, Run>>,
+    runs: Mutex<BTreeMap<String, Run>>,
     taken_up: OnceLock<()>,
     io: Arc<dyn FoldIo>,
 }
@@ -203,9 +203,9 @@ impl Default for Folds {
 
 impl Folds {
     pub fn new(io: Arc<dyn FoldIo>) -> Folds {
-        Folds { runs: Mutex::new(HashMap::new()), taken_up: OnceLock::new(), io }
+        Folds { runs: Mutex::new(BTreeMap::new()), taken_up: OnceLock::new(), io }
     }
-    fn runs(&self) -> MutexGuard<'_, HashMap<String, Run>> {
+    fn runs(&self) -> MutexGuard<'_, BTreeMap<String, Run>> {
         self.runs.lock().unwrap_or_else(|e| e.into_inner())
     }
     /// The chat of workspace `ws` that is folding now.
@@ -229,7 +229,7 @@ impl Folds {
         self.runs().retain(|_, r| r.workspace != ws);
     }
     /// The event's map, by session.
-    fn by_session(&self) -> std::collections::BTreeMap<String, FoldOf> {
+    fn by_session(&self) -> BTreeMap<String, FoldOf> {
         self.runs().iter().map(|(c, r)| (chats::session_name(c), fold_of(c, r))).collect()
     }
 }
@@ -926,6 +926,13 @@ mod tests {
         assert_eq!(d.fold(&a).unwrap_err(), "2 agents are already live");
         unchanged("the limit, asked before anything is ended");
         d.io.refuse.lock().unwrap().0 = None;
+        // A memory that cannot be committed first: its commit would not be the
+        // fold's alone, so nothing is folded.
+        let config = fs::read(d.mem(".git/config")).unwrap();
+        fs::write(d.mem(".git/config"), "[").unwrap();
+        assert!(d.fold(&a).unwrap_err().contains("nothing was folded"));
+        unchanged("a memory that cannot be committed");
+        fs::write(d.mem(".git/config"), config).unwrap();
         d.fold(&a).unwrap();
         assert_eq!(d.fold(&a).unwrap_err(), ERR_ALREADY);
         assert_eq!(d.fold(&b).unwrap_err(), "“Release order” is folding. Close this one after.");
@@ -1190,11 +1197,23 @@ mod tests {
         let conv = d.chat("X", true);
         d.fold(&conv).unwrap();
         d.note(&conv, "note\n", 5);
-        let lock = life_lock(&d.ctx, &d.ws);
+        // Another workspace's fold, asked for in the same second.
+        let other = store::create_at(&d.base.join("cfg/workspaces.json"), "Other").unwrap().id;
+        let c = chats::prepare_at(d.ctx.workspaces_dir(), &other, |_| String::new()).unwrap();
+        workspace_chat_fold(&d.ctx, other.clone(), c.id.clone()).unwrap();
+        let p = d.base.join("ws").join(&other).join(&c.note);
+        fs::write(&p, "note\n").unwrap();
+        let at = std::time::UNIX_EPOCH + Duration::from_millis(d.io.now_ms() + 5);
+        fs::File::options().write(true).open(&p).unwrap().set_modified(at).unwrap();
+        // The FIRST the poll comes to is locked; the one after it is not.
+        let (locked, free) = if conv < c.id { (d.ws.clone(), other) } else { (other, d.ws.clone()) };
+        let lock = life_lock(&d.ctx, &locked);
         let held = lock.lock().unwrap();
+        let mut landed = Vec::new();
         for _ in 0..4 {
-            assert!(d.tick(3).0.is_empty());
+            landed.extend(d.tick(3).0.into_iter().map(|n| n.workspace));
         }
+        assert_eq!(landed, vec![free]);
         drop(held);
         d.tick(3);
         assert_eq!(d.tick(3).0[0].event, "landed");
