@@ -48,6 +48,7 @@ export const GUEST_COMMANDS = [
   "shared_turns",
   "shared_tool_call",
   "shared_image",
+  "shared_call_image",
 ] as const;
 export type GuestCommand = (typeof GUEST_COMMANDS)[number];
 

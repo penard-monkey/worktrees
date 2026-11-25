@@ -21,7 +21,8 @@
 //
 // A live permission prompt is the owner's alone (D8): a guest sees "waiting
 // for David" where an unanswered question or plan sits in the transcript.
-// Pictures: the images in the agent's text, a Read of one inside the place, and
+// Pictures: the images in the agent's text, a Read of one (inside the place the
+// file, outside it the picture Claude was shown), and
 // the owner's own pictures in his messages (attached, or drawn in his text) are
 // asked for over the same connection (`shared_image`, GuestImage.tsx).
 // David's host offline: the last page stays, in memory only (§3.4, §6).
@@ -161,7 +162,7 @@ function Call(props: { link: GuestLink | undefined; share: string; binding: numb
   return (
     <li className={"chat-call-row" + (props.failed ? " failed" : "")} data-testid="guest-call">
       {fetches ? <button type="button" className="chat-call-btn" aria-expanded={open} onClick={() => void toggle()}>{head}</button> : <div className="chat-call">{head}</div>}
-      <SharedThumb at={props.at} turn={props.turn} path={readImagePath(props.name, props.summary, props.failed)} />
+      <SharedThumb at={props.at} turn={props.turn} path={readImagePath(props.name, props.summary, props.failed)} callId={props.call_id} />
       {open && (
         <div className="chat-call-full">
           {read?.text !== undefined && <pre className="chat-call-text">{read.text}</pre>}

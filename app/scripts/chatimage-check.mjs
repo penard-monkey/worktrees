@@ -210,7 +210,16 @@ try {
     // chat.ts's reader (it may not import chat.ts): the two regexes are one.
     const re = (f) => /^const ATTACHED = (\/.*\/[a-z]*);$/m.exec(fs.readFileSync(path.join(ROOT, f), "utf8"))?.[1] ?? null;
     check(re("src/attached.ts") !== null && re("src/attached.ts") === re("src/chat.ts"), "guest: attached.ts reads the `[attached: …]` tail exactly as chat.ts does");
-    check(/<SharedThumb [^>]*readImagePath\(props\.name, props\.summary, props\.failed\)/.test(gs), "guest: a Read of an image draws its thumbnail");
+    check(/<SharedThumb [^>]*readImagePath\(props\.name, props\.summary, props\.failed\)\} callId=\{props\.call_id\}/.test(gs), "guest: a Read of an image draws its thumbnail, and names its call for a file outside the place");
+    {
+      const cl = fake(() => ({ call_id: "toolu_o", mime: "image/png", b64: "BBBB", size: 3, truncated: false }));
+      const cat = { ...at, host: "h4", link: cl };
+      const c1 = await G.loadSharedCallImage(cat, "toolu_o", t0);
+      await G.loadSharedCallImage(cat, "toolu_o", t0 + 60_000);
+      check(JSON.stringify(cl.sent) === JSON.stringify([{ cmd: "shared_call_image", share: "s_1", call_id: "toolu_o" }]) && c1.b64 === "BBBB", "guest: a Read outside the place asks shared_call_image once by its call id, and keeps it (its pixels never change)");
+      const gi = fs.readFileSync(path.join(ROOT, "src/GuestImage.tsx"), "utf8");
+      check(/startsWith\("outside this place"\) \? loadSharedCallImage\(here, callId\)\.catch\(\(\) => Promise\.reject\(e\)\)/.test(gi), "guest: only the host's `outside this place` falls back to the call's picture, and a failed fallback looks as before");
+    }
     // `marked` hands the path as the host's `image_paths` reads it (the Rust
     // test's own table): the two must agree or a picture is refused.
     const rs = fs.readFileSync(path.join(ROOT, "../crates/worktrees-cli/src/serve/shareimage.rs"), "utf8");

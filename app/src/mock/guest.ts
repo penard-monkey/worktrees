@@ -31,7 +31,7 @@ const BRET = GUEST_HOST.principal_id;
 const OWNER = "David";
 
 /** dispatch.rs's `GUEST_ROWS`. */
-const ROWS = new Set(["shares_list", "share_join", "guest_places", "share_request", "thread_read", "thread_post", "shared_turns", "shared_tool_call", "shared_image"]);
+const ROWS = new Set(["shares_list", "share_join", "guest_places", "share_request", "thread_read", "thread_post", "shared_turns", "shared_tool_call", "shared_image", "shared_call_image"]);
 
 type Binding = { harness: string; state: "active" | "ended"; bound_at: number; ended_at: number | null };
 type Share = {
@@ -197,6 +197,16 @@ export function guestInvoke(cmd: string, args: Record<string, unknown>, emitEven
     }
     case "shared_image":
       return sharedImage(args);
+    case "shared_call_image": {
+      // The picture a Read was shown, from the transcript by call id.
+      if (new URLSearchParams(location.search).get("guestimage") === "old") throw `unknown command: ${cmd}`;
+      admitted(args.share);
+      const id = String(args.call_id);
+      const read = (transcripts[String(args.share)] ?? []).some((t) => (t.steps as { call_id?: string; name?: string; failed?: boolean }[]).some((st) => st.call_id === id && st.name === "Read" && !st.failed));
+      if (!read) throw "not shown: no picture of this call in this shared session";
+      images.calls.push(`call:${id}`);
+      return { call_id: id, mime: "image/svg+xml", b64: SVG, size: 300, truncated: false };
+    }
     case "shared_tool_call": {
       admitted(args.share);
       const id = String(args.call_id);

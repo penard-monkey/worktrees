@@ -9,7 +9,7 @@
 // be (2026-11-24). It holds that the pictures SHOW (decoded, hit by a click,
 // enlarged and closed), that a person's message draws only what the host
 // stored (the attachment) and is quiet about the rest, that a Read outside
-// the place has no thumbnail, that a host from before the row looks as it did,
+// the place has the picture Claude was shown, that a host from before the row looks as it did,
 // that pictures are asked for one at a time, and that one arriving late neither
 // leaves a reader at the bottom short of it nor moves a reader above.
 const pw = await import(process.env.PLAYWRIGHT_MODULE ?? "playwright");
@@ -34,7 +34,8 @@ for (const engine of ["webkit", "chromium"]) {
 
   {
     const page = await open("");
-    await page.waitForSelector(".guest-session .chat-img-thumb img", { timeout: 20000 }).catch(() => {});
+    // Pictures come one at a time: wait for both Reads' thumbnails.
+    await page.waitForFunction(() => document.querySelectorAll(".guest-session [data-testid=guest-agent] [data-testid=chat-img-thumb] img").length >= 2, null, { timeout: 20000 }).catch(() => {});
     const m = await page.evaluate(() => {
       const g = document.querySelector(".guest-session");
       const pics = [...g.querySelectorAll("[data-testid=chat-img] img")];
@@ -50,7 +51,7 @@ for (const engine of ["webkit", "chromium"]) {
       };
     });
     check(JSON.stringify(m.alts) === JSON.stringify(["Home view", "Place view"]) && m.decoded, `${engine}: the reply's pictures show (${m.alts.join(", ")})`);
-    check(m.thumbs === 1 && m.reads === 2, `${engine}: the Read inside the place has a thumbnail, the one outside none (${m.thumbs} of ${m.reads})`);
+    check(m.thumbs === 2 && m.reads === 2 && m.asked.calls.includes("call:call_r2"), `${engine}: both Reads have a thumbnail, the one outside the place from its call (${m.thumbs} of ${m.reads})`);
     check(m.notes.some((n) => n === "image not shown — not found: shots/missing.png") && m.notes.some((n) => /remote image not loaded: Logo/.test(n)) && m.notes.length === 2, `${engine}: a refusal and a remote URL are said (${m.notes.join(" | ")})`);
     check(JSON.stringify(m.userImg) === JSON.stringify(["Attached: 20261124-00000000000000aa.png"]) && m.userErr === 0 && !m.remote, `${engine}: a person's message draws the picture the host stored, says nothing of the one it refused, and nothing remote is loaded (${m.userImg.join(", ")})`);
     check(m.asked.most === 1, `${engine}: one picture at a time (${m.asked.most})`);

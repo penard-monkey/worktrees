@@ -35,8 +35,15 @@
 //! **An ended binding shows what it showed** (§3.3): an image changed on disk
 //! after the binding ended is another session's work, and is refused.
 //!
-//! A Read of a file OUTSIDE the place stays the console's (`agent_call_image`);
-//! here it is refused as `outside this place`, like any other path.
+//! **A Read of a file OUTSIDE the place** is refused here as `outside this
+//! place`, like any other path: the host never reads that path for a guest.
+//! Its picture is the one Claude was SHOWN, in the transcript, which the
+//! owner's chat draws from `agent_call_image` (console-only, because that row
+//! names a place, not a session). A guest's is `shared_call_image`
+//! ([`rows::call_image`]): the call must be one the shared session holds below
+//! its limit (the history index's, so another session's id and a turn past an
+//! ended binding are not), a Claude Read that did not fail, and its block
+//! passes `check_image` and the size cap. Nothing on disk is opened.
 
 use std::path::Path;
 
@@ -49,6 +56,11 @@ use worktrees_core::turns::{Step, Turn};
 /// not there, a path it does not show and a file that does not exist, given
 /// before the disk is looked at.
 pub const ERR_NOT_SHOWN_HERE: &str = "not shown in this shared session";
+
+/// No picture Claude was shown for that call in this shared session: one
+/// answer for an id it does not hold, a call that is no Read, a failed Read
+/// and a Read whose result holds no image.
+pub const ERR_NO_CALL_PICTURE: &str = "not shown: no picture of this call in this shared session";
 
 /// The picture on disk is newer than the shared session.
 pub const ERR_CHANGED: &str = "this picture was changed after the shared session ended";
@@ -298,6 +310,31 @@ pub mod rows {
             return Err(changed());
         }
         Ok(img)
+    }
+
+    /// `shared_call_image`: the picture a Claude Read of call `call_id` was
+    /// shown, from the shared session's own transcript (the module's header).
+    pub fn call_image(cx: &Call, share: String, binding: Option<usize>, call_id: String) -> Result<serde_json::Value, String> {
+        use worktrees_core::turns;
+        let s = history::rows::share(cx, &share)?;
+        let b = history::binding_of(&s, binding)?;
+        let gone = || ERR_NO_CALL_PICTURE.to_string();
+        if b.harness != "claude" || call_id.is_empty() {
+            return Err(gone());
+        }
+        let (turn, lines) = history::call_lines(&cx.ctx.config_dir, b, &call_id).map_err(|_| gone())?;
+        let read_ok = turns::history_turns(&b.harness, &lines, turns::TURN_TEXT_MAX).iter().any(|(t, _)| {
+            t.steps.iter().any(|st| matches!(st, Step::Tool { name, id, failed: false, .. } if name == "Read" && *id == call_id))
+        });
+        if !read_ok {
+            return Err(gone());
+        }
+        let img = turns::claude_call_image(&lines, &call_id).ok_or_else(gone)?;
+        if !img.truncated {
+            let bytes = attach::decode(&img.b64).map_err(|_| "not shown: the picture Claude was shown is not readable".to_string())?;
+            worktrees_core::safepath::check_image(&bytes, &img.mime, "the picture Claude was shown")?;
+        }
+        Ok(serde_json::json!({ "call_id": call_id, "turn": turn, "mime": img.mime, "b64": img.b64, "size": img.size, "truncated": img.truncated }))
     }
 }
 
@@ -655,6 +692,66 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1100));
         fs::write(main(&h).join(&kept), [PNG, b"later"].concat()).unwrap();
         assert!(ask(&h, &h.bret, &id, 1, &kept).is_err(), "changed after the share ended");
+    }
+
+    /// A Read whose result is the picture Claude was shown, as Claude 2.1.319
+    /// writes it: the block in `tool_result.content[]`.
+    fn shown(id: &str, path: &str, failed: bool, img: &[u8]) -> String {
+        read(id, path)
+            + &(json!({"type": "user", "uuid": "r", "timestamp": "2026-11-24T10:00:02Z",
+                "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": id, "is_error": failed,
+                    "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": worktrees_api::files::b64_encode(img)}}]}]}})
+            .to_string()
+                + "\n")
+    }
+
+    fn call(h: &Host, who: &Caller, share: &str, id: &str) -> Result<Value, Value> {
+        h.run(who, "shared_call_image", json!({"share": share, "call_id": id}))
+    }
+
+    /// The row: a guest read, keyed by the share, not one the console makes.
+    #[test]
+    fn the_call_row_is_a_guest_read() {
+        let row = TABLE.iter().find(|r| r.name == "shared_call_image").unwrap();
+        assert_eq!(row.cap, Some(Capability::Guest));
+        assert!(GUEST_ROWS.contains(&"shared_call_image") && GUEST_READS.contains(&"shared_call_image") && !CONSOLE_GUEST_ROWS.contains(&"shared_call_image"));
+        let o: Vec<&str> = row.objects.iter().flat_map(|o| o.args()).collect();
+        assert_eq!(o, vec!["share"]);
+    }
+
+    /// A Read of a file outside the place gives the guest the picture Claude
+    /// was shown, from the transcript: the file at that path is gone and the
+    /// picture still comes. Not another session's call, not a call past an
+    /// ended binding, not a failed Read, not a call that is no Read, not a
+    /// block too big to decode, and not for a guest who was not let in.
+    #[test]
+    fn a_guest_sees_the_picture_a_read_outside_the_place_was_shown() {
+        let h = Host::new("img-call");
+        let out = h.top.join("render.png");
+        let out = out.to_str().unwrap();
+        let mut big = PNG.to_vec();
+        big[16..24].copy_from_slice(&[0, 0, 0x27, 0x10, 0, 0, 0x27, 0x10]);
+        let bash = json!({"type": "assistant", "uuid": "a", "timestamp": "2026-11-24T10:00:01Z",
+            "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "c-bash", "name": "Bash", "input": {"command": "x"}}]}}).to_string() + "\n";
+        let text = user("draw") + &shown("c-ok", out, false, PNG) + &shown("c-fail", out, true, PNG) + &shown("c-big", out, false, &big)
+            + &bash + &shown("c-bash", out, false, PNG).split_once('\n').unwrap().1 + &reply("done");
+        let id = shared(&h, "feat", "s-1", &text);
+        let v = call(&h, &h.bret, &id, "c-ok").unwrap();
+        assert_eq!((v["mime"].as_str(), v["b64"].as_str(), v["turn"].as_u64()), (Some("image/png"), Some(worktrees_api::files::b64_encode(PNG).as_str()), Some(0)));
+        assert!(said(ask(&h, &h.bret, &id, 0, out)).starts_with("outside this place"), "the path itself is never read for a guest");
+        for c in ["c-fail", "c-bash", "nope", ""] {
+            assert_eq!(said(call(&h, &h.bret, &id, c)), ERR_NO_CALL_PICTURE, "{c}");
+        }
+        assert!(said(call(&h, &h.bret, &id, "c-big")).contains("not shown"), "too big to decode");
+        assert_eq!(call(&h, &h.eve, &id, "c-ok"), Err(json!(res::ERR_NOT_FOUND)), "not on the share");
+        // Another session's call, and one after the binding ended.
+        fs::write(h.top.join("s-2.jsonl"), user("x") + &shown("c-other", out, false, PNG)).unwrap();
+        assert_eq!(said(call(&h, &h.bret, &id, "c-other")), ERR_NO_CALL_PICTURE, "another session's");
+        h.live("feat", "s-2", 0);
+        h.poll();
+        append(&h, "s-1", &(user("later") + &shown("c-late", out, false, PNG)));
+        assert_eq!(said(call(&h, &h.bret, &id, "c-late")), ERR_NO_CALL_PICTURE, "after the share ended");
+        assert!(call(&h, &h.bret, &id, "c-ok").is_ok(), "an ended session shows what it showed");
     }
 
     /// The forms `marked` reads as an image, and what is not one.
