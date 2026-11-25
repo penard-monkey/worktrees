@@ -65,6 +65,7 @@ export function EditorHost(props: {
       focus: () => editor.focus(),
       selection: () => editor.selection(),
       insert: (from, to, text) => editor.insert(from, to, text),
+      put: (text, at) => editor.put(text, at),
       gotoLine: (n) => editor.gotoLine(n),
     };
     const next = props.cursorNext.current;

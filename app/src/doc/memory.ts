@@ -98,6 +98,7 @@ function make(id: string): MemoryDocs {
   const self: MemoryDocs = {
     workspace: id,
     noun: "file",
+    keeps: "History",
     // Nothing is cut off: a memory file has no frontmatter of ours.
     readBody: (text) => readableLinks(text),
     target(from, href): DocTarget | null {

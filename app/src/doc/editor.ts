@@ -25,7 +25,7 @@ import { drawSelection, EditorView, highlightSpecialChars, keymap } from "@codem
 import { tags as t } from "@lezer/highlight";
 import type { MarkdownConfig } from "@lezer/markdown";
 import type { DocEditor, EditorHooks } from "./editortypes";
-import { linkAt, pickerQuery } from "./ideasrelate";
+import { hrefAt, linkAt, pickerQuery } from "./ideasrelate";
 import { frontOf, guardedRanges, lineBreakOf, normalizeInserted } from "./ideatext";
 
 /** How far into the document the frontmatter is looked for. A frontmatter
@@ -222,9 +222,9 @@ function relateExtensions(hooks: EditorHooks): Extension[] {
         if (pos == null) return false;
         const line = view.state.doc.lineAt(pos);
         const id = linkAt(line.text, pos - line.from);
-        if (!id) return false;
+        const href = id ? `idea:${id}` : hrefAt(line.text, pos - line.from);
+        if (!href || !hooks.follow?.(href)) return false;
         e.preventDefault();
-        hooks.follow?.(id);
         return true;
       },
     }),
@@ -287,6 +287,10 @@ export function mountEditor(parent: HTMLElement, hooks: EditorHooks): DocEditor 
     insert(from, to, text) {
       v.dispatch({ changes: { from, to, insert: text }, selection: { anchor: from + text.length }, userEvent: "input.complete", scrollIntoView: true });
       v.focus();
+    },
+    put(text, at) {
+      const p = (at && v.posAtCoords(at)) ?? v.state.selection.main.head;
+      v.dispatch({ changes: { from: p, insert: text }, selection: { anchor: p + text.length }, userEvent: "input.paste", scrollIntoView: true });
     },
     gotoLine(n) {
       const l = v.state.doc.line(Math.max(1, Math.min(n, v.state.doc.lines)));

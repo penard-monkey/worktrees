@@ -92,6 +92,7 @@
 .ix-pop-item:hover, .ix-pop-item:focus-visible, .ix-pop-item.on { background: var(--bg-elev); outline: none; }
 .ix-pop-key { float: right; color: var(--txt); font-size: var(--fs-meta); margin-left: var(--s3); }
 .ix-pop-item:disabled { color: var(--txt-mute); background: transparent; }
+.ix-pop-item .ix-pop-key { pointer-events: none; }
 .ix-menu { width: 220px; box-sizing: border-box; }
 .ix-catch { position: fixed; inset: 0; z-index: 20; }
 body.dragging .ix-catch { pointer-events: none; }
