@@ -63,6 +63,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 
@@ -804,7 +805,7 @@ impl Repo {
     }
 
     fn has_commits(&self) -> bool {
-        self.run(&["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok_and(|o| o.status.success())
+        head_id(&self.place.git).is_some()
     }
 
     /// A revert this engine began and did not finish (it was killed between
@@ -1566,18 +1567,51 @@ fn parse_log(out: &str) -> Vec<Change> {
 }
 
 /// Which commits are undone now, and by which: a revert counts only while
-/// nothing has reverted IT.
-fn undone(repo: &Repo) -> Result<HashMap<String, String>, String> {
-    let out = repo.text(&["log", "-z", "--first-parent", "--fixed-strings", "--grep", REVERTS, "--format=tformat:%H%x02%b"])?;
-    let mut map: HashMap<String, String> = HashMap::new();
-    for rec in out.split('\0') {
-        let Some((sha, body)) = rec.trim_start_matches('\n').split_once('\x02') else { continue };
-        // Newest first, so whether this one stands is already known.
-        if let Some(target) = reverts_in(body).filter(|_| !map.contains_key(sha)) {
-            map.entry(target).or_insert_with(|| sha.to_string());
+/// nothing has reverted IT. The same for one HEAD always, so it is read once
+/// for each: the whole history's messages are behind it.
+fn undone(repo: &Repo) -> Result<Arc<Undone>, String> {
+    let Some(head) = head_id(&repo.place.git) else { return Ok(Arc::default()) };
+    UNDONE.of(&head, || {
+        let out = repo.text(&["log", "-z", "--first-parent", "--fixed-strings", "--grep", REVERTS, "--format=tformat:%H%x02%b", &head])?;
+        let mut map = Undone::new();
+        for rec in out.split('\0') {
+            let Some((sha, body)) = rec.trim_start_matches('\n').split_once('\x02') else { continue };
+            // Newest first, so whether this one stands is already known.
+            if let Some(target) = reverts_in(body).filter(|_| !map.contains_key(sha)) {
+                map.entry(target).or_insert_with(|| sha.to_string());
+            }
         }
+        Ok(map)
+    })
+}
+
+/// A commit, and the one that undid it.
+type Undone = HashMap<String, String>;
+
+static UNDONE: ByHead = ByHead(Mutex::new(VecDeque::new()));
+
+/// The last [`HEADS`] heads' answers. Two memories share no head: a commit's
+/// id is of everything behind it.
+struct ByHead(Mutex<VecDeque<(String, Arc<Undone>)>>);
+const HEADS: usize = 64;
+
+impl ByHead {
+    fn of(&self, head: &str, read: impl FnOnce() -> Result<Undone, String>) -> Result<Arc<Undone>, String> {
+        let known = |q: &VecDeque<(String, Arc<Undone>)>| q.iter().find(|(h, _)| h == head).map(|(_, u)| u.clone());
+        if let Some(u) = known(&self.0.lock().unwrap_or_else(|e| e.into_inner())) {
+            return Ok(u);
+        }
+        // Not under the lock: another memory's history is not waited for.
+        let u = Arc::new(read()?);
+        let mut q = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if known(&q).is_none() {
+            q.push_back((head.to_string(), u.clone()));
+            if q.len() > HEADS {
+                q.pop_front();
+            }
+        }
+        Ok(u)
     }
-    Ok(map)
 }
 
 /// The commits of workspace `id`'s memory that are undone now, whatever undid
@@ -1588,7 +1622,7 @@ pub fn undone_at(root: &Path, id: &str) -> Result<std::collections::HashSet<Stri
     if !repo.has_commits() {
         return Ok(Default::default());
     }
-    Ok(undone(&repo)?.into_keys().collect())
+    Ok(undone(&repo)?.keys().cloned().collect())
 }
 
 fn log_in(repo: &Repo, path: Option<&str>, before: Option<&str>, n: usize) -> Result<Log, String> {
@@ -1620,8 +1654,9 @@ fn log_in(repo: &Repo, path: Option<&str>, before: Option<&str>, n: usize) -> Re
 }
 
 /// The folder's changes, newest first, `n` at a time (50, at most 200), for
-/// one path when given. `before` is the last commit of the page before. Two
-/// git calls a page, whatever it holds.
+/// one path when given. `before` is the last commit of the page before. Three
+/// git calls for a page (the config's names, `before` itself, the log), and one
+/// over every message the first time a HEAD is asked about.
 pub fn log_at(root: &Path, id: &str, path: Option<&str>, before: Option<&str>, n: Option<usize>) -> Result<Log, String> {
     if let Some(p) = path {
         rel_ok(p)?;
@@ -1635,7 +1670,7 @@ fn change_of(repo: &Repo, commit: &str) -> Result<Change, String> {
     let commit = known(repo, commit)?;
     let out = repo.text(&["log", "-z", "--first-parent", "-m", "--no-renames", "--no-color", "--no-ext-diff", "--no-textconv", "--raw", "--abbrev=40", "--numstat", FORMAT, "--max-count=1", &commit, "--"])?;
     let mut c = parse_log(&out).pop().ok_or("no such change in this memory")?;
-    c.reverted_by = undone(repo)?.remove(&c.commit);
+    c.reverted_by = undone(repo)?.get(&c.commit).cloned();
     Ok(c)
 }
 
@@ -2873,6 +2908,68 @@ mod tests {
         s.put("topics/t.md", "x");
         assert!(ids_at(&s.root).is_empty());
         assert_eq!(commit_if_dirty_at(&s.root, &s.id, None).unwrap(), None);
+    }
+
+    /// What is undone is read once for a head, and again for another: a commit,
+    /// an undo and a redo each make one. A failure is kept for none.
+    #[test]
+    fn what_is_undone_is_read_once_a_head() {
+        let c = ByHead(Mutex::new(VecDeque::new()));
+        let reads = std::cell::Cell::new(0);
+        let of = |head: &str, ok: bool| {
+            c.of(head, || {
+                reads.set(reads.get() + 1);
+                if ok { Ok(Undone::from([(head.to_string(), "by".to_string())])) } else { Err("no".into()) }
+            })
+        };
+        assert!(of("a", false).is_err() && of("a", true).unwrap().contains_key("a"));
+        assert!(of("a", true).unwrap().contains_key("a") && of("b", true).unwrap().contains_key("b"));
+        assert_eq!(reads.get(), 3);
+        for i in 0..HEADS {
+            of(&format!("h{i}"), true).unwrap();
+        }
+        assert_eq!(c.0.lock().unwrap().len(), HEADS, "and no more are kept");
+        of("a", true).unwrap();
+        assert_eq!(reads.get(), 3 + HEADS + 1, "the oldest went");
+    }
+
+    /// What a page of History costs over a long one, measured:
+    /// `cargo test -p worktrees-core --release memory_history_cost -- --ignored
+    /// --nocapture`.
+    #[test]
+    #[ignore]
+    fn memory_history_cost() {
+        let s = Scratch::made("history-cost");
+        let repo = s.repo();
+        // Every tenth an undo of the one before, as git's own stream takes them.
+        let mut stream = String::new();
+        let head = repo.text(&["rev-parse", "HEAD"]).unwrap();
+        stream += &format!("reset refs/heads/main\nfrom {}\n", head.trim());
+        for i in 0..5000 {
+            let msg = if i % 10 == 9 { format!("Undo: e{i}\n\n{REVERTS}{}.", "0".repeat(39) + "1") } else { format!("Edited: topics/t{}.md", i % 40) };
+            let text = format!("{i}\n");
+            stream += &format!("commit refs/heads/main\ncommitter w <m@l> {} +0000\ndata {}\n{msg}\nM 100644 inline topics/t{}.md\ndata {}\n{text}\n", 1_700_000_000 + i, msg.len(), i % 40, text.len());
+        }
+        repo.feed(&["fast-import", "--quiet", "--force"], stream.as_bytes(), None).unwrap();
+        repo.bytes(&["read-tree", "HEAD"]).unwrap();
+        let time = |what: &str, f: &dyn Fn()| {
+            let t = std::time::Instant::now();
+            f();
+            let first = t.elapsed();
+            let t = std::time::Instant::now();
+            for _ in 0..10 {
+                f();
+            }
+            println!("{what}: {first:?}, then {:?}", t.elapsed() / 10);
+        };
+        let log = |path: Option<&str>, before: Option<&str>, n: usize| log_at(&s.root, &s.id, path, before, Some(n)).unwrap();
+        let deep = repo.text(&["rev-list", "--max-count=1", "--skip=4500", "HEAD"]).unwrap().trim().to_string();
+        time("the newest change (workspace_memory)", &|| assert_eq!(log(None, None, 1).changes.len(), 1));
+        time("a first page of 50", &|| assert_eq!(log(None, None, 50).changes.len(), 50));
+        time("a page of 50, 4500 commits down", &|| assert_eq!(log(None, Some(&deep), 50).changes.len(), 50));
+        time("a page of one file's", &|| assert_eq!(log(Some("topics/t7.md"), None, 50).changes.len(), 50));
+        time("one change (a diff's head)", &|| assert!(show_at(&s.root, &s.id, &deep, None).is_ok()));
+        time("the undone (a chat list's)", &|| assert!(undone_at(&s.root, &s.id).is_ok()));
     }
 
     /// The poll's cost, measured: `cargo test -p worktrees-core --release

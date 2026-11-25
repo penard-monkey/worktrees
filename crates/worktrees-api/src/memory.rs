@@ -22,9 +22,10 @@
 //! open History or Overview shows is out of date; a document is not.
 //!
 //! **What a tick costs:** one `readdir` a folder and one `lstat` an entry, for
-//! every workspace that has a memory, and no git. 20 workspaces of 200 files
-//! each measured 6.8 ms (core's `memory_poll_cost`, release, an Apple silicon
-//! Mac, warm cache): 0.2% of one core.
+//! every workspace that has a memory, and its newest commit's id read from two
+//! files; no git. 20 workspaces of 200 files each measured 8.5 ms (core's
+//! `memory_poll_cost`, release, an Apple silicon Mac, warm cache): 0.3% of one
+//! core. A file that moved is read and hashed, when it is small enough to open.
 //!
 //! **The quiet minute** (§9 item 2). A memory that moved is committed once it
 //! has been still for [`QUIET`]; a memory first seen counts as moved then, so
