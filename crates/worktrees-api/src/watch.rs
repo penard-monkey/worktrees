@@ -174,7 +174,8 @@ pub struct WorkspaceSessions {
     /// knows the folder ([`WorkspaceSessions::with_chats`]).
     pub chat_of: std::collections::BTreeMap<String, ChatOf>,
     /// Each chat with a fold to say something about, by its session's name,
-    /// live or not. Empty until the fold is built; the shape is its.
+    /// live or not: the ones running, and the failed ones until the chat is
+    /// folded again or closed (`workspacefolds`).
     pub fold: std::collections::BTreeMap<String, FoldOf>,
 }
 
@@ -190,10 +191,14 @@ pub struct ChatOf {
 pub struct FoldOf {
     pub workspace: String,
     pub chat: String,
-    /// `folding`, `waiting` (on a prompt) or `failed`.
+    /// `folding`, `waiting` (on a prompt), `checking` (the engine has just
+    /// started and has not looked yet) or `failed`.
     pub state: String,
     /// Why it failed, in words.
     pub why: Option<String>,
+    /// With `failed`: how many files it left changed and not committed; null
+    /// when that could not be read.
+    pub left: Option<u32>,
 }
 
 impl WorkspaceSessions {

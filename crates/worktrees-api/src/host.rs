@@ -95,6 +95,9 @@ pub struct Hooks {
     /// so the person sees it. A phone has no window of ours, so a server
     /// leaves this `None` and the event is the whole answer.
     pub on_inbox: Option<Box<dyn Fn() + Send + 'static>>,
+    /// A workspace chat's fold landed or failed: the poll's decision, which no
+    /// request made. Serve writes it to its audit log, which is in no `Ctx`.
+    pub on_fold: Option<Box<dyn Fn(&crate::workspacefolds::FoldNote) + Send + 'static>>,
 }
 
 /// Start the engine's background work for `ctx`, and return the poll thread.
@@ -340,7 +343,11 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
             pollctx.emit("ideas:sessions", payload(&idea_sessions));
             last_ideas = Some(idea_sessions);
         }
-        crate::workspacechats::tick(&pollctx, chats, &mut last_chats);
+        for note in crate::workspacechats::tick(&pollctx, chats, &mut last_chats) {
+            if let Some(f) = &hooks.on_fold {
+                f(&note);
+            }
+        }
         // Every harness without a probe file, read once each (`harness_feed`:
         // codex's rollouts, pi's session files).
         let lanes: Vec<(&'static str, LaneTick)> = provider::PROVIDERS
