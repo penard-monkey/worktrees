@@ -360,6 +360,30 @@ async function orphan(page, tag) {
   ok(await until(page, (id) => window.__mock.ideaFile(id).content.includes(" HELD"), plan), `${tag} and is saved from there`);
 }
 
+/** A workspace changed in the Ideas window (or by anybody else). */
+async function elsewhere(page, tag) {
+  await boot(page, ["beta_ideas"]);
+  const ws = (await call(page, "workspaces_list", {})).workspaces.find((w) => w.name === "Everything").id;
+  await pickWs(page);
+  await page.waitForSelector("[data-testid=ws-overview]");
+  await call(page, "workspace_link_idea", { id: ws, idea: JELLY });
+  ok(await page.evaluate(() => /None linked/.test(document.querySelector("[data-testid=ws-ov-card-ideas]").textContent)), `${tag} linked elsewhere: nothing here has heard`);
+  await page.evaluate(() => window.dispatchEvent(new StorageEvent("storage", { key: "wt.workspaces.changed", newValue: "1" })));
+  ok(await until(page, (id) => !!document.querySelector(`[data-testid=ws-ov-idea][data-idea='${id}']`) && !document.querySelector("[data-testid=ws-doc-ideas]").classList.contains("none"), JELLY), `${tag} the Ideas window's word brings it, on the Overview and the chip`);
+  await call(page, "workspace_unlink_idea", { id: ws, idea: JELLY });
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  ok(await until(page, () => /None linked/.test(document.querySelector("[data-testid=ws-ov-card-ideas]")?.textContent ?? "")), `${tag} and so does coming to the front`);
+  // The Ideas window says so: the real one, in a second page of this context.
+  const other = await page.context().newPage();
+  await other.addInitScript(() => { window.__said = 0; const set = Storage.prototype.setItem; Storage.prototype.setItem = function (k, v) { if (k === "wt.workspaces.changed") window.__said++; return set.call(this, k, v); }; });
+  await other.goto(`${BASE}/companion/index.html?ideas=seed&workspaces=1`);
+  await other.click(`[data-idea='${JELLY}'] button.ix-row-main`, { button: "right" });
+  await other.click("[data-testid=ideas-menu-link-ws]");
+  await other.locator(".ix-dialog button, [data-testid=ideas-ws-pick-row]").filter({ hasText: "Everything" }).first().click();
+  ok(await until(other, () => window.__said === 1), `${tag} Link to workspace… in the Ideas window says it`);
+  await other.close();
+}
+
 async function layout(page, tag, name) {
   await setup(page, ["beta_ideas", "beta_workspace_chats"]);
   for (const [w, h] of [[1600, 1000], [1440, 900], [1200, 800], [900, 700]]) {
@@ -429,7 +453,7 @@ async function themes(page, tag, name) {
 const only = process.env.ONLY?.split(",");
 for (const [engine, name] of [[chromium, "chromium"], [webkit, "webkit"]]) {
   const browser = await engine.launch();
-  for (const part of [gates, frame, history, life, removed, orphan, layout, themes]) {
+  for (const part of [gates, frame, history, life, removed, orphan, elsewhere, layout, themes]) {
     if (only && !only.includes(part.name)) continue;
     const page = await (await browser.newContext({ viewport: { width: 1440, height: 900 } })).newPage();
     const errors = [];

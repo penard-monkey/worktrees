@@ -70,7 +70,7 @@ import { publishGroupChat } from "./betaLive";
 import { publishLanes } from "./laneLive";
 import {
   agentFor, ideaOntoWorkspace, itemPlace, launchCall, linkIdeaCall, linkPlaceCall, mainAsk, MAIN_ASK_KEY, makePlanCall, missingPlaces, newPath, placeOntoItem, planOntoWorkspace, problemLine,
-  setPlanCall, setProjectCall, showRequest, SHOW_KEY, startCall, unlinkIdeaCall, WS_SHOW_KEY,
+  setPlanCall, setProjectCall, showRequest, SHOW_KEY, startCall, unlinkIdeaCall, WS_CHANGED_KEY, WS_SHOW_KEY,
   type ItemRef, type Overview, type PlanView, type ProjectSet, type ProjectState, type StartDone, type WorkItem,
 } from "./plans";
 import { privacyArea, privacyWords } from "./privacypaths";
@@ -6672,6 +6672,18 @@ function App() {
     invoke<WsList>("workspaces_list").then((l) => { if (alive) setWsList(l); }).catch(() => { if (alive) setWsList(null); });
     return () => { alive = false; };
   }, [wsRegKey]);
+  // …and when the Ideas window changed one (it says so), or this window comes
+  // to the front: no event carries a change of the list, and an agent or another
+  // window may have made one. A list that did not move is the one that is here.
+  const wsLoaded = wsList !== null;
+  useEffect(() => {
+    if (!wsLoaded) return;
+    const again = () => { invoke<WsList>("workspaces_list").then((l) => setWsList((cur) => (JSON.stringify(cur) === JSON.stringify(l) ? cur : l))).catch(() => {}); };
+    const onStorage = (e: StorageEvent) => { if (e.key === WS_CHANGED_KEY) again(); };
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("focus", again);
+    return () => { window.removeEventListener("storage", onStorage); window.removeEventListener("focus", again); };
+  }, [wsLoaded]);
   /** Adding never asks. */
   const wsAddProject = (id: string, root: string) => {
     const w = wsById(id);
