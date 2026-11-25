@@ -1,7 +1,16 @@
-//! Where the workspaces' own folders are: `~/.local/share/worktrees/workspaces/
-//! <workspace id>/`, each holding a workspace's chats (`workspacechats`) and
-//! its memory. The id is the workspace's ULID, so a rename moves nothing and
-//! no file stores a reference to the folder.
+//! Where the workspaces' own folders are, two halves of each:
+//!
+//! ```text
+//! ~/.local/share/worktrees/workspaces/
+//!   <workspace id>/            what a chat may read and write: its cwd
+//!   .engine/<workspace id>/    the engine's own state, never in a chat's cwd
+//!   .removed/                  what a removed workspace had
+//! ```
+//!
+//! The id is the workspace's ULID, so a rename moves nothing and no file
+//! stores a reference to the folder. The record of the chats, every lock and
+//! the memory's git dir are the engine's half: a file the chat can write is
+//! never what the engine trusts.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -61,6 +70,30 @@ pub fn make_at(root: &Path, id: &str) -> Result<PathBuf, String> {
     refuse_real(root)?;
     fs::create_dir_all(root).map_err(|e| format!("{}: {e}", root.display()))?;
     crate::fsx::make_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
+/// The folder of the engine's own half of every workspace, under the root.
+pub const ENGINE_DIR: &str = ".engine";
+
+/// Where the engine keeps its own state of workspace `id`, the id checked
+/// first. Not made here ([`make_engine_at`]).
+pub fn engine_dir_at(root: &Path, id: &str) -> Result<PathBuf, String> {
+    folder_at(root, id)?;
+    Ok(root.join(ENGINE_DIR).join(id))
+}
+
+/// Make workspace `id`'s engine half, its owner's alone, refusing a link on
+/// the way.
+pub fn make_engine_at(root: &Path, id: &str) -> Result<PathBuf, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = engine_dir_at(root, id)?;
+    refuse_real(root)?;
+    fs::create_dir_all(root).map_err(|e| format!("{}: {e}", root.display()))?;
+    for d in [&root.join(ENGINE_DIR), &dir] {
+        crate::fsx::make_dir(d).map_err(|e| format!("{}: {e}", d.display()))?;
+        fs::set_permissions(d, fs::Permissions::from_mode(0o700)).map_err(|e| format!("{}: {e}", d.display()))?;
+    }
     Ok(dir)
 }
 
@@ -133,6 +166,28 @@ mod tests {
         assert!(refuse_real_in(&real, &real, false).is_ok());
         assert!(refuse_real_in(&real.join("other"), &real, true).is_ok());
         let _ = fs::remove_dir_all(&real);
+    }
+
+    /// The engine's half is beside every workspace's folder and inside none, so
+    /// no chat's cwd holds it, and it is never reached through a link.
+    #[test]
+    fn the_engines_half_is_in_no_chats_folder_and_behind_no_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tmp("engine").join("workspaces");
+        let id = crate::ulid::new();
+        assert!(engine_dir_at(&root, "../x").is_err() && make_engine_at(&root, "").is_err());
+        let dir = engine_dir_at(&root, &id).unwrap();
+        assert!(!dir.starts_with(folder_at(&root, &id).unwrap()) && !dir.exists());
+        assert_eq!(make_engine_at(&root, &id).unwrap(), dir);
+        assert_eq!(make_engine_at(&root, &id).unwrap(), dir, "again");
+        assert_eq!(fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        let other = crate::ulid::new();
+        std::os::unix::fs::symlink("/tmp", root.join(ENGINE_DIR).join(&other)).unwrap();
+        assert!(make_engine_at(&root, &other).is_err());
+        let linked = tmp("engine-link");
+        std::os::unix::fs::symlink("/tmp", linked.join(ENGINE_DIR)).unwrap();
+        assert!(make_engine_at(&linked, &id).is_err());
+        assert!(!crate::ulid::is_valid(ENGINE_DIR), "nothing lists it as a workspace");
     }
 
     #[test]

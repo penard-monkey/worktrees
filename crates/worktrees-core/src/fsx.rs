@@ -55,10 +55,7 @@ fn write_atomic_named(
     let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let mut taken = None;
     for _ in 0..ATTEMPTS {
-        let mut tmp = OsString::from(".");
-        tmp.push(name);
-        tmp.push(format!(".{:016x}.tmp", suffix()));
-        let tmp = dir.join(tmp);
+        let tmp = dir.join(temp_of(name, suffix()));
         let file = match create(&tmp, if mode.is_some() { 0o600 } else { 0o666 }) {
             Ok(f) => f,
             Err(e) if is_taken(&e) => {
@@ -72,6 +69,43 @@ fn write_atomic_named(
         });
     }
     Err(taken.unwrap_or_else(|| io::Error::new(io::ErrorKind::AlreadyExists, "no free temp name")))
+}
+
+/// [`write_atomic`] of `name` in a folder that is held open: nothing on the way
+/// to it is looked up again. `mode` is the file's permission bits.
+pub fn write_atomic_in(dir: &crate::pindir::Dir, name: &str, bytes: &[u8], mode: Option<u32>) -> io::Result<()> {
+    let mut taken = None;
+    for _ in 0..ATTEMPTS {
+        let tmp = temp_of(name.as_ref(), random_suffix()).to_string_lossy().into_owned();
+        let mut file = match dir.create(&tmp, if mode.is_some() { 0o600 } else { 0o666 }) {
+            Ok(f) => f,
+            Err(e) if is_taken(&e) => {
+                taken = Some(e);
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        let done = (|| {
+            file.write_all(bytes)?;
+            if let Some(m) = mode {
+                file.set_permissions(Permissions::from_mode(m))?;
+            }
+            file.sync_all()?;
+            dir.rename(&tmp, dir, name)
+        })();
+        return done.inspect_err(|_| {
+            let _ = dir.unlink(&tmp);
+        });
+    }
+    Err(taken.unwrap_or_else(|| io::Error::new(io::ErrorKind::AlreadyExists, "no free temp name")))
+}
+
+/// What [`atomic_temp_target`] reads back.
+fn temp_of(name: &std::ffi::OsStr, n: u64) -> OsString {
+    let mut tmp = OsString::from(".");
+    tmp.push(name);
+    tmp.push(format!(".{n:016x}.tmp"));
+    tmp
 }
 
 fn create(path: &Path, mode: u32) -> io::Result<File> {
@@ -309,6 +343,27 @@ mod tests {
     }
 
     #[test]
+    fn a_write_in_a_held_folder_replaces_whole_keeps_its_mode_and_leaves_no_temp() {
+        let t = std::env::temp_dir().join(format!("wt-fsx-in-{:x}", random_u64()));
+        fs::create_dir_all(&t).unwrap();
+        let d = crate::pindir::Dir::open(&t).unwrap();
+        write_atomic_in(&d, "a.md", b"one", None).unwrap();
+        fs::set_permissions(t.join("a.md"), Permissions::from_mode(0o640)).unwrap();
+        write_atomic_in(&d, "a.md", b"two", Some(0o640)).unwrap();
+        assert_eq!((fs::read(t.join("a.md")).unwrap(), fs::metadata(t.join("a.md")).unwrap().mode() & 0o777), (b"two".to_vec(), 0o640));
+        // A link there is replaced, never written through.
+        fs::write(t.join("out"), "theirs").unwrap();
+        std::os::unix::fs::symlink(t.join("out"), t.join("l")).unwrap();
+        write_atomic_in(&d, "l", b"ours", None).unwrap();
+        assert_eq!((fs::read(t.join("out")).unwrap(), fs::symlink_metadata(t.join("l")).unwrap().is_file()), (b"theirs".to_vec(), true));
+        // A folder is not replaced, and its temp goes.
+        fs::create_dir_all(t.join("d/in")).unwrap();
+        assert!(write_atomic_in(&d, "d", b"x", None).is_err());
+        assert_eq!(d.names().unwrap(), ["a.md", "d", "l", "out"].map(OsString::from));
+        let _ = fs::remove_dir_all(&t);
+    }
+
+    #[test]
     fn creates_then_replaces_and_leaves_no_temp() {
         let t = tmp("replace");
         let f = t.0.join("a.json");
@@ -513,7 +568,6 @@ mod tests {
         ("worktrees-core/src/fsx.rs", "tmp.push(format!", "the helper itself"),
         ("worktrees-core/src/pihosts.rs", "wt-pihosts-test-", "cfg(test) only: a DIRECTORY per test process, written through write_atomic"),
         ("worktrees-core/src/fsx.rs", "strip_suffix(\".tmp\")", "recognises the helper's own temps for a sweep; builds nothing"),
-        ("worktrees-core/src/memory.rs", "b\".DS_Store\\n.*.tmp\\n\"", "an exclude pattern over the helper's own temps; builds nothing"),
         ("worktrees-core/src/materialize.rs", ".wt-tmp-", "links only: symlink(2) makes the link and refuses an existing name"),
         ("worktrees-core/src/slots.rs", "format!(\".{}.tmp\", me.pid)", "$XDG_STATE_HOME, and the fd must stay locked across the rename"),
         ("worktrees-core/src/guidance.rs", "format!(\".tmp-{}-{}\"", "a staged DIRECTORY in the user's data dir"),

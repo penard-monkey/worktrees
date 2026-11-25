@@ -2,12 +2,22 @@
 //! folder, belonging to no project (`docs/proposals/workspace-chats.md`).
 //!
 //! ```text
-//! <data dir>/worktrees/workspaces/<workspace id>/   the cwd of every chat
-//!   chats.json                    the record
-//!   chats/<conv>/start.md         what a chat opens on (fixed template)
-//!   chats/<conv>/context.md       the workspace as the engine sees it, data
-//!   memory/                       the memory repository (not this module's)
+//! <data dir>/worktrees/workspaces/
+//!   <workspace id>/                 the cwd of every chat, and all it may write
+//!     chats/<conv>/start.md         what a chat opens on (fixed template)
+//!     chats/<conv>/context.md       the workspace as the engine sees it, data
+//!     chats/<conv>/fold.md          what a fold is told (fixed template)
+//!     memory/                       the memory's files (not this module's)
+//!   .engine/<workspace id>/         the engine's own state, in no chat's cwd
+//!     chats.json                    the record, and its lock
 //! ```
+//!
+//! **What a chat can write is never what the engine trusts.** The record and
+//! every lock are in the engine's half. The three files in a chat's own folder
+//! are written by the engine before each use (`start.md` as the chat is made,
+//! `context.md` at every start, resume and fold, `fold.md` at every fold) and
+//! are never read back, so a chat that edits one changes nothing but what it
+//! itself reads next.
 //!
 //! A chat's session is `worktrees~ws~<conv>` ([`session_name`]), a desk
 //! session (`desksessions`): no place's reader takes it for its own. The
@@ -30,11 +40,12 @@
 //! * `--resume <id> '<prompt>'` takes the prompt, which a fold's opener needs
 //!   ([`launch_at`]).
 //!
-//! **`chats.json` is in the chat's own working directory**, so an agent can
-//! edit it. Nothing read from it reaches a path or argv unchecked: ids are
-//! ULIDs, the session id a UUID, and the note's path is the one this module
-//! names or it is none ([`note_name`]).
+//! **What is read from the record is checked all the same**: ids are ULIDs,
+//! the session id a UUID, a commit a full id, and the note's path one this
+//! module would have named ([`note_name`]). It was in the chat's folder once,
+//! and a record moved from there is the same text.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -44,11 +55,11 @@ use serde_json::{Map, Value};
 
 use crate::desksessions::{self as desk, Desk, Launch};
 pub use crate::desksessions::Start;
-use crate::wsfolder::{folder_at, make_at, refuse_real, OVERRIDE_ENV};
+use crate::wsfolder::{engine_dir_at, folder_at, make_at, refuse_real, OVERRIDE_ENV};
 
-/// The record, in the workspace's folder.
+/// The record, in the engine's half of the workspace.
 pub const RECORD: &str = "chats.json";
-const LOCK: &str = ".chats.json.lock";
+const LOCK: &str = "chats.json.lock";
 /// The folder of the chats' own folders, in the workspace's.
 pub const CHATS_DIR: &str = "chats";
 /// The file a chat opens on, in its own folder.
@@ -85,16 +96,43 @@ fn check_conv(conv: &str) -> Result<(), String> {
 }
 
 fn ws_desk(root: &Path, ws: &str) -> Result<Desk, String> {
+    let (folder, engine) = (folder_at(root, ws)?, engine_dir_at(root, ws)?);
+    migrate(root, ws, &folder, &engine)?;
     Ok(Desk {
         root: root.to_path_buf(),
-        dirs: vec![folder_at(root, ws)?],
+        dirs: vec![root.join(crate::wsfolder::ENGINE_DIR), engine],
         file: RECORD,
-        convs: CHATS_DIR,
+        convs: vec![folder.clone(), folder.join(CHATS_DIR)],
         owner: format!("the workspace {ws}"),
         noun: NOUN,
         refuse_real,
         lock: Some(LOCK),
     })
+}
+
+/// A record the earlier layout kept in the workspace's folder, moved to the
+/// engine's half the first time it is touched. Once: a `chats.json` there with
+/// the engine's own beside it is a file a chat made.
+fn migrate(root: &Path, ws: &str, folder: &Path, engine: &Path) -> Result<(), String> {
+    let (old, new) = (folder.join(RECORD), engine.join(RECORD));
+    let there = |p: &Path| fs::symlink_metadata(p).is_ok();
+    if there(&new) || !fs::symlink_metadata(&old).is_ok_and(|m| m.file_type().is_file()) {
+        return Ok(());
+    }
+    static ONCE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _serial = ONCE.lock().unwrap_or_else(|e| e.into_inner());
+    crate::wsfolder::make_engine_at(root, ws)?;
+    // A hard link is refused where a name is taken, so two engines that meet
+    // here move it once; a rename would write over the other's.
+    match fs::hard_link(&old, &new) {
+        Ok(()) => {
+            let _ = fs::remove_file(&old);
+            let _ = fs::remove_file(folder.join(".chats.json.lock"));
+            Ok(())
+        }
+        Err(e) if there(&new) || e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("{}: {e}", new.display())),
+    }
 }
 
 /// Refuse a workspaces folder inside a registered project, or one holding a
@@ -133,18 +171,23 @@ pub fn opener(conv: &str) -> String {
     format!("Read {CHATS_DIR}/{conv}/{START} and begin.")
 }
 
-/// The workspace chat `conv` belongs to: the folder `<ws>/chats/<conv>/`,
-/// looked for under each workspace, real directories only. The poll's
-/// question for a live session: one `readdir`, two `lstat`s per workspace.
-pub fn workspace_of_conv(root: &Path, conv: &str) -> Option<String> {
-    if !crate::ulid::is_valid(conv) {
-        return None;
+/// The workspace each chat belongs to, by the engine's own records: the
+/// poll's question, asked once a tick. A record that cannot be read names
+/// none of its chats, for that tick.
+pub fn workspaces_of_convs(root: &Path) -> HashMap<String, String> {
+    let Ok(dir) = fs::read_dir(root.join(crate::wsfolder::ENGINE_DIR)) else { return HashMap::new() };
+    let mut map = HashMap::new();
+    for ws in dir.filter_map(Result::ok).filter_map(|e| e.file_name().into_string().ok()).filter(|n| crate::ulid::is_valid(n)) {
+        for c in read_record_at(root, &ws).map(|r| r.conversations).unwrap_or_default() {
+            map.insert(c.id, ws.clone());
+        }
     }
-    let real = |p: &Path| fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_dir());
-    fs::read_dir(root).ok()?.filter_map(Result::ok).filter_map(|e| e.file_name().into_string().ok()).filter(|n| crate::ulid::is_valid(n)).find(|ws| {
-        let chats = root.join(ws).join(CHATS_DIR);
-        real(&root.join(ws)) && real(&chats) && real(&chats.join(conv))
-    })
+    map
+}
+
+/// The workspace chat `conv` belongs to ([`workspaces_of_convs`]).
+pub fn workspace_of_conv(root: &Path, conv: &str) -> Option<String> {
+    workspaces_of_convs(root).remove(conv)
 }
 
 // ── the record ──────────────────────────────────────────────────────────────
@@ -171,6 +214,9 @@ pub struct Chat {
     /// good. Named here, never by the agent.
     #[serde(default)]
     pub note: String,
+    /// What it was last launched with; none from a build before this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<Access>,
     /// Its last fold, or none asked yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fold: Option<Fold>,
@@ -189,10 +235,23 @@ pub struct Fold {
     /// nothing.
     #[serde(default)]
     pub state: String,
-    /// [`Fold::asked`] as milliseconds since the epoch: what a note's mtime is
-    /// compared to, across a restart too.
+    /// [`Fold::asked`] as milliseconds since the epoch, for a client's clock.
+    /// Nothing is decided by it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asked_ms: Option<u64>,
+    /// Which attempt this is, a ULID made when it was asked: its opener and its
+    /// commit's body carry it, so an earlier fold's answer or commit is never
+    /// taken for this one's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<String>,
+    /// The note's revision as it was asked ([`note_rev`]); none when there was
+    /// no note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+    /// Its receipt is written and its session is still to be ended: an engine
+    /// that starts and finds this ends it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub closing: bool,
     /// The fold's commit in the memory repository, a full id; none while it
     /// runs, and for one that changed nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -301,6 +360,7 @@ pub fn name_note(c: &mut Chat, date: &str) {
 fn checked(mut c: Chat) -> Chat {
     if let Some(f) = c.fold.as_mut() {
         f.commit = f.commit.take().filter(|s| crate::memory::is_sha(s));
+        f.attempt = f.attempt.take().filter(|s| crate::ulid::is_valid(s));
     }
     if !note_ok(&c) {
         c.note.clear();
@@ -324,6 +384,13 @@ pub fn find_at(root: &Path, ws: &str, conv: &str) -> Result<Chat, String> {
 /// The workspace's chats, newest first.
 pub fn list_at(root: &Path, ws: &str) -> Result<Vec<Chat>, String> {
     Ok(ws_desk(root, ws)?.list()?.into_iter().map(checked).collect())
+}
+
+/// The chat that is folding in workspace `ws`, by the record, whichever engine
+/// wrote it. A record that cannot be read is an error: whoever asks must not
+/// take it for "none".
+pub fn folding_at(root: &Path, ws: &str) -> Result<Option<String>, String> {
+    Ok(read_record_at(root, ws)?.conversations.into_iter().find(|c| c.fold.as_ref().is_some_and(|f| f.state == FOLDING)).map(|c| c.id))
 }
 
 /// Change chat `conv`'s entry (the fold lane's door to its `fold`).
@@ -378,6 +445,7 @@ pub fn prepare_at(root: &Path, ws: &str, context: impl FnOnce(&str) -> String) -
             title: next_title(rec),
             last_activity: started.clone(),
             started,
+            access: None,
             fold: None,
             extra: Map::new(),
         };
@@ -460,6 +528,7 @@ pub const WHY_PRIVATE_PATH: &str = "private, by instruction only: its path has a
 pub const WHY_PRIVATE_GONE: &str = "private, by instruction only: its folder is not there";
 pub const WHY_WITHIN: &str = "it is inside a private project of this workspace";
 pub const WHY_GONE: &str = "its folder is not there";
+pub const WHY_UNREAD: &str = "the list of projects could not be read";
 pub const WHY_PATH: &str = "its path has a character a permission rule cannot hold";
 pub const WHY_INSIDE: &str = "a private project inside it has a path a permission rule cannot hold";
 
@@ -501,6 +570,12 @@ fn denied_private(w: &crate::workspaces::Workspace, reg: &crate::registry::Regis
     w.projects.iter().filter(|p| reg.by_root(&p.root).is_some_and(|e| e.private)).filter_map(|p| rule_root(&p.root).ok()).collect()
 }
 
+/// [`project_reads`] where the registry could not be read: each is named, and
+/// none is read.
+pub fn project_reads_unknown(w: &crate::workspaces::Workspace) -> Vec<ProjectRead> {
+    w.projects.iter().map(|p| ProjectRead { root: p.root.clone(), name: None, registered: false, private: false, reads: Reads::No, why: Some(WHY_UNREAD) }).collect()
+}
+
 /// What a chat of `w` reads: each project, in the workspace's order. The
 /// registry decides which, and [`settings`] says it to Claude. A project
 /// inside a private one of `w` is not read: that one's deny beats any allow.
@@ -537,6 +612,134 @@ pub fn project_reads(w: &crate::workspaces::Workspace, reg: &crate::registry::Re
             }
         })
         .collect()
+}
+
+/// What stops a chat and what does not, as the app says it beside what it
+/// reads. Fixed text: it is the same for every chat.
+pub const LIMITS: &str = "The rules are set when the chat starts. They stop Claude's file tools, not every program it runs.";
+
+/// The registry a chat's rules are made from, or why none is started. One that
+/// cannot be read is not an empty one, and neither is one that is missing or
+/// blank under a workspace that has projects: with no registry there is no
+/// private project to deny, and the chat would be launched with no rules.
+pub fn policy(w: &crate::workspaces::Workspace) -> Result<crate::registry::Registry, String> {
+    policy_at(&crate::registry::path(), w)
+}
+
+fn policy_at(p: &Path, w: &crate::workspaces::Workspace) -> Result<crate::registry::Registry, String> {
+    let refuse = |why: String| Err(format!("the list of projects {why}, and what a chat may read comes from it: no chat is started"));
+    match fs::read(p) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound && !w.projects.is_empty() => return refuse(format!("is missing ({})", p.display())),
+        Ok(b) if b.iter().all(u8::is_ascii_whitespace) && !w.projects.is_empty() => return refuse(format!("is empty ({})", p.display())),
+        // serde reads `[]` and `{}` as a registry with nothing in it.
+        Ok(b) if !b.iter().all(u8::is_ascii_whitespace) && !serde_json::from_slice::<Value>(&b).is_ok_and(|v| v["projects"].is_array()) => {
+            return refuse(format!("could not be read ({} holds no list)", p.display()));
+        }
+        _ => {}
+    }
+    crate::registry::read_strict_at(p).or_else(|e| refuse(format!("could not be read ({e})")))
+}
+
+/// What a chat was launched with, as its record keeps it: the rules are its
+/// launch's for as long as it lives, whatever the registry or the workspace
+/// says since.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct Access {
+    /// When, `YYYY-MM-DDTHH:MM:SSZ`.
+    pub at: String,
+    /// A digest of the rules, whole: equal text, equal digest.
+    pub digest: String,
+    #[serde(default)]
+    pub projects: Vec<AccessProject>,
+    #[serde(default)]
+    pub documents: Vec<AccessDoc>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AccessProject {
+    pub root: String,
+    pub name: String,
+    pub read: bool,
+    /// Why it was not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AccessDoc {
+    pub id: String,
+    pub title: String,
+    pub path: String,
+}
+
+/// One thing a launch now would do differently.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct AccessChange {
+    /// `project`, `document`, or `rules` for anything else in them.
+    pub kind: &'static str,
+    pub name: String,
+    pub path: String,
+    /// A project: `private`, `removed` (from the workspace), `unregistered`,
+    /// `unreadable`, `readable`, `added`. A document: `unlinked`, `gone`,
+    /// `moved`, `linked`. `other` for the rules.
+    pub change: &'static str,
+}
+
+/// What a launch of a chat of `w` would get now.
+pub fn access(w: &crate::workspaces::Workspace, src: &Sources) -> Result<Access, String> {
+    Ok(Access {
+        at: desk::now_iso(),
+        digest: crate::guidance::text_hash(&settings(w, src)?),
+        projects: project_reads(w, src.reg)
+            .into_iter()
+            .map(|p| AccessProject { name: p.name.clone().unwrap_or_else(|| last_part(&p.root)), read: p.reads == Reads::Yes, why: p.why.map(String::from), root: p.root })
+            .collect(),
+        documents: doc_reads(w, src)
+            .into_iter()
+            .filter(|d| d.reads == Reads::Yes)
+            .filter_map(|d| Some(AccessDoc { id: d.live?, title: d.title.unwrap_or_default(), path: d.path? }))
+            .collect(),
+    })
+}
+
+fn last_part(p: &str) -> String {
+    p.rsplit('/').next().unwrap_or(p).to_string()
+}
+
+/// What changed between what a chat was launched with and what it would get
+/// now. Nothing in it, and the same rules, is `current`.
+pub fn access_changes(then: &Access, now: &Access) -> Vec<AccessChange> {
+    let mut out = Vec::new();
+    let project = |p: &AccessProject, change| AccessChange { kind: "project", name: p.name.clone(), path: p.root.clone(), change };
+    for p in &then.projects {
+        match now.projects.iter().find(|n| n.root == p.root) {
+            None => out.push(project(p, "removed")),
+            Some(n) if n.read == p.read && n.why == p.why => {}
+            Some(n) if n.read => out.push(project(n, "readable")),
+            Some(n) => out.push(project(
+                p,
+                match n.why.as_deref() {
+                    Some(w) if w.starts_with(WHY_PRIVATE) => "private",
+                    Some(WHY_UNREGISTERED) => "unregistered",
+                    _ => "unreadable",
+                },
+            )),
+        }
+    }
+    out.extend(now.projects.iter().filter(|n| !then.projects.iter().any(|p| p.root == n.root)).map(|n| project(n, "added")));
+    let doc = |d: &AccessDoc, change| AccessChange { kind: "document", name: d.title.clone(), path: d.path.clone(), change };
+    for d in &then.documents {
+        match now.documents.iter().find(|n| n.id == d.id) {
+            None => out.push(doc(d, if Path::new(&d.path).exists() { "unlinked" } else { "gone" })),
+            Some(n) if n.path != d.path => out.push(doc(n, "moved")),
+            Some(_) => {}
+        }
+    }
+    out.extend(now.documents.iter().filter(|n| !then.documents.iter().any(|d| d.id == n.id)).map(|n| doc(n, "linked")));
+    if out.is_empty() && then.digest != now.digest {
+        out.push(AccessChange { kind: "rules", name: String::new(), path: String::new(), change: "other" });
+    }
+    out
 }
 
 /// What a chat's rules and lists are made from.
@@ -658,6 +861,10 @@ pub fn settings(w: &crate::workspaces::Workspace, src: &Sources) -> Result<Strin
     }
     if let Ok(root) = ideas_rule(src) {
         deny.push(format!("Edit(/{root}/**)"));
+    }
+    // The engine's own state is beside the chat's folder, not in it.
+    if let Ok(engine) = plain_path(&crate::wsfolder::resolved(src.root).join(crate::wsfolder::ENGINE_DIR)) {
+        deny.push(format!("Edit(/{engine}/**)"));
     }
     for root in denied_private(w, reg) {
         let rule = format!("Read(/{root}/**)");
@@ -810,13 +1017,26 @@ pub fn note_exists(root: &Path, ws: &str, c: &Chat) -> bool {
 /// `None` unless it is a regular file at the path this module names, through
 /// no link.
 pub fn note_mtime_ms(root: &Path, ws: &str, c: &Chat) -> Option<u64> {
+    Some(note_stat(root, ws, c)?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64)
+}
+
+/// Which writing of chat `c`'s note is on disk: its time to the nanosecond, its
+/// size and its inode. Equal is untouched, whatever the clock says; a note
+/// rewritten with the same words is another one.
+pub fn note_rev(root: &Path, ws: &str, c: &Chat) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let m = note_stat(root, ws, c)?;
+    Some(format!("{}.{:09}-{}-{}", m.mtime(), m.mtime_nsec(), m.size(), m.ino()))
+}
+
+fn note_stat(root: &Path, ws: &str, c: &Chat) -> Option<fs::Metadata> {
     if !note_ok(c) {
         return None;
     }
     let rel = PathBuf::from(&c.note);
     let mut at = folder_at(root, ws).ok()?;
     let parts: Vec<_> = rel.components().collect();
-    let mut mtime = None;
+    let mut found = None;
     for (i, part) in parts.iter().enumerate() {
         let Component::Normal(n) = part else { return None };
         at.push(n);
@@ -825,9 +1045,9 @@ pub fn note_mtime_ms(root: &Path, ws: &str, c: &Chat) -> Option<u64> {
         if !(if last { md.file_type().is_file() } else { md.file_type().is_dir() }) {
             return None;
         }
-        mtime = md.modified().ok();
+        found = Some(md);
     }
-    Some(mtime?.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64)
+    found
 }
 
 // ── the fold's file ─────────────────────────────────────────────────────────
@@ -866,30 +1086,55 @@ pub fn fold_text(folder: &Path, c: &Chat) -> String {
     )
 }
 
-/// The fold's fixed opener: the absolute path of a file the engine wrote.
-pub fn fold_opener(folder: &Path, conv: &str) -> String {
-    format!("Read {} and do what it says.", folder.join(CHATS_DIR).join(conv).join(FOLD).display())
+/// The fold's fixed opener: the absolute path of a file the engine wrote, and
+/// the attempt's id, so the turn it opens is known from any other's.
+pub fn fold_opener(folder: &Path, conv: &str, attempt: &str) -> String {
+    format!("Read {} and do what it says. This is fold {attempt}.", folder.join(CHATS_DIR).join(conv).join(FOLD).display())
 }
 
 /// Write chat `c`'s `fold.md` and answer the opener that reads it.
-pub fn write_fold_at(root: &Path, ws: &str, c: &Chat) -> Result<String, String> {
+pub fn write_fold_at(root: &Path, ws: &str, c: &Chat, attempt: &str) -> Result<String, String> {
+    if !crate::ulid::is_valid(attempt) {
+        return Err(format!("not a fold's id: {attempt:?}"));
+    }
     if !note_ok(c) {
         return Err(format!("chat {} has no note to fold into", c.id));
     }
     let folder = folder_at(root, ws)?;
     let own = ws_desk(root, ws)?.make_conv_dir(&c.id)?;
     crate::fsx::write_atomic(&own.join(FOLD), fold_text(&folder, c).as_bytes(), None).map_err(|e| format!("{FOLD}: {e}"))?;
-    Ok(fold_opener(&folder, &c.id))
+    Ok(fold_opener(&folder, &c.id, attempt))
 }
 
-/// Whether the newest turn of a fold's transcript is the fold's, and its
-/// reply says, on a line of its own, that it changed nothing. `turn` is the newest: its prompt
-/// must be this fold's opener, written no earlier than the fold (`asked_ms`),
-/// or an earlier fold's answer would end this one.
-pub fn said_nothing(turn: &crate::turns::Turn, opener: &str, asked_ms: u64) -> bool {
-    turn.user.as_deref().map(str::trim) == Some(opener)
-        && turn.at.is_some_and(|at| at >= (asked_ms / 1000) as i64)
-        && turn.reply.lines().any(|l| l.trim().trim_matches(['`', '*', '_']) == NOTHING)
+/// What a fold's own turn came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FoldTurn {
+    /// Not there yet, still going, stopped, or ended by an error.
+    Open,
+    /// It said its last words: what it changed.
+    Finished,
+    /// Its last line says it changed nothing.
+    Nothing,
+}
+
+/// What the turn `opener` opened came to, in the transcript `turns`. The opener
+/// carries the attempt's id, so no other fold's turn is this one. It is over
+/// when its last step is Claude's own text: after a tool call it is still
+/// going, and one that was interrupted, or that an API error ended, never says
+/// its last words.
+pub fn fold_turn(turns: &[crate::turns::Turn], opener: &str) -> FoldTurn {
+    let Some(i) = turns.iter().rposition(|t| t.user.as_deref().map(str::trim) == Some(opener)) else { return FoldTurn::Open };
+    let t = &turns[i];
+    // Claude writes a stop as an entry of its own, after whatever it had said.
+    if turns.get(i + 1).is_some_and(|n| matches!(n.notice, Some(crate::turns::Notice::Interrupt))) {
+        return FoldTurn::Open;
+    }
+    let Some(crate::turns::Step::Text { text, .. }) = t.steps.last() else { return FoldTurn::Open };
+    let Some(last) = text.lines().map(str::trim).filter(|l| !l.is_empty()).last() else { return FoldTurn::Open };
+    if text.trim_start().starts_with("API Error") {
+        return FoldTurn::Open;
+    }
+    if last.trim_matches(['`', '*', '_']) == NOTHING { FoldTurn::Nothing } else { FoldTurn::Finished }
 }
 
 /// The other chats of `ws` that have a note, oldest first, for `context.md`.
@@ -923,15 +1168,20 @@ fn launch<'a>(cwd: &'a Path, c: &'a Chat, session: &'a str, how: Start, opener: 
 pub fn launch_at(root: &Path, ideas: &Path, w: &crate::workspaces::Workspace, conv: &str, how: Start, resume_opener: Option<String>) -> Result<String, String> {
     check_conv(conv)?;
     let cwd = folder_at(root, &w.id)?;
-    let reg = crate::registry::read_lenient();
+    let reg = policy(w)?;
     check_root(root, &reg.roots())?;
-    let settings = settings(w, &Sources { root, ideas, reg: &reg })?;
+    let src = Sources { root, ideas, reg: &reg };
+    let settings = settings(w, &src)?;
+    let given = access(w, &src)?;
     let c = find_at(root, &w.id, conv)?;
     let session = session_name(&c.id);
     let opener = match how {
         Start::Fresh => Some(opener(&c.id)),
         Start::Resume => resume_opener,
     };
+    // Recorded before it runs: a chat is never live under rules its record
+    // does not name.
+    update_at(root, &w.id, conv, |c| c.access = Some(given))?;
     launch(&cwd, &c, &session, how, opener, settings).run()?;
     Ok(session)
 }
@@ -941,7 +1191,7 @@ pub fn launch_at(root: &Path, ideas: &Path, w: &crate::workspaces::Workspace, co
 pub fn may_relaunch_at(root: &Path, ideas: &Path, w: &crate::workspaces::Workspace, conv: &str) -> Result<(), String> {
     check_conv(conv)?;
     let cwd = folder_at(root, &w.id)?;
-    let reg = crate::registry::read_lenient();
+    let reg = policy(w)?;
     check_root(root, &reg.roots())?;
     let c = find_at(root, &w.id, conv)?;
     let session = session_name(&c.id);
@@ -954,7 +1204,7 @@ pub fn may_relaunch_at(root: &Path, ideas: &Path, w: &crate::workspaces::Workspa
 pub fn start_at(root: &Path, ideas: &Path, w: &crate::workspaces::Workspace, context: impl FnOnce(&str) -> String) -> Result<(Chat, String), String> {
     let ws = w.id.as_str();
     let dir = folder_at(root, ws)?;
-    check_root(root, &crate::registry::read_lenient().roots())?;
+    check_root(root, &policy(w)?.roots())?;
     let had_folder = fs::symlink_metadata(&dir).is_ok();
     let c = prepare_at(root, ws, context)?;
     match launch_at(root, ideas, w, &c.id, Start::Fresh, None) {
@@ -962,22 +1212,24 @@ pub fn start_at(root: &Path, ideas: &Path, w: &crate::workspaces::Workspace, con
         Err(e) => {
             let _ = remove_at(root, ws, &c.id);
             if !had_folder {
-                undo_folder(&dir);
+                undo_folder(root, ws);
             }
             Err(e)
         }
     }
 }
 
-/// Take back a folder this start made, only while it holds nothing but what
-/// the start made: an empty record, its lock and an empty `chats/`.
-fn undo_folder(dir: &Path) {
-    let _ = fs::remove_dir(dir.join(CHATS_DIR));
-    let others = fs::read_dir(dir).map(|d| d.filter_map(Result::ok).any(|e| e.file_name() != RECORD && e.file_name() != LOCK)).unwrap_or(true);
-    if !others {
-        let _ = fs::remove_file(dir.join(RECORD));
-        let _ = fs::remove_file(dir.join(LOCK));
-        let _ = fs::remove_dir(dir);
+/// Take back what this start made, only while it is nothing else: an empty
+/// folder and `chats/`, and in the engine's half an empty record and its lock.
+fn undo_folder(root: &Path, ws: &str) {
+    let (Ok(folder), Ok(engine)) = (folder_at(root, ws), engine_dir_at(root, ws)) else { return };
+    let _ = fs::remove_dir(folder.join(CHATS_DIR));
+    let _ = fs::remove_dir(&folder);
+    let others = fs::read_dir(&engine).map(|d| d.filter_map(Result::ok).any(|e| e.file_name() != RECORD && e.file_name() != LOCK)).unwrap_or(true);
+    if !others && fs::symlink_metadata(&folder).is_err() {
+        let _ = fs::remove_file(engine.join(RECORD));
+        let _ = fs::remove_file(engine.join(LOCK));
+        let _ = fs::remove_dir(&engine);
     }
 }
 
@@ -988,15 +1240,20 @@ pub fn close(conv: &str) -> Result<bool, String> {
     desk::close(&session_name(conv))
 }
 
-/// Move removed workspace `ws`'s folder to `.removed/<id>/` (`<id>-2`, … when
+/// Move removed workspace `ws`'s folder to `.removed/<id>/`, and the engine's
+/// half of it to `.removed/<id>/.engine/` (`<id>-2`, … when
 /// that is taken) and answer where it went, or `None` when it had none. The
 /// app deletes nothing here.
 pub fn retire_folder_at(root: &Path, ws: &str) -> Result<Option<PathBuf>, String> {
-    let dir = folder_at(root, ws)?;
-    match fs::symlink_metadata(&dir) {
-        Ok(_) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("{}: {e}", dir.display())),
+    let (dir, engine) = (folder_at(root, ws)?, engine_dir_at(root, ws)?);
+    let there = |p: &Path| match fs::symlink_metadata(p) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("{}: {e}", p.display())),
+    };
+    let (has_dir, has_engine) = (there(&dir)?, there(&engine)?);
+    if !has_dir && !has_engine {
+        return Ok(None);
     }
     refuse_real(root)?;
     let removed = root.join(REMOVED_DIR);
@@ -1005,14 +1262,30 @@ pub fn retire_folder_at(root: &Path, ws: &str) -> Result<Option<PathBuf>, String
         .map(|n| removed.join(if n == 1 { ws.to_string() } else { format!("{ws}-{n}") }))
         .find(|p| fs::symlink_metadata(p).is_err())
         .expect("an unbounded range finds a free name");
-    fs::rename(&dir, &to).map_err(|e| format!("could not move {} to {}: {e}", dir.display(), to.display()))?;
+    let moved = |from: &Path, to: &Path| fs::rename(from, to).map_err(|e| format!("could not move {} to {}: {e}", from.display(), to.display()));
+    if has_dir {
+        moved(&dir, &to)?;
+    } else {
+        crate::fsx::make_dir(&to).map_err(|e| format!("{}: {e}", to.display()))?;
+    }
+    if has_engine {
+        if let Err(e) = moved(&engine, &to.join(crate::wsfolder::ENGINE_DIR)) {
+            // Both or neither.
+            let back = if has_dir { moved(&to, &dir) } else { fs::remove_dir(&to).map_err(|e| e.to_string()) };
+            return Err(back.err().map_or(e.clone(), |b| format!("{e}; and {b}")));
+        }
+    }
     Ok(Some(to))
 }
 
-/// Put a folder [`retire_folder_at`] moved back where it was.
+/// Put what [`retire_folder_at`] moved back where it was, both halves.
 pub fn restore_folder_at(root: &Path, ws: &str, from: &Path) -> Result<(), String> {
-    let dir = folder_at(root, ws)?;
+    let (dir, engine) = (folder_at(root, ws)?, engine_dir_at(root, ws)?);
     refuse_real(root)?;
+    let kept = from.join(crate::wsfolder::ENGINE_DIR);
+    if fs::symlink_metadata(&kept).is_ok() {
+        fs::rename(&kept, &engine).map_err(|e| format!("could not move {} back to {}: {e}", kept.display(), engine.display()))?;
+    }
     fs::rename(from, &dir).map_err(|e| format!("could not move {} back to {}: {e}", from.display(), dir.display()))
 }
 
@@ -1035,6 +1308,7 @@ mod tests {
             started: "2026-11-24T10:00:00Z".into(),
             last_activity: String::new(),
             note: String::new(),
+            access: None,
             fold: None,
             extra: Map::new(),
         }
@@ -1089,6 +1363,180 @@ mod tests {
         assert_eq!(workspace_of_conv(&root, "../x"), None);
     }
 
+    /// The engine's state is not in the chat's cwd: the record and its lock are
+    /// in the engine's half, and the workspace's folder holds only what a chat
+    /// may read or write.
+    #[test]
+    fn the_record_is_in_the_engines_half_and_a_file_in_the_chats_folder_is_not_it() {
+        let root = tmp("layout");
+        let ws = crate::ulid::new();
+        let c = prepare_at(&root, &ws, |_| String::new()).unwrap();
+        let (folder, engine) = (folder_at(&root, &ws).unwrap(), engine_dir_at(&root, &ws).unwrap());
+        let names = |d: &Path| {
+            let mut v: Vec<String> = fs::read_dir(d).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(names(&folder), ["chats"]);
+        assert_eq!(names(&engine), ["chats.json", "chats.json.lock"]);
+        // What a chat writes beside itself is a file of its own.
+        let forged = fs::read_to_string(engine.join(RECORD)).unwrap().replace(&c.session_id, &desk::new_uuid()).replace("Chat 1", "Forged");
+        fs::write(folder.join(RECORD), &forged).unwrap();
+        assert_eq!(list_at(&root, &ws).unwrap(), vec![c.clone()]);
+        // And a folder it makes does not move another workspace's chat to its own.
+        let other = crate::ulid::new();
+        prepare_at(&root, &other, |_| String::new()).unwrap();
+        let (a, b) = if ws < other { (&ws, &other) } else { (&other, &ws) };
+        let of_b = list_at(&root, b).unwrap()[0].id.clone();
+        fs::create_dir_all(root.join(a).join(CHATS_DIR).join(&of_b)).unwrap();
+        for _ in 0..4 {
+            assert_eq!(workspace_of_conv(&root, &of_b).as_ref(), Some(b));
+        }
+        assert!(settings(&workspace(&[]), &Sources { root: &root, ideas: Path::new("/no/st*r"), reg: &Default::default() })
+            .unwrap()
+            .contains(&format!("Edit(/{}/.engine/**)", fs::canonicalize(&root).unwrap().display())));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A registry that cannot be read is never an empty one, and one that is
+    /// lost under a workspace with projects is not "no private projects".
+    #[test]
+    fn a_registry_that_cannot_be_read_is_no_policy() {
+        use std::os::unix::fs::PermissionsExt;
+        let top = tmp("policy");
+        let p = top.join("projects.json");
+        let (some, none) = (workspace(&[Path::new("/r/a")]), workspace(&[]));
+        assert!(policy_at(&p, &some).unwrap_err().contains("is missing"));
+        assert!(policy_at(&p, &none).is_ok(), "nobody has registered anything yet");
+        for (text, why) in [("", "is empty"), (" \n", "is empty"), ("{", "could not be read"), ("[]", "could not be read"), ("{}", "could not be read"), (r#"{"projects":{}}"#, "could not be read")] {
+            fs::write(&p, text).unwrap();
+            assert!(policy_at(&p, &some).unwrap_err().contains(why), "{text:?}");
+        }
+        fs::write(&p, "{").unwrap();
+        assert!(policy_at(&p, &none).is_err(), "broken is broken");
+        fs::write(&p, r#"{"version":1,"projects":[]}"#).unwrap();
+        assert!(policy_at(&p, &some).is_ok(), "every project taken out, on purpose");
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o000)).unwrap();
+        // Root reads through the mode.
+        if fs::read(&p).is_err() {
+            assert!(policy_at(&p, &some).is_err() && policy_at(&p, &none).is_err());
+        }
+        let _ = fs::remove_dir_all(&top);
+    }
+
+    /// Each way a launch now would differ, and nothing when it would not.
+    #[test]
+    fn what_changed_since_a_chat_was_launched_is_said_one_by_one() {
+        let pr = |root: &str, why: Option<&str>| AccessProject { root: root.into(), name: last_part(root), read: why.is_none(), why: why.map(String::from) };
+        let d = |id: &str, path: &str| AccessDoc { id: id.into(), title: id.to_lowercase(), path: path.into() };
+        let top = tmp("access");
+        let kept = top.join("kept.md");
+        fs::write(&kept, "").unwrap();
+        let kept = kept.to_string_lossy().into_owned();
+        let then = Access {
+            digest: "1".into(),
+            projects: vec![pr("/r/same", None), pr("/r/priv", None), pr("/r/out", None), pr("/r/unreg", None), pr("/r/gone", None), pr("/r/opened", Some(WHY_PRIVATE)), pr("/r/stays", Some(WHY_PRIVATE))],
+            documents: vec![d("SAME", "/i/same.md"), d("UNLINKED", &kept), d("GONE", "/i/gone.md"), d("MOVED", "/i/old.md")],
+            ..Access::default()
+        };
+        assert!(access_changes(&then, &then).is_empty());
+        let now = Access {
+            digest: "2".into(),
+            projects: vec![pr("/r/same", None), pr("/r/priv", Some(WHY_PRIVATE_PATH)), pr("/r/unreg", Some(WHY_UNREGISTERED)), pr("/r/gone", Some(WHY_GONE)), pr("/r/opened", None), pr("/r/stays", Some(WHY_PRIVATE)), pr("/r/new", None)],
+            documents: vec![d("SAME", "/i/same.md"), d("MOVED", "/i/new.md"), d("LINKED", "/i/l.md")],
+            ..Access::default()
+        };
+        let got: Vec<(&str, String, &str)> = access_changes(&then, &now).into_iter().map(|c| (c.kind, c.name, c.change)).collect();
+        let want = [
+            ("project", "priv", "private"),
+            ("project", "out", "removed"),
+            ("project", "unreg", "unregistered"),
+            ("project", "gone", "unreadable"),
+            ("project", "opened", "readable"),
+            ("project", "new", "added"),
+            ("document", "unlinked", "unlinked"),
+            ("document", "gone", "gone"),
+            ("document", "moved", "moved"),
+            ("document", "linked", "linked"),
+        ];
+        assert_eq!(got, want.map(|(k, n, c)| (k, n.to_string(), c)));
+        let rules = access_changes(&then, &Access { digest: "2".into(), ..then.clone() });
+        assert_eq!((rules.len(), rules[0].kind, rules[0].change), (1, "rules", "other"), "a private project nested in one that is read");
+        let _ = fs::remove_dir_all(&top);
+    }
+
+    #[test]
+    fn which_chat_is_folding_is_the_records_and_an_unreadable_one_is_an_error() {
+        let root = tmp("folding");
+        let ws = crate::ulid::new();
+        assert_eq!(folding_at(&root, &ws).unwrap(), None, "no record");
+        let c = prepare_at(&root, &ws, |_| String::new()).unwrap();
+        assert_eq!(folding_at(&root, &ws).unwrap(), None);
+        for (state, want) in [(FOLDING, Some(c.id.clone())), (FOLDED, None), (FOLD_FAILED, None), (FOLD_NONE, None)] {
+            update_at(&root, &ws, &c.id, |c| c.fold = Some(Fold { state: state.into(), ..Fold::default() })).unwrap();
+            assert_eq!(folding_at(&root, &ws).unwrap(), want, "{state}");
+        }
+        fs::write(engine_dir_at(&root, &ws).unwrap().join(RECORD), "{").unwrap();
+        assert!(folding_at(&root, &ws).is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A folder of the earlier layout: its record is moved the first time it is
+    /// touched, once, and never over the engine's own.
+    #[test]
+    fn a_record_of_the_earlier_layout_is_moved_on_first_touch() {
+        let root = tmp("migrate");
+        let ws = crate::ulid::new();
+        let c = prepare_at(&root, &ws, |_| String::new()).unwrap();
+        let (folder, engine) = (folder_at(&root, &ws).unwrap(), engine_dir_at(&root, &ws).unwrap());
+        fs::create_dir_all(&engine).unwrap();
+        // As an earlier build left it.
+        let now = if engine.join(RECORD).exists() { engine.join(RECORD) } else { folder.join(RECORD) };
+        let text = fs::read(&now).unwrap();
+        fs::remove_dir_all(root.join(crate::wsfolder::ENGINE_DIR)).unwrap();
+        fs::write(folder.join(RECORD), &text).unwrap();
+        fs::write(folder.join(".chats.json.lock"), "").unwrap();
+        assert_eq!(list_at(&root, &ws).unwrap(), vec![c.clone()]);
+        assert!(!folder.join(RECORD).exists() && !folder.join(".chats.json.lock").exists());
+        assert_eq!(fs::read(engine.join(RECORD)).unwrap(), text);
+        // A later one there is a chat's file, and is left where it is.
+        fs::write(folder.join(RECORD), "{}").unwrap();
+        assert_eq!(list_at(&root, &ws).unwrap(), vec![c]);
+        assert_eq!(fs::read(folder.join(RECORD)).unwrap(), b"{}");
+        // A link where the old record was is not moved.
+        let odd = crate::ulid::new();
+        crate::wsfolder::make_at(&root, &odd).unwrap();
+        std::os::unix::fs::symlink(engine.join(RECORD), folder_at(&root, &odd).unwrap().join(RECORD)).unwrap();
+        assert!(list_at(&root, &odd).unwrap().is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Both halves of a removed workspace move, and come back, together.
+    #[test]
+    fn a_removed_workspaces_halves_move_together() {
+        let root = tmp("halves");
+        let ws = crate::ulid::new();
+        let c = prepare_at(&root, &ws, |_| String::new()).unwrap();
+        let engine = engine_dir_at(&root, &ws).unwrap();
+        let to = retire_folder_at(&root, &ws).unwrap().unwrap();
+        assert!(!engine.exists() && !root.join(&ws).exists());
+        assert!(to.join(".engine").join(RECORD).exists() && to.join(CHATS_DIR).join(&c.id).exists());
+        restore_folder_at(&root, &ws, &to).unwrap();
+        assert_eq!(list_at(&root, &ws).unwrap(), vec![c]);
+        assert!(!root.join(&ws).join(".engine").exists());
+        // Only the engine's half is there: that is moved too.
+        fs::remove_dir_all(root.join(&ws)).unwrap();
+        let to = retire_folder_at(&root, &ws).unwrap().unwrap();
+        assert!(to.join(".engine").join(RECORD).exists() && !engine.exists());
+        // One half that cannot be moved leaves both where they were.
+        let ws = crate::ulid::new();
+        prepare_at(&root, &ws, |_| String::new()).unwrap();
+        fs::create_dir_all(root.join(&ws).join(".engine/taken")).unwrap();
+        assert!(retire_folder_at(&root, &ws).is_err());
+        assert!(root.join(&ws).join(CHATS_DIR).exists() && engine_dir_at(&root, &ws).unwrap().join(RECORD).exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
     /// Keys a later build wrote, on the record, a chat and a fold, survive a
     /// rewrite by this one.
     #[test]
@@ -1096,7 +1544,7 @@ mod tests {
         let root = tmp("unknown");
         let ws = crate::ulid::new();
         let c = prepare_at(&root, &ws, |_| String::new()).unwrap();
-        let p = root.join(&ws).join(RECORD);
+        let p = engine_dir_at(&root, &ws).unwrap().join(RECORD);
         let mut v: Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
         v["later"] = serde_json::json!({"a": 1});
         v["conversations"][0]["pinned"] = serde_json::json!(true);
@@ -1122,7 +1570,7 @@ mod tests {
         let root = tmp("edited");
         let ws = crate::ulid::new();
         let c = prepare_at(&root, &ws, |_| String::new()).unwrap();
-        let p = root.join(&ws).join(RECORD);
+        let p = engine_dir_at(&root, &ws).unwrap().join(RECORD);
         let edit = |from: &str, to: &str| {
             let t = fs::read_to_string(&p).unwrap();
             assert!(t.contains(from), "{t}");
@@ -1182,7 +1630,7 @@ mod tests {
         assert!(list_at(&root, &ws).unwrap_err().contains("not a regular file"));
         assert!(prepare_at(&root, &ws, |_| String::new()).is_err());
         fs::remove_file(&p).unwrap();
-        let lock = root.join(&ws).join(LOCK);
+        let lock = engine_dir_at(&root, &ws).unwrap().join(LOCK);
         fs::remove_file(&lock).unwrap();
         std::os::unix::fs::symlink(&elsewhere, &lock).unwrap();
         assert!(prepare_at(&root, &ws, |_| String::new()).is_err());
@@ -1267,11 +1715,11 @@ mod tests {
             serde_json::json!([format!("Read(/{pf})"), format!("Read(/{lf})"), format!("Read(/{})", path(&into_file))]),
             "one rule a file, a file once"
         );
-        assert_eq!(v["permissions"]["deny"], serde_json::json!([format!("Edit(/{}/**)", dir.display())]));
+        assert_eq!(v["permissions"]["deny"], serde_json::json!([format!("Edit(/{}/**)", dir.display()), format!("Edit(/{}/ws/.engine/**)", top.display())]));
         assert!(!s.contains(&stranger.file) && !s.contains("od(d)"), "{s}");
         // Nothing linked: nothing allowed, and the folder still not written.
         let none = settings(&workspace(&[]), &src).unwrap();
-        assert_eq!(none, format!(r#"{{"autoMemoryEnabled":false,"permissions":{{"allow":[],"deny":["Edit(/{}/**)"]}}}}"#, dir.display()));
+        assert_eq!(none, format!(r#"{{"autoMemoryEnabled":false,"permissions":{{"allow":[],"deny":["Edit(/{}/**)","Edit(/{}/ws/.engine/**)"]}}}}"#, dir.display(), top.display()));
         // A folder not made yet is denied by the path it will have.
         let later = top.join("later");
         assert!(settings(&w, &Sources { ideas: &later, ..src }).unwrap().contains(&format!("Edit(/{}/**)", later.display())));
@@ -1304,7 +1752,7 @@ mod tests {
         // Workspaces kept inside the ideas folder: no rule that would deny the
         // chat its own memory, and no document read without it.
         let inside = Sources { root: &dir.join("ws"), reg: &open, ..src };
-        assert!(!settings(&w, &inside).unwrap().contains("Edit("));
+        assert!(!settings(&w, &inside).unwrap().contains(&format!("Edit(/{}/**)", dir.display())));
         assert_eq!(doc_reads(&w, &inside)[0].why, Some(WHY_DOC_HOLDS));
         // A folder that cannot be read is not a document that is gone.
         let file = top.join("a-file");
@@ -1328,7 +1776,7 @@ mod tests {
     /// [`settings`] with an ideas folder no rule can name, so a test that is
     /// about projects says only projects.
     fn rules(w: &crate::workspaces::Workspace, reg: &crate::registry::Registry) -> Result<String, String> {
-        settings(w, &Sources { root: Path::new("/no/ws"), ideas: Path::new("/no/st*r"), reg })
+        settings(w, &Sources { root: Path::new("/no/ws*s"), ideas: Path::new("/no/st*r"), reg })
     }
 
     /// The whole command: ids, flags, this session's own rules and the fixed
@@ -1502,7 +1950,7 @@ mod tests {
         mk();
         let again = retire_folder_at(&root, &ws).unwrap().unwrap();
         assert_eq!(again, root.join(".removed").join(format!("{ws}-2")));
-        assert!(to.join(RECORD).exists(), "the first is untouched");
+        assert!(to.join(".engine").join(RECORD).exists(), "the first is untouched");
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1630,11 +2078,13 @@ mod tests {
         let ws = crate::ulid::new();
         let c = prepare_at(&root, &ws, |_| String::new()).unwrap();
         rename_at(&root, &ws, &c.id, "A title with `backticks`").unwrap();
-        assert!(write_fold_at(&root, &ws, &c).is_err(), "a chat with no note yet has nowhere to fold to");
+        assert!(write_fold_at(&root, &ws, &c, &crate::ulid::new()).is_err(), "a chat with no note yet has nowhere to fold to");
         let c = update_at(&root, &ws, &c.id, |c| name_note(c, "2026-11-24")).unwrap();
-        let opener = write_fold_at(&root, &ws, &c).unwrap();
+        let attempt = crate::ulid::new();
+        assert!(write_fold_at(&root, &ws, &c, "x; rm").is_err());
+        let opener = write_fold_at(&root, &ws, &c, &attempt).unwrap();
         let folder = root.join(&ws);
-        assert_eq!(opener, format!("Read {}/chats/{}/fold.md and do what it says.", folder.display(), c.id));
+        assert_eq!(opener, format!("Read {}/chats/{}/fold.md and do what it says. This is fold {attempt}.", folder.display(), c.id));
         let t = fs::read_to_string(folder.join("chats").join(&c.id).join(FOLD)).unwrap();
         for p in [c.note.as_str(), "memory/MEMORY.md", "memory/topics/"] {
             assert!(t.contains(&format!("`{}/{p}`", folder.display())), "{p}: {t}");
@@ -1652,7 +2102,7 @@ mod tests {
         let elsewhere = root.join("elsewhere");
         fs::write(&elsewhere, "keep").unwrap();
         std::os::unix::fs::symlink(&elsewhere, &p).unwrap();
-        write_fold_at(&root, &ws, &c).unwrap();
+        write_fold_at(&root, &ws, &c, &attempt).unwrap();
         assert_eq!(fs::read_to_string(&elsewhere).unwrap(), "keep");
         assert_eq!(fs::read_to_string(&p).unwrap(), t);
         let _ = fs::remove_dir_all(&root);
@@ -1667,14 +2117,14 @@ mod tests {
         let dir = folder_at(&root, &ws).unwrap();
         let c = prepare_at(&root, &ws, |_| String::new()).unwrap();
         remove_at(&root, &ws, &c.id).unwrap();
-        undo_folder(&dir);
-        assert!(!dir.exists());
+        undo_folder(&root, &ws);
+        assert!(!dir.exists() && !engine_dir_at(&root, &ws).unwrap().exists());
         // But never one that holds anything else.
         let c = prepare_at(&root, &ws, |_| String::new()).unwrap();
         fs::create_dir_all(dir.join("memory")).unwrap();
         remove_at(&root, &ws, &c.id).unwrap();
-        undo_folder(&dir);
-        assert!(dir.join("memory").exists() && dir.join(RECORD).exists());
+        undo_folder(&root, &ws);
+        assert!(dir.join("memory").exists() && engine_dir_at(&root, &ws).unwrap().join(RECORD).exists());
     }
 
     /// `Project::live_session_in`, `agents_in`, `sessions_in`: no place takes

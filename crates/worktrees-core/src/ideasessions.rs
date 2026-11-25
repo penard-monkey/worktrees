@@ -127,7 +127,7 @@ fn idea_desk(root: &Path, idea: &str) -> Result<Desk, String> {
         root: root.to_path_buf(),
         dirs: vec![all.clone(), all.join(idea)],
         file: RECORD,
-        convs: "",
+        convs: Vec::new(),
         owner: format!("the idea {idea}"),
         noun: "conversation",
         refuse_real: ideas::refuse_real,
