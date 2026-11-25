@@ -175,7 +175,9 @@ export function DocumentPane(props: {
           )}
           {inlineActs(false)}
           {props.float && (
-            <button className="ix-btn ix-btn-icon" data-testid="main-doc-float" title={props.float.title} aria-label={props.float.title} onClick={props.float.run}>
+            // Its own tooltip, not `title`: the press unmounts the button, and WKWebView
+            // leaves a native tooltip on screen with nothing under it (VM, 2026-11-24).
+            <button className="ix-btn ix-btn-icon ix-tip" data-testid="main-doc-float" data-tip={props.float.title} aria-label={props.float.title} onClick={props.float.run}>
               <Icons.ExternalLink size={13} />
             </button>
           )}
