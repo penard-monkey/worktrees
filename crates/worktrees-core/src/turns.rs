@@ -95,6 +95,11 @@ pub struct Turn {
     /// person's message bubble. Absent on older hosts and ordinary turns.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notice: Option<Notice>,
+    /// The engine launched the conversation on this line: it is no person's
+    /// message, and no client needs to know its words ([`Opener`]). Absent
+    /// from every other turn, and from an older host.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine: Option<Engine>,
     /// The agent's reply text, in order, blocks joined by a blank line.
     pub reply: String,
     /// The tools it called, by name, in order.
@@ -105,6 +110,42 @@ pub struct Turn {
     /// answered between them, each step with its own time.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<Step>,
+}
+
+/// What the engine launched a conversation to do.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Engine {
+    /// Begin: a new conversation's first line.
+    Start,
+    /// Fold into its workspace's memory.
+    Fold,
+}
+
+/// A line the engine launched a conversation on, exactly as it was sent. Claude
+/// writes it as a person's typed prompt, so only who launched it can tell.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Opener {
+    pub engine: Engine,
+    pub text: String,
+}
+
+/// Mark the turns `openers` opened. Each was sent once, so it opened one turn:
+/// a fold's is the first that says it, and a start's is the conversation's
+/// first turn or none here. The same words sent again are a person's. `turns`
+/// is the whole of what was read, before any is left out.
+fn mark_openers(turns: &mut [Turn], openers: &[Opener]) {
+    for o in openers {
+        let mut own = turns.iter_mut().filter(|t| t.notice.is_none());
+        let says = |t: &&mut Turn| t.user.as_deref().is_some_and(|u| u.trim() == o.text);
+        let turn = match o.engine {
+            Engine::Start => own.next().filter(says),
+            Engine::Fold => own.find(says),
+        };
+        if let Some(t) = turn {
+            t.engine = Some(o.engine);
+        }
+    }
 }
 
 /// A Claude-generated user entry, classified from flags, origin, or a whole
@@ -262,7 +303,7 @@ pub struct QuestionAnswer {
 
 impl Turn {
     fn new(at: Option<i64>, user: Option<String>) -> Turn {
-        Turn { id: String::new(), at, user, notice: None, reply: String::new(), tools: Vec::new(), truncated: false, steps: Vec::new() }
+        Turn { id: String::new(), at, user, notice: None, engine: None, reply: String::new(), tools: Vec::new(), truncated: false, steps: Vec::new() }
     }
 
     fn notice(at: Option<i64>, notice: Notice) -> Turn {
@@ -336,6 +377,13 @@ impl Notice {
 /// and `carried_to_background`; none is a mid-turn human message for this row.
 pub fn claude(lines: &[String], n: usize) -> Vec<Turn> {
     finish(claude_turns(lines), n)
+}
+
+/// [`claude`], of a conversation the engine launched on `openers`.
+pub fn claude_opened(lines: &[String], n: usize, openers: &[Opener]) -> Vec<Turn> {
+    let mut turns = claude_turns(lines);
+    mark_openers(&mut turns, openers);
+    finish(turns, n)
 }
 
 /// Every turn in a Claude transcript's `lines`, as [`claude`] reads them.
@@ -2302,7 +2350,14 @@ fn mark_detail(t: &mut Turn) {
 /// [`claude`], and cut only at [`TURN_TEXT_MAX`]. `None` once it is not in
 /// `lines` (the transcript's window has moved past it) or `id` names no turn.
 pub fn claude_turn(lines: &[String], id: &str) -> Option<Turn> {
-    whole(claude_turns(lines), id)
+    claude_turn_opened(lines, id, &[])
+}
+
+/// [`claude_turn`], of a conversation the engine launched on `openers`.
+pub fn claude_turn_opened(lines: &[String], id: &str, openers: &[Opener]) -> Option<Turn> {
+    let mut turns = claude_turns(lines);
+    mark_openers(&mut turns, openers);
+    whole(turns, id)
 }
 
 /// [`claude_turn`] for a Codex rollout's `lines`.
