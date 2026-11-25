@@ -379,6 +379,9 @@ pub struct ProjectRead {
 /// Why a project is not read.
 pub const WHY_UNREGISTERED: &str = "not registered";
 pub const WHY_PRIVATE: &str = "private";
+pub const WHY_PRIVATE_PATH: &str = "private, by instruction only: its path has a character a permission rule cannot hold";
+pub const WHY_PRIVATE_GONE: &str = "private, by instruction only: its folder is not there";
+pub const WHY_WITHIN: &str = "it is inside a private project of this workspace";
 pub const WHY_GONE: &str = "its folder is not there";
 pub const WHY_PATH: &str = "its path has a character a permission rule cannot hold";
 pub const WHY_INSIDE: &str = "a private project inside it has a path a permission rule cannot hold";
@@ -410,9 +413,24 @@ fn private_inside(root: &str, reg: &crate::registry::Registry) -> Result<Vec<Str
     Ok(out)
 }
 
+/// The private projects of `w` a rule can hold: denied reading, because in
+/// auto mode Claude reads a folder no rule names without asking.
+fn denied_private(w: &crate::workspaces::Workspace, reg: &crate::registry::Registry) -> Vec<String> {
+    w.projects.iter().filter(|p| reg.by_root(&p.root).is_some_and(|e| e.private)).filter_map(|p| rule_root(&p.root).ok()).collect()
+}
+
 /// What a chat of `w` reads: each project, in the workspace's order. The
-/// registry decides which, and [`settings`] says it to Claude.
+/// registry decides which, and [`settings`] says it to Claude. A project
+/// inside a private one of `w` is not read: that one's deny beats any allow.
 pub fn project_reads(w: &crate::workspaces::Workspace, reg: &crate::registry::Registry) -> Vec<ProjectRead> {
+    let denied = denied_private(w, reg);
+    let readable = |root: &str| {
+        let r = rule_root(root)?;
+        if denied.iter().any(|d| Path::new(&r).starts_with(d)) {
+            return Err(WHY_WITHIN);
+        }
+        private_inside(&r, reg)
+    };
     w.projects
         .iter()
         .map(|p| {
@@ -420,8 +438,12 @@ pub fn project_reads(w: &crate::workspaces::Workspace, reg: &crate::registry::Re
             let private = e.is_some_and(|e| e.private);
             let why = match e {
                 None => Some(WHY_UNREGISTERED),
-                Some(_) if private => Some(WHY_PRIVATE),
-                Some(_) => rule_root(&p.root).and_then(|r| private_inside(&r, reg)).err(),
+                Some(_) if private => Some(match rule_root(&p.root) {
+                    Ok(_) => WHY_PRIVATE,
+                    Err(WHY_GONE) => WHY_PRIVATE_GONE,
+                    Err(_) => WHY_PRIVATE_PATH,
+                }),
+                Some(_) => readable(&p.root).err(),
             };
             ProjectRead {
                 root: p.root.clone(),
@@ -436,8 +458,9 @@ pub fn project_reads(w: &crate::workspaces::Workspace, reg: &crate::registry::Re
 }
 
 /// `--settings` for a chat of `w`: Claude's own auto memory off, and for each
-/// project it reads, reading allowed and editing denied. A private project
-/// INSIDE one of them is denied, or the rule for the outer one would read it.
+/// project it reads, reading allowed and editing denied. Reading is denied in
+/// each private project of `w`, and in any private project INSIDE one it
+/// reads, or the rule for the outer one would read it.
 /// The paths are the registry's, canonical, and hold no character that means
 /// anything in a rule ([`rule_root`]).
 pub fn settings(w: &crate::workspaces::Workspace, reg: &crate::registry::Registry) -> Result<String, String> {
@@ -450,8 +473,14 @@ pub fn settings(w: &crate::workspaces::Workspace, reg: &crate::registry::Registr
         allow.push(format!("Read(/{root}/**)"));
         deny.push(format!("Edit(/{root}/**)"));
     }
+    for root in denied_private(w, reg) {
+        let rule = format!("Read(/{root}/**)");
+        if !deny.contains(&rule) {
+            deny.push(rule);
+        }
+    }
     let mut v = serde_json::json!({ "autoMemoryEnabled": false });
-    if !allow.is_empty() {
+    if !allow.is_empty() || !deny.is_empty() {
         v["permissions"] = serde_json::json!({ "allow": allow, "deny": deny });
     }
     let text = v.to_string();
@@ -912,6 +941,65 @@ mod tests {
         let _ = fs::remove_dir_all(&top);
     }
 
+    /// A private project of the workspace is DENIED, not only unlisted: in
+    /// auto mode Claude reads a folder no rule names without asking. Once,
+    /// with or without a project that is read beside it.
+    #[test]
+    fn a_private_project_of_the_workspace_is_denied_reading() {
+        let top = fs::canonicalize(tmp("private")).unwrap();
+        let (a, p) = (top.join("a"), top.join("p"));
+        let inner = a.join("inner");
+        for d in [&a, &p, &inner] {
+            fs::create_dir_all(d).unwrap();
+        }
+        let reg = crate::registry::Registry { projects: vec![project(&a, false), project(&p, true), project(&inner, true)], ..Default::default() };
+        let (ra, rp, ri) = (a.display(), p.display(), inner.display());
+        let w = workspace(&[&p]);
+        assert_eq!(project_reads(&w, &reg)[0].why, Some(WHY_PRIVATE));
+        assert_eq!(settings(&w, &reg).unwrap(), format!(r#"{{"autoMemoryEnabled":false,"permissions":{{"allow":[],"deny":["Read(/{rp}/**)"]}}}}"#));
+        // One in the workspace AND inside a project that is read: one deny.
+        assert_eq!(
+            settings(&workspace(&[&a, &inner, &p]), &reg).unwrap(),
+            format!(r#"{{"autoMemoryEnabled":false,"permissions":{{"allow":["Read(/{ra}/**)"],"deny":["Read(/{ri}/**)","Edit(/{ra}/**)","Read(/{rp}/**)"]}}}}"#)
+        );
+        // A private project nobody put in the workspace is not this chat's.
+        assert!(!settings(&workspace(&[&a]), &reg).unwrap().contains(&format!("Read(/{rp}/**)")));
+        let _ = fs::remove_dir_all(&top);
+    }
+
+    /// A private root no rule can hold stays an instruction, and its `why`
+    /// says so; so does one whose folder is not there.
+    #[test]
+    fn a_private_project_no_rule_can_hold_says_it_is_an_instruction_only() {
+        let top = fs::canonicalize(tmp("privpath")).unwrap();
+        let (star, gone) = (top.join("st*r"), top.join("gone"));
+        fs::create_dir_all(&star).unwrap();
+        let reg = crate::registry::Registry { projects: vec![project(&star, true), project(&gone, true)], ..Default::default() };
+        let w = workspace(&[&star, &gone]);
+        let reads = project_reads(&w, &reg);
+        assert_eq!(reads.iter().map(|r| (r.reads, r.why)).collect::<Vec<_>>(), vec![(Reads::No, Some(WHY_PRIVATE_PATH)), (Reads::No, Some(WHY_PRIVATE_GONE))]);
+        assert!(WHY_PRIVATE_PATH.starts_with("private") && WHY_PRIVATE_PATH.contains("instruction"));
+        assert_eq!(settings(&w, &reg).unwrap(), r#"{"autoMemoryEnabled":false}"#, "nothing is escaped into a rule");
+        let _ = fs::remove_dir_all(&top);
+    }
+
+    /// Claude's deny beats its allow, so a project INSIDE a private one of the
+    /// workspace cannot be read, and the list must not say that it is.
+    #[test]
+    fn a_project_inside_a_denied_private_one_is_not_listed_as_read() {
+        let top = fs::canonicalize(tmp("within")).unwrap();
+        let outer = top.join("outer");
+        let inside = outer.join("inside");
+        fs::create_dir_all(&inside).unwrap();
+        let reg = crate::registry::Registry { projects: vec![project(&outer, true), project(&inside, false)], ..Default::default() };
+        let both = workspace(&[&inside, &outer]);
+        assert_eq!(project_reads(&both, &reg).iter().map(|r| r.why).collect::<Vec<_>>(), vec![Some(WHY_WITHIN), Some(WHY_PRIVATE)]);
+        assert!(!settings(&both, &reg).unwrap().contains("Edit("), "no rule for what is not read");
+        // Without the private one in the workspace nothing denies it.
+        assert_eq!(project_reads(&workspace(&[&inside]), &reg)[0].reads, Reads::Yes);
+        let _ = fs::remove_dir_all(&top);
+    }
+
     /// A rule names only a registered, non-private root that a rule can hold;
     /// every other project is not read, and says why. A private project inside
     /// a read one is denied, and one a rule cannot name takes the outer one
@@ -944,9 +1032,9 @@ mod tests {
         let (ok, inner) = (ok.display(), inner.display());
         assert_eq!(
             settings(&w, &reg).unwrap(),
-            format!(r#"{{"autoMemoryEnabled":false,"permissions":{{"allow":["Read(/{ok}/**)"],"deny":["Read(/{inner}/**)","Edit(/{ok}/**)"]}}}}"#)
+            format!(r#"{{"autoMemoryEnabled":false,"permissions":{{"allow":["Read(/{ok}/**)"],"deny":["Read(/{inner}/**)","Edit(/{ok}/**)","Read(/{}/**)"]}}}}"#, private.display())
         );
-        assert_eq!(settings(&workspace(&[&private, &stranger]), &reg).unwrap(), r#"{"autoMemoryEnabled":false}"#, "nothing read, nothing allowed");
+        assert_eq!(settings(&workspace(&[&stranger]), &reg).unwrap(), r#"{"autoMemoryEnabled":false}"#, "nothing read, nothing allowed, nothing denied");
         // Too many for one command is said, never cut.
         let many: Vec<PathBuf> = (0..200).map(|n| mk(&format!("many/{n}"))).collect();
         let reg = crate::registry::Registry { projects: many.iter().map(|m| project(m, false)).collect(), ..Default::default() };
@@ -1004,6 +1092,7 @@ mod tests {
         let top = fs::canonicalize(tmp("context")).unwrap();
         let (a, p, gone) = (top.join("a"), top.join("p"), top.join("gone"));
         fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&p).unwrap();
         let reg = crate::registry::Registry { projects: vec![project(&a, false), project(&p, true)], ..Default::default() };
         let reads = project_reads(&workspace(&[&a, &p, &gone]), &reg);
         assert_eq!(reads.iter().map(|r| (r.reads, r.why)).collect::<Vec<_>>(), vec![(Reads::Yes, None), (Reads::No, Some("private")), (Reads::No, Some("not registered"))]);
