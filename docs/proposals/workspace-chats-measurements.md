@@ -33,6 +33,7 @@ A cloned repository would supply what runs (ADR 0001).
 | The shell, `echo x > <root>/f` and `cat` of a Read-denied file | Refused |
 | The shell, `python3 -c "open(<root>/f,'w')…"` (auto mode) | **Written. Other programs are not covered** |
 | Read of a directory no rule names | Manual and accept-edits mode ask. **Auto mode reads it without asking** |
+| Read of a directory that is only denied (`allow` empty, `Read(//<root>/**)` denied), auto mode | Refused. So each private project of the workspace is denied |
 | Another settings source (tried: the cwd's `.claude/settings.local.json`) | Its deny narrows these rules; its allow cannot undo the deny; its allow can widen reading to directories these rules do not name |
 
 Not tried: the user's own `~/.claude/settings.json` (the same precedence is
