@@ -838,6 +838,8 @@ fn a_chat_is_not_launched_on_a_registry_that_cannot_be_read_and_stale_access_is_
 
     // The registry lost, three ways: nothing is launched, and it is said.
     let good = std::fs::read(&reg).unwrap();
+    let told = folder.join(&id).join("chats").join(&conv).join("context.md");
+    std::fs::write(&told, "as it was").unwrap();
     for (how, text) in [("broken", Some(&b"{ not json"[..])), ("empty", Some(&b""[..])), ("gone", None)] {
         match text {
             Some(t) => std::fs::write(&reg, t).unwrap(),
@@ -853,6 +855,9 @@ fn a_chat_is_not_launched_on_a_registry_that_cannot_be_read_and_stale_access_is_
         }
         let l = call("workspace_chats", json!({ "id": id })).unwrap();
         assert_eq!(l["chats"].as_array().unwrap().len(), 1, "{how}: a refused start left its chat: {l}");
+        // Asked before anything is done: a live chat would not have been ended.
+        assert_eq!(l["chats"][0].get("fold"), None, "{how}: {l}");
+        assert_eq!(std::fs::read_to_string(&told).unwrap(), "as it was", "{how}");
         assert_eq!((l["projects"][0]["reads"].as_str(), l["projects"][0]["why"].as_str()), (Some("no"), Some("the list of projects could not be read")), "{how}: {l}");
         let live = tmux.try_run(&["list-sessions", "-F", "#{session_name}"]).map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
         assert!(!live.contains("~ws~"), "{how}: {live}");
