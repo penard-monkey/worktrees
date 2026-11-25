@@ -303,14 +303,11 @@ export function workStatus(w: WorkItem, at: ItemPlace): string {
   }
 }
 
-/** The main window's hand-off to the Ideas window: the document to open,
- *  written to localStorage under this key just before `open_companion`
- *  brings the window forward. The companion reads it on load, on focus and
- *  on the `storage` event, and removes it. Older than `SHOW_TTL_MS` is
- *  ignored (a request the companion never saw). */
-export const SHOW_KEY = "wt.ideas.show";
-/** …and the other way: the workspace the main window shows, written before
- *  the companion raises it (`raise_window`). The same shape and age rule. */
+/** The Ideas window's hand-off to the main one: the workspace to show, written to
+ *  localStorage under this key just before it raises that window (`raise_window`),
+ *  which reads it on load, on focus and on the `storage` event, and removes it.
+ *  Older than `SHOW_TTL_MS` is ignored. A DOCUMENT goes by doc/handoff.ts, either
+ *  way, and is answered. */
 export const WS_SHOW_KEY = "wt.workspace.show";
 /** …and that the Ideas window changed a workspace (linked, set a plan, made
  *  one): no event carries a change of the list, so the other window is told to

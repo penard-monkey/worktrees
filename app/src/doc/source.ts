@@ -7,6 +7,7 @@
 // string: an idea's id, or for a memory source bound to its workspace, a path.
 import { invoke, listen } from "../ipc";
 import type { DocKind } from "./docmode";
+import type { HandDoc } from "./handoff";
 import type { Changed, Saved } from "./ideasave";
 import { ideaHref, readableLinks, type Row } from "./ideasrelate";
 import { bodyOf, withId } from "./ideatext";
@@ -98,6 +99,9 @@ export const ideaDocs: DocSource = {
     return { ...d, ...w, content };
   },
 };
+
+/** An idea or a plan, as the other window is asked for it. */
+export const ideaHand = (id: string): HandDoc => ({ kind: "idea", id });
 
 /** What the pane needs to know of the other documents: the `[[` picker's rows. */
 export type DocRows = readonly (Row & { kind?: "idea" | "plan" })[];

@@ -278,7 +278,7 @@ check(same(ask({ act: "project", plan: PL, name: "ans" }), { act: "project", pla
 check(ask({ act: "project", plan: "../x", name: "a" }) === null && ask({ act: "project", plan: PL }) === null && ask({ act: "place", root: "rel", slug: "x" }) === null && ask({ act: "start", plan: PL }) === null
   && ask({ act: "project", plan: PL, name: "a" }, now + P.SHOW_TTL_MS + 1) === null && P.mainAsk("{", now) === null, "…and a malformed, unknown or stale one is ignored");
 check(/window\.localStorage\.removeItem\(MAIN_ASK_KEY\)/.test(app), "the main window takes an ask once");
-check(/window\.localStorage\.removeItem\(SHOW_KEY\)/.test(comp) && /window\.localStorage\.removeItem\(WS_SHOW_KEY\)/.test(app),
+check(/take\(windowEnv\(\), FLOAT\)/.test(comp) && /take\(windowEnv\(\), DOCK\)/.test(app) && /window\.localStorage\.removeItem\(WS_SHOW_KEY\)/.test(app),
   "each window takes a request once (removes the key it read)");
 
 console.log(failed ? `\nplans-check: ${failed} failure(s)` : "\nplans-check: all ok");

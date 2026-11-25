@@ -76,7 +76,7 @@ export function WorkspaceDock(props: {
               ? <button className="wsd-files" data-testid="dock-ws-ideas" aria-expanded={list} onClick={() => setList((l) => !l)}>{name || "Pick an idea"} ▾</button>
               : <span className="wsd-files">{name}</span>}
           {target && <button className="ctrl sm" data-testid="dock-ws-edit" data-track="dock.workspace.edit" title={`Edit it in ${ws.name}`} onClick={() => props.edit(tab, target.name)}>Edit in {ws.name} ▸</button>}
-          {target && props.float && tab !== "memory" && <button className="ix-btn ix-btn-icon ix-tip" data-testid="dock-ws-float" data-tip="Float: open it in the Ideas window" aria-label="Float: open it in the Ideas window" onClick={() => props.float!(target)}><Icons.ExternalLink size={13} /></button>}
+          {target && props.float && <button className="ix-btn ix-btn-icon ix-tip" data-testid="dock-ws-float" data-tip="Float: open it in the Ideas window" aria-label="Float: open it in the Ideas window" onClick={() => props.float!(target)}><Icons.ExternalLink size={13} /></button>}
         </div>
       )}
       {list && tab === "memory" && memory.view && <div className="wsd-list"><MemoryFiles ws={ws.id} view={memory.view} on={memory.path} ago={props.ago} open={(p) => { setList(false); memory.open(p); }} made={null} /></div>}

@@ -141,10 +141,10 @@ ok(gated('data-testid="ideas-rail"'), "the rail's lightbulb renders only with Id
 const chord = code.match(/if \([^\n]*e\.code === "KeyI"\)\) \{/)?.[0] ?? "";
 ok(/^if \(keyRef\.current\.ideasOn && /.test(chord), "⌘⇧I is taken only with Ideas on");
 ok(/keyRef\.current = \{[\s\S]*?\bideasOn\b[\s\S]*?\};/.test(code), "…and keyRef carries ideasOn");
-ok((code.match(/openIdeas\(\)|onClick=\{openIdeas\}/g) ?? []).length === 3, "openIdeas has exactly its three callers, the chord, the rail and openIdeaDoc");
+ok((code.match(/openIdeas\(\)|onClick=\{openIdeas\}/g) ?? []).length === 2 && (code.match(/invoke\("open_companion"\)/g) ?? []).length === 2, "the Ideas window is opened by the chord and the rail, and by floatDoc");
 // The third: Float, on a document open in the main area, opens it in the
 // Ideas window, and returns first with Ideas off.
-ok(/const openIdeaDoc = \(id: string\) => \{\s*if \(!ideasOn\) return;/.test(code), "…and openIdeaDoc opens nothing with Ideas off");
+ok(/if \(!ideasOn \|\| !doc\) return Promise\.resolve\([^;]*;\s*return ask\(windowEnv\(\), FLOAT, doc, \(\) => invoke\("open_companion"\)/.test(code) && /float=\{ideasOn \? \(to\) => floatDoc/.test(code), "…and floatDoc opens nothing with Ideas off, for a memory file too");
 // The workspace view: drawn with Ideas or workspace chats on, its parts by
 // their own helper (wsview.ts, run here for every combination).
 ok(/const wsChatsOn = workspaceChatsBeta\(settings\);/.test(code) && /const frameOn = wsFrameOn\(\{ ideas: ideasOn, chats: wsChatsOn \}\);/.test(code), "App.tsx: frameOn = Ideas or workspace chats, each from its own helper");

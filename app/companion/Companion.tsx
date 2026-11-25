@@ -28,6 +28,9 @@ import { setTermScrollback } from "../src/TerminalPane";
 import "../src/tokens.css";
 import "../src/App.css";
 import "./companion.css";
+import { MemoryDoc, MemorySide, useMemoryView, type MemoryOpen } from "./MemoryDoc";
+import { answer, ask, DOCK, FLOAT, take, windowEnv, type Ask, type HandDoc } from "../src/doc/handoff";
+import type { MainDocApi } from "../src/doc/MainDocument";
 import { DocNotice, DocumentPane } from "../src/doc/DocumentPane";
 import { ideaDocs, type Doc, type Version } from "../src/doc/source";
 import { errText, useDoc } from "../src/doc/useDoc";
@@ -43,7 +46,7 @@ import {
 import { PickProject, PickWorkspace, PlanPanel, PlanStrip, type RegProject, type WsOption } from "./PlanPanel";
 import {
   addIdeasCall, addProjectCall, agentFor, fromPlanCall, ideaOntoPlan, itemPlace, launchCall, linkIdeaCall, linkPlaceCall, makePlanCall, MAIN_ASK_KEY, missingPlaces,
-  placeOntoItem, planSources, plansIn, projectOntoPlan, removeIdeaCall, setPlanCall, showRequest, SHOW_KEY, startCall, WS_CHANGED_KEY, WS_SHOW_KEY,
+  placeOntoItem, planSources, plansIn, projectOntoPlan, removeIdeaCall, setPlanCall, startCall, WS_CHANGED_KEY, WS_SHOW_KEY,
   type Activity, type ItemRef, type MainAsk, type PlanView, type Snap, type StartDone, type WorkItem,
 } from "../src/plans";
 import { PickPlace, StartReview } from "../src/StartWork";
@@ -245,7 +248,11 @@ export function Companion() {
   const gen = engine.gen;
   const [listing, setListing] = useState<Listing | null>(null);
   const [filter, setFilter] = useState("");
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNoticeState] = useState<string | null>(null);
+  /** The last thing said, for an answer to the other window. */
+  const lastNotice = useRef<string | null>(null);
+  const memStuck = useRef<string | null>(null);
+  const setNotice = useCallback((m: string | null) => { if (m !== null) lastNotice.current = m; setNoticeState(m); }, []);
   // Phase S: the open idea's conversations beside the editor.
   const [sessions, setSessions] = useState<IdeaSessionsEv | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
@@ -306,13 +313,49 @@ export function Companion() {
     trace: (m) => trace(gen, m),
     listed: () => void refresh(),
     rows: listing?.ideas ?? NO_ROWS,
-    follow: (to) => void openIdea(to.name),
+    follow: (to) => void openAny(to),
     selectionMoved: () => readQuote(true),
     // The same offsets over another text: offered, never attached by itself.
     replaced: () => readQuote(false),
     began: () => { window.clearTimeout(quoteTimer.current); setQuote(null); },
   });
-  const { open, mode, busy, setBusy, session, handle, arm, hasSel, tick: relTick, bump, begin, leave, closeOpen, openDoc: openIdea, setMode, gotoLine } = doc;
+  const { open, mode, busy, setBusy, session, handle, arm, hasSel, tick: relTick, bump, begin, leave: leaveIdea, closeOpen, openDoc, setMode, gotoLine } = doc;
+  // A workspace's memory file, floated here (MemoryDoc.tsx). One document is open in
+  // this window: an idea, through `doc`, or that one; opening either leaves the other.
+  const [mem, setMem] = useState<MemoryOpen | null>(null);
+  const memApi = useRef<MainDocApi | null>(null);
+  const memLanded = useRef<((ok: boolean) => void) | null>(null);
+  const memRef = useRef(mem);
+  memRef.current = mem;
+  const memView = useMemoryView(up && mem ? mem.ws : null);
+  const leave = useCallback(async (): Promise<boolean> => {
+    if (memRef.current && memApi.current && !(await memApi.current.leave())) return false;
+    if (!(await leaveIdea())) return false;
+    setMem(null);
+    return true;
+  }, [leaveIdea]);
+  const openIdea = useCallback(async (id: string): Promise<boolean> => {
+    const was = memRef.current;
+    if (was && memApi.current && !(await memApi.current.leave())) return false;
+    if (memRef.current !== was) return false;
+    const ok = await openDoc(id);
+    if (ok) setMem(null);
+    return ok;
+  }, [openDoc]);
+  /** Open a memory file here. Resolved once it is open, or it is not. */
+  const openMemory = useCallback(async (to: MemoryOpen): Promise<boolean> => {
+    if (!memRef.current && !(await leaveIdea())) return false;
+    if (memRef.current && memApi.current && (memRef.current.ws !== to.ws || memRef.current.path !== to.path) && !(await memApi.current.leave())) return false;
+    if (memRef.current?.ws === to.ws && memRef.current.path === to.path) { setMem(to); return true; }
+    closeOpen();
+    memLanded.current?.(false);
+    return new Promise((done) => {
+      memLanded.current = (ok) => { memLanded.current = null; done(ok); };
+      setMem(to);
+    });
+  }, [leaveIdea, closeOpen]);
+  const landed = useCallback((path: string, ok: boolean) => { if (memRef.current?.path === path) memLanded.current?.(ok); }, []);
+  const openAny = (to: { name: string; source: unknown }) => (to.source === ideaDocs ? openIdea(to.name) : Promise.resolve(false));
   /** As the list's rules take it (an idea or a plan: this window's documents). */
   const openRow = open && { id: open.id, kind: open.kind === "plan" ? ("plan" as const) : ("idea" as const) };
 
@@ -628,19 +671,26 @@ export function Companion() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [afterPlanEdit, agentPrefs, gen, refresh]);
 
-  // The main window asks for a document (a workspace's plan or idea):
-  // written to localStorage just before it brings this window forward.
+  // The main window asks for a document (Float): opened here, then answered by
+  // name. It keeps its own until then, so a refusal here is said there.
+  const showAsked = useRef(async (_a: Ask) => {});
+  showAsked.current = async (a) => {
+    const d = a.doc;
+    trace(gen, `asked to show ${d.kind === "idea" ? d.id : `${d.ws} ${d.path}`}`);
+    lastNotice.current = null;
+    const ok = d.kind === "idea" ? await openIdea(d.id) : await openMemory({ ws: d.ws, name: d.name, path: d.path });
+    const at = memRef.current;
+    const now: HandDoc | null = d.kind === "idea" ? d : at ? { kind: "memory", ...at } : d;
+    answer(windowEnv(), FLOAT, a, ok && now ? { ok: true, doc: d.kind === "memory" ? d : now } : { ok: false, why: unsavedHere.current() ?? `The Ideas window did not open it${lastNotice.current ? `: ${lastNotice.current}` : "."}` });
+  };
+  /** What is open here with text that is not saved. */
+  const unsavedHere = useRef((): string | null => null);
+  unsavedHere.current = () => (session.current?.dirty() && open ? `The Ideas window has “${open.title || "Untitled"}” open with text that is not saved.` : memRef.current && memStuck.current ? `The Ideas window has “${memStuck.current}” open with text that is not saved.` : null);
   useEffect(() => {
-    const look = () => {
-      let id: string | null = null;
-      try {
-        id = showRequest(window.localStorage.getItem(SHOW_KEY), Date.now());
-        if (id) window.localStorage.removeItem(SHOW_KEY);
-      } catch { return; }
-      if (id) { trace(gen, `asked to show ${id}`); void openIdeaRef.current(id); }
-    };
-    const onStorage = (e: StorageEvent) => { if (e.key === SHOW_KEY) look(); };
-    if (up) look();
+    if (!up) return;
+    const look = () => { const a = take(windowEnv(), FLOAT); if (a) void showAsked.current(a); };
+    const onStorage = (e: StorageEvent) => { if (e.key === FLOAT.ask) look(); };
+    look();
     window.addEventListener("focus", look);
     window.addEventListener("storage", onStorage);
     return () => { window.removeEventListener("focus", look); window.removeEventListener("storage", onStorage); };
@@ -770,7 +820,9 @@ export function Companion() {
 
   return (
     <main className={`ix${open && chatOpen ? " ix-with-chat" : ""}`}>
-      <IdeaList
+      {mem ? (
+        <MemorySide at={mem} view={memView.view} error={memView.error} ago={(at) => age(at * 1000)} open={(path) => void openMemory({ ...mem, path })} all={() => void leave()} />
+      ) : <IdeaList
         listing={listing}
         openId={open?.id ?? null}
         filter={filter}
@@ -793,17 +845,26 @@ export function Companion() {
         textDrag={textDrag}
         onTextDrop={onTextDrop}
         scrollRef={listRef}
-      />
+      />}
       <section className="ix-doc" data-testid="ideas-doc">
         {words && <p className="ix-engine" data-testid="companion-engine">{words}</p>}
         {notice && (
           <DocNotice text={notice} dismiss={() => { setNotice(null); setUndo(null); }}
             act={undo && <button className="ix-btn" data-testid="ideas-undo" onClick={() => void undo.run()}>{undo.label}</button>} />
         )}
-        {open ? (
+        {mem ? (
+          <MemoryDoc at={mem} view={memView.view} tick={memView.tick} api={memApi} landed={landed}
+            go={(path) => setMem((m) => m && { ...m, path })}
+            follow={(path) => void openMemory({ ...mem, path })}
+            idea={(id) => void openIdea(id)}
+            stuck={(t) => { memStuck.current = t; }}
+            dock={(path) => ask(windowEnv(), DOCK, { kind: "memory", ws: mem.ws, name: mem.name, path }, () => invoke("raise_window"), "The main window")}
+            docked={() => setMem(null)} closed={() => setMem(null)}
+            reveal={(p) => { revealOnHost(p).catch((e) => setNotice(`Could not show it in Finder: ${errText(e)}`)); }} />
+        ) : open ? (
           <DocumentPane
             doc={doc}
-            follow={(to) => void openIdea(to.name)}
+            follow={(to) => void openAny(to)}
             textDrag={textDragOn}
             tool={(small) => (
               <button className={`ix-btn${chatOpen ? " on" : ""}${small ? " ix-btn-icon" : ""}`} data-testid="ideas-chat-toggle" aria-pressed={chatOpen} onClick={() => setChatOpen((o) => !o)}

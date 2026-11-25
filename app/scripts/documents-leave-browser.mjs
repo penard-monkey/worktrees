@@ -161,6 +161,7 @@ async function companion(page, tag) {
   await type(page, " N1");
   await free(page);
   ok(await kept(page, JELLY, " N1"), `${tag} a new idea: what was typed meanwhile is saved`);
+  ok(await until(page, () => /^Untitled$/.test(document.querySelector(".ix-title")?.textContent ?? "")), `${tag} …and then the new one opens`);
   // ── another row, held ──
   await page.locator(`.ix-row[data-idea='${JELLY}'] button`).first().click();
   await until(page, (id) => document.querySelector(".ix-row.on, .ix-row-on")?.dataset.idea === id, JELLY, 1500);

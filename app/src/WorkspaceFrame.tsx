@@ -242,8 +242,7 @@ export function WorkspaceFrame(props: {
             <div className="wsf-slot">
               {ws && pane && !props.docShown && (tab === "memory" && props.memory.instead ? props.memory.instead : (
                 <div className="wsf-nodoc" data-testid="ws-nodoc">
-                  {tab === "memory" ? <div className="wsf-empty"><p>{props.has ? "Pick a file to open it here." : "Reading…"}</p>{props.has && <button className="ctrl sm" data-testid="ws-open-tab" onClick={props.openTab}>Open the index</button>}</div>
-                  : props.floated ? (
+                  {props.floated ? (
                     <div className="wsf-floated" data-testid="ws-floated">
                       <p>{props.floated.title} is in the Ideas window.</p>
                       <div className="ws-ov-line">
@@ -251,7 +250,8 @@ export function WorkspaceFrame(props: {
                         <button className="ctrl sm" data-testid="ws-floated-here" onClick={props.floated.here}>Open it here</button>
                       </div>
                     </div>
-                  ) : tab === "plan" ? (
+                  ) : tab === "memory" ? <div className="wsf-empty"><p>{props.has ? "Pick a file to open it here." : "Reading…"}</p>{props.has && <button className="ctrl sm" data-testid="ws-open-tab" onClick={props.openTab}>Open the index</button>}</div>
+                  : tab === "plan" ? (
                     props.has
                       ? (parts.ov?.plan && !parts.ov.plan.live
                         ? <div className="wsf-empty"><p>The plan cannot be read: {parts.ov.plan.error ?? "it is gone"}.</p><button className="ctrl sm" onClick={() => parts.setPlan(null)}>Unlink it</button></div>

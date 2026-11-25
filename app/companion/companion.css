@@ -164,3 +164,13 @@ body.dragging .ix-row-main:hover { background: transparent; }
 .ix-plan-detail { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ix-pickproj { right: 16px; top: 120px; left: auto; width: 300px; max-width: 300px; }
 .ix-pickproj .ix-pick-rows { max-height: 40vh; overflow-y: auto; }
+
+/* ── a workspace's memory file, floated here (MemoryDoc.tsx) ── */
+.ix-mem-files { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: var(--s2) 0; }
+.ix-mem-picture { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.ix-float-label { margin-left: var(--s1); }
+.ix .ix-in-main { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.ix .wsc-filter { border: 1px solid var(--line); border-radius: var(--r-sm); padding: 3px var(--s2); color: var(--txt-hi); font: inherit; font-size: var(--fs-meta); }
+.ix .wsf-link, .ix .wsf-more { border: 0; background: none; padding: 0; color: var(--txt-hi); font: inherit; font-size: var(--fs-meta); text-decoration: underline; cursor: pointer; }
+.ix .ws-ov-none { margin: 0; color: var(--txt); font-size: var(--fs-meta); }
+.ix .ctrl { border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--bg-elev); padding: 3px var(--s2); color: var(--txt-hi); font: inherit; font-size: var(--fs-meta); }

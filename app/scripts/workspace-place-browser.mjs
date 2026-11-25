@@ -164,16 +164,12 @@ async function dock(page, tag, name) {
   ok(await until(page, () => !!document.querySelector("[data-testid=place-ws]")) && !(await page.locator("[data-testid=ws-chat-col]").isVisible().catch(() => false)), `${tag} no workspace chat inside a place's view`);
   await page.click("[data-testid=place-ws]");
   ok(await until(page, () => !!document.querySelector("[data-testid=ws-chat-col]")), `${tag} …and the crumb brings it back`);
-  // ── Float ──
+  // ── Float ── (the hand-off is documents-float-browser.mjs's)
   await rowIn(page, "Everything", root).click();
-  await page.click("[data-testid=dock-ws-tab][data-tab=memory]");
-  ok(await page.locator("[data-testid=dock-ws-float]").count() === 0, `${tag} a memory file does not float`);
-  await page.click("[data-testid=dock-ws-tab][data-tab=plan]");
-  const [popup] = await Promise.all([page.context().waitForEvent("page"), page.click("[data-testid=dock-ws-float]")]);
-  ok(await page.evaluate(() => !!JSON.parse(localStorage.getItem("wt.ideas.show") ?? "null")) || await until(popup, () => !!document.querySelector(".ix-row"), null, 8000), `${tag} a plan floats from here`);
-  await popup.close();
-  await page.locator("[data-testid=ws-doc-plan]").first().click();
-  ok(await until(page, () => !!document.querySelector("[data-testid=ws-floated]")), `${tag} …and the workspace view says where it went`);
+  for (const t of ["memory", "plan"]) {
+    await page.click(`[data-testid=dock-ws-tab][data-tab=${t}]`);
+    ok(await page.locator("[data-testid=dock-ws-float]").count() === 1, `${tag} ${t} floats from here`);
+  }
 }
 
 async function betas(page, tag) {
