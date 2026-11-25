@@ -62,6 +62,8 @@ pub const ERR_ALREADY: &str = "this chat is folding already";
 pub trait FoldIo: Send + Sync {
     /// Milliseconds since the epoch.
     fn now_ms(&self) -> u64;
+    /// The day it is at this host, for a note's name.
+    fn today(&self) -> String;
     /// The poll's clock, for what it counts.
     fn clock(&self) -> Duration;
     fn live(&self, session: &str) -> bool;
@@ -78,6 +80,9 @@ struct Live;
 impl FoldIo for Live {
     fn now_ms(&self) -> u64 {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+    }
+    fn today(&self) -> String {
+        chats::local_date(worktrees_core::sysclock::now_epoch())
     }
     fn clock(&self) -> Duration {
         static START: OnceLock<Instant> = OnceLock::new();
@@ -358,11 +363,17 @@ pub fn workspace_chat_fold(ctx: &Ctx, id: String, conv: String) -> Result<Value,
 /// ended, a relaunch that fails is a failed fold.
 fn begin(ctx: &Ctx, w: &Workspace, c: &Chat, live: bool) -> Result<(String, Fold), String> {
     let (root, io) = (ctx.workspaces_dir(), ctx.folds.io.clone());
-    let opener = chats::write_fold_at(root, &w.id, c)?;
+    // Its note is named the first time, by what the chat is called by then.
+    let mut named = c.clone();
+    chats::name_note(&mut named, &io.today());
+    let opener = chats::write_fold_at(root, &w.id, &named)?;
     let asked = io.now_ms();
     let fold = Fold { asked: desksessions::now_iso(), asked_ms: Some(asked), state: chats::FOLDING.into(), ..Fold::default() };
     let before = c.fold.clone();
-    chats::update_at(root, &w.id, &c.id, |x| x.fold = Some(fold.clone()))?;
+    chats::update_at(root, &w.id, &c.id, |x| {
+        x.note = named.note.clone();
+        x.fold = Some(fold.clone());
+    })?;
     if live {
         if let Err(e) = io.close(&c.id) {
             let _ = chats::update_at(root, &w.id, &c.id, |x| x.fold = before);
@@ -606,6 +617,9 @@ mod tests {
     impl FoldIo for Script {
         fn now_ms(&self) -> u64 {
             self.ms.load(Ordering::SeqCst)
+        }
+        fn today(&self) -> String {
+            "2026-11-24".into()
         }
         fn clock(&self) -> Duration {
             Duration::from_secs(self.secs.load(Ordering::SeqCst))
@@ -886,6 +900,8 @@ mod tests {
         d.tick(3);
         assert_eq!(d.tick(3).0[0].event, "landed");
         d.io.ms.fetch_add(60_000, Ordering::SeqCst);
+        // Renamed since: the note is the same file.
+        chats::rename_at(d.ctx.workspaces_dir(), &d.ws, &conv, "Another name").unwrap();
         // Ended: there is no session to look at and none to attach to again.
         let r = d.fold(&conv).unwrap();
         assert_eq!((&r["reattach"], d.rec(&conv).fold.unwrap().commit), (&json!(false), None));
@@ -895,9 +911,10 @@ mod tests {
         assert_eq!(d.says(&conv).as_deref(), Some("folding"));
         d.note(&conv, "second\n", 5);
         d.tick(3);
-        assert_eq!(d.log()[0].subject, "fold: Naming");
-        assert_eq!(d.log().iter().filter(|c| c.subject == "fold: Naming").count(), 2);
+        assert_eq!(d.log()[0].subject, "fold: Another name");
+        assert_eq!(d.log().iter().filter(|c| c.subject.starts_with("fold: ")).count(), 2);
         assert_eq!(fs::read_dir(d.mem("notes")).unwrap().count(), 1, "never doubled");
+        assert_eq!(d.rec(&conv).note, format!("memory/notes/2026-11-24-naming-{}.md", conv[20..].to_lowercase()));
     }
 
     #[test]
@@ -1202,6 +1219,7 @@ mod tests {
         let other = store::create_at(&d.base.join("cfg/workspaces.json"), "Other").unwrap().id;
         let c = chats::prepare_at(d.ctx.workspaces_dir(), &other, |_| String::new()).unwrap();
         workspace_chat_fold(&d.ctx, other.clone(), c.id.clone()).unwrap();
+        let c = chats::find_at(d.ctx.workspaces_dir(), &other, &c.id).unwrap();
         let p = d.base.join("ws").join(&other).join(&c.note);
         fs::write(&p, "note\n").unwrap();
         let at = std::time::UNIX_EPOCH + Duration::from_millis(d.io.now_ms() + 5);
