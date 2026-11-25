@@ -972,7 +972,9 @@ fn a_workspace_chat_from_start_to_the_workspaces_removal() {
     let log = |v: Value| -> Vec<String> { v["changes"].as_array().unwrap().iter().map(|c| c["subject"].as_str().unwrap().to_string()).collect() };
     assert_eq!(log(call("workspace_memory_log", json!({ "id": id })).unwrap()), ["Memory made"]);
     assert!(std::fs::read_to_string(mem.join("MEMORY.md")).unwrap().starts_with("# Memory: Home\n"));
+    // Both halves: the folder and the engine's, which has the memory's history.
     std::fs::remove_dir_all(folder.join(&id)).unwrap();
+    std::fs::remove_dir_all(folder.join(".engine").join(&id)).unwrap();
     std::fs::remove_file(fake.join("nofloor")).unwrap();
 
     // The start.
@@ -1137,7 +1139,8 @@ fn a_workspace_chat_from_start_to_the_workspaces_removal() {
     assert!(!up(&session) && !folder.join(&id).exists());
     assert_eq!(std::fs::read_to_string(to.join("memory/MEMORY.md")).unwrap(), "kept");
     assert!(to.join("chats").join(&conv).join("start.md").exists());
-    let o = Command::new("git").arg("-C").arg(to.join("memory")).env_remove("GIT_DIR").args(["log", "--format=%s"]).output().unwrap();
+    assert!(!folder.join(".engine").join(&id).exists(), "its engine half went too");
+    let o = Command::new("git").arg("--git-dir").arg(to.join(".engine/memory.git")).env_remove("GIT_WORK_TREE").args(["log", "--format=%s"]).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&o.stdout).lines().count(), 8, "its history went with it: {o:?}");
     let e = call("workspace_chats", json!({ "id": id })).unwrap_err();
     assert!(e.contains("no workspace"), "{e}");
