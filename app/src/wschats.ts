@@ -111,7 +111,7 @@ export function titleFrom(message: string): string | null {
 /** The person's first message among a chat's turns: the first that is theirs.
  *  The opener is the engine's, and a notice is Claude's own entry. */
 export function firstMessage(turns: readonly { user: string | null; notice?: unknown }[], conv: string): string | null {
-  const t = turns.find((x) => x.user && !x.notice && !x.user.startsWith(`Read chats/${conv}/`));
+  const t = turns.find((x) => x.user && !x.notice && !engineLine(x.user, conv));
   return t?.user ?? null;
 }
 
@@ -120,7 +120,7 @@ export function firstMessage(turns: readonly { user: string | null; notice?: unk
 export function engineLine(text: string, conv: string): string | null {
   const t = text.trim();
   if (t === `Read chats/${conv}/start.md and begin.`) return "The chat was started.";
-  return t === `Read chats/${conv}/fold.md and do what it says.` || t === `Read chats/${conv}/fold.md and begin.` ? "The chat was asked to fold into memory." : null;
+  return t.startsWith("Read ") && t.endsWith(`chats/${conv}/fold.md and do what it says.`) ? "The chat was asked to fold into memory." : null;
 }
 /** A prompt that asks whether the workspace's own folder is trusted. */
 export const asksTrust = (lines: readonly string[] | undefined): boolean => !!lines && /\btrust\b/i.test(lines.join(" ")) && /\bfolder\b|workspaces\//i.test(lines.join(" "));
