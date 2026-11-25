@@ -206,12 +206,13 @@ impl WorkspaceSessions {
     /// at `root`.
     pub fn with_chats(mut self, root: &std::path::Path) -> WorkspaceSessions {
         use worktrees_core::workspacechats as wc;
+        let of = wc::workspaces_of_convs(root);
         self.chat_of = self
             .live
             .iter()
             .filter_map(|s| {
                 let chat = wc::conv_of_session(s)?;
-                Some((s.clone(), ChatOf { workspace: wc::workspace_of_conv(root, chat)?, chat: chat.to_string() }))
+                Some((s.clone(), ChatOf { workspace: of.get(chat)?.clone(), chat: chat.to_string() }))
             })
             .collect();
         self

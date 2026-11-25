@@ -299,13 +299,8 @@ pub fn memory_commit_if_dirty(ctx: &Ctx, id: &str, message: Option<&str>) -> Res
 /// engine's holds, and by the record, which any engine's fold is in. A record
 /// that cannot be read is not a no.
 fn may_commit(ctx: &Ctx, id: &str) -> Result<(), String> {
-    let folding = ctx.memory.is_held(id) || folding_at(root(ctx), id)?.is_some();
+    let folding = ctx.memory.is_held(id) || worktrees_core::workspacechats::folding_at(root(ctx), id)?.is_some();
     if folding { Err("a chat is folding into this memory: wait for it, or stop it".into()) } else { Ok(()) }
-}
-
-/// The chats lane's `workspacechats::folding_at`, until it is merged here.
-fn folding_at(_root: &Path, _id: &str) -> Result<Option<String>, String> {
-    Ok(None)
 }
 
 // ── the poll ────────────────────────────────────────────────────────────────
