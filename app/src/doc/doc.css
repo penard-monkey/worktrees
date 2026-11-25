@@ -60,6 +60,7 @@
 .ix-engine { margin: 0; padding: var(--s2) var(--s4); color: var(--txt); font-size: var(--fs-meta); border-bottom: 1px solid var(--line); }
 
 .ix-body { position: relative; flex: 1 1 auto; min-height: 0; }
+.ix-body[hidden] { display: none; }
 .ix-editor { position: absolute; inset: 0; }
 .ix-editor[hidden] { display: none; }
 .ix-read { position: absolute; inset: 0; overflow-y: auto; }

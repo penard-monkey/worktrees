@@ -281,7 +281,7 @@ export function ChatLines(props: { rows: readonly ChatRow[]; ago(epoch: number):
 
 /** The Chats tab: every chat, what needs somebody first, the closed ones by
  *  month. */
-export function ChatsTab(props: { rows: readonly ChatRow[]; on: string | null; starting: boolean; ago(epoch: number): string; open(conv: string): void; start(): void }) {
+export function ChatsTab(props: { note(path: string): void; rows: readonly ChatRow[]; on: string | null; starting: boolean; ago(epoch: number): string; open(conv: string): void; start(): void }) {
   const [q, setQ] = useState("");
   const needle = q.trim().toLowerCase();
   const hit = props.rows.filter((r) => !needle || r.chat.title.toLowerCase().includes(needle));
@@ -314,6 +314,7 @@ export function ChatsTab(props: { rows: readonly ChatRow[]; on: string | null; s
                     <span className="ws-ov-detail">{stateWords(r)}</span>
                   </span>
                 </button>
+                {r.chat.note_exists && <button className="wsf-link" data-testid="ws-chats-note" title={r.chat.note} onClick={() => props.note(r.chat.note)}>note</button>}
                 <span className="wsc-when" title={`Last active ${whenWords(r.chat.last_activity || r.chat.started)}`}>started {whenWords(r.chat.started)}{props.ago(activeAt(r.chat)) ? ` · active ${props.ago(activeAt(r.chat))}` : ""}</span>
               </li>
             ))}

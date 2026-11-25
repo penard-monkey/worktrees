@@ -22,6 +22,8 @@ for (const [name, engine] of [["chromium", chromium], ["webkit", webkit]]) {
   const browser = await engine.launch();
   const page = await browser.newPage({ viewport: { width: 1400, height: 860 } });
   const errors = [];
+  // This bench is about editing; a memory file opens in Read until Edit is chosen.
+  await page.addInitScript(() => localStorage.setItem("wt.doc.mode.memory", "edit"));
   page.on("pageerror", (e) => errors.push(String(e)));
   await page.goto(`${BASE}/?workspaces=1&memtick=150`);
   const until = (fn, arg, ms = 6000) => page.waitForFunction(fn, arg, { timeout: ms }).then(() => true, () => false);

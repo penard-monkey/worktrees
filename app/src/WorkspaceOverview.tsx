@@ -48,9 +48,6 @@ export type WsParts = {
 /** One of the workspace's projects, as the Overview lists it. */
 export type WsProjectRow = { root: string; name: string; registered: boolean; places: number; working: number; waiting: number };
 
-/** What an unbuilt part's disabled buttons say. */
-export const SOON = "Not yet: it comes with the next part of workspace chats";
-
 /** "Link a plan ▸": the plans no workspace has. */
 export function PlanPicker(props: Pick<WsParts, "freePlans" | "arm" | "setPlan"> & { picked(): void }) {
   return (
@@ -266,13 +263,13 @@ function ProjectsCard(props: { projects: WsProjectRow[]; takeOut(root: string): 
 }
 
 /** No memory, and no chats: the designed empty states. */
-export function NoMemory({ newChat }: { newChat: () => void }) {
+export function NoMemory({ newChat, make, busy }: { newChat: () => void; make: () => void; busy: boolean }) {
   return (
     <div className="wsf-empty" data-testid="ws-no-memory">
       <p>No memory yet. It starts with the first chat.</p>
       <div className="ws-ov-line">
         <button className="ctrl sm" data-testid="ws-new-chat-memory" onClick={newChat}>New chat</button>
-        <button className="ctrl sm" disabled title={SOON} data-testid="ws-make-memory">Make memory</button>
+        <button className="ctrl sm" data-testid="ws-make-memory" disabled={busy} onClick={make} title="A folder of its own with an index, kept as a history. A chat makes one by itself.">Make memory</button>
       </div>
     </div>
   );
@@ -300,6 +297,9 @@ export function WorkspaceOverview(props: WsParts & {
   takeOut(root: string): void;
   addProject(e: React.MouseEvent): void;
   /** The chats' own lines, and how many there are. */
+  /** The memory's column, and what is beside its name. */
+  memory: ReactNode;
+  memorySide: string | null;
   chats: ReactNode;
   chatCount: number;
   starting: boolean;
@@ -319,7 +319,7 @@ export function WorkspaceOverview(props: WsParts & {
       <div className="wsf-cols">
         <div className="wsf-col wsf-col-main">
           {props.chatsOn
-            ? <Card name="Memory" testId="ws-ov-card-memory" className="wsf-card-tall" act={<button className="ctrl sm" onClick={() => props.showTab("memory")}>Open ▸</button>}><NoMemory newChat={props.newChat} /></Card>
+            ? <Card name="Memory" testId="ws-ov-card-memory" className="wsf-card-tall" side={props.memorySide} act={<button className="ctrl sm" data-testid="ws-ov-memory-open" onClick={() => props.showTab("memory")}>Open ▸</button>}>{props.memory}</Card>
             : work}
         </div>
         <div className="wsf-col wsf-col-side">

@@ -76,10 +76,15 @@ import {
 import { privacyArea, privacyWords } from "./privacypaths";
 import { PickPlace, StartReview } from "./StartWork";
 import { useGone } from "./useGone";
-import { WorkspaceOverview, type DocLite, type WsParts } from "./WorkspaceOverview";
+import { NoMemory, WorkspaceOverview, type DocLite, type WsParts } from "./WorkspaceOverview";
 import { DocChips, WorkspaceFrame } from "./WorkspaceFrame";
 import { ChatDot, ChatLines, ChatsTab, NavChats, RefusedStart, StartingChat, WorkspaceChatColumn } from "./WorkspaceChat";
 import { useWsChats } from "./useWsChats";
+import { MemoryCard, MemoryFiles, MemoryHistory, MemoryPreview, MemoryUnread } from "./WorkspaceMemory";
+import { useWsMemory } from "./useWsMemory";
+import { fileOf, longIndex, notePath, sizeWords, trailStart, trailStep, trailTo, type Trail } from "./wsmemory";
+import { memoryDocs } from "./doc/memory";
+import { memoryLink } from "./doc/memorypath";
 import { navRows, type ChatRow } from "./wschats";
 import { attentionOf, docChips, rollupOf, tabOr, wsCounts, wsFrameOn, wsTabs, type Rollup } from "./wsview";
 import { MainDocument, type MainDocApi } from "./doc/MainDocument";
@@ -560,7 +565,7 @@ function NavButtons({ canBack, canForward, backTitle, forwardTitle, onStep, onLi
  *  has no global and is written by `withAgentView` alone (see PlacePanels). */
 type DockPatch = Partial<Omit<PlacePanels, "agent_view">>;
 /** The document the main window has open, and where (a workspace's tab). */
-type MainDoc = DocTarget & { ws: string; tab: "plan" | "ideas"; startIn?: "edit" };
+type MainDoc = DocTarget & { ws: string; tab: "plan" | "ideas" | "memory"; startIn?: "edit" };
 /** One entry of `DOCK_RAIL` (declared inside App, which owns the icons). */
 type DockRailItem = { key: Settings["dock_tab"]; track: string; icon: React.ReactNode; title: string };
 
@@ -4455,6 +4460,11 @@ function App() {
   const [floated, setFloated] = useState<(DocTarget & { title: string }) | null>(null);
   /** The open document's title while its text is saved nowhere. */
   const [docStuck, setDocStuck] = useState<string | null>(null);
+  /** The memory file each workspace's Memory tab shows, and the trail of them. */
+  const [wsTrail, setWsTrail] = useState<Record<string, Trail>>({});
+  /** A change History was asked to show, from elsewhere. */
+  const [memAt, setMemAt] = useState<{ ws: string; commit: string | null; n: number } | null>(null);
+  const [memBusy, setMemBusy] = useState(false);
   /** The chat each workspace has in its middle column, while the app runs. */
   const [wsChat, setWsChat] = useState<Record<string, string | null>>({});
   /** A chat being started in a workspace, and why it was refused. */
@@ -6649,6 +6659,7 @@ function App() {
   const wsById = (id: string) => wsList?.workspaces.find((w) => w.id === id) ?? null;
   // The workspaces' chats (workspace chats' beta), for the nav, ⌘K and the view.
   const wsChats = useWsChats(wsChatsOn && !!wsList, useMemo(() => (wsList?.workspaces ?? []).map((w) => w.id), [wsList]));
+  const wsMem = useWsMemory(wsChatsOn && !!wsList, useMemo(() => (wsList?.workspaces ?? []).map((w) => w.id), [wsList]));
   const chatWaits = (wsList?.workspaces ?? []).some((w) => wsChats.rows(w.id).some((x) => x.state === "waiting"));
   // Re-read whenever the registry's roots change: "not registered" is the
   // registry's answer, joined in by the row.
@@ -6796,6 +6807,7 @@ function App() {
   /** The document a tab of a workspace shows: its plan, or the idea picked (the
    *  last one picked there, else the first linked). As the overview resolves
    *  them once it is here: an id that was merged away names what took it. */
+  const memPath = (id: string): string => { const t = wsTrail[id]; return t?.paths[t.at] ?? "MEMORY.md"; };
   const tabDoc = (id: string, tab: WsTab, pick?: string): DocTarget | null => {
     const w = wsById(id);
     const ov = wsOv?.id === id ? wsOv.ov : null;
@@ -6803,6 +6815,15 @@ function App() {
       if (!w?.plan) return null;
       if (ov?.plan?.id === w.plan) return ov.plan.live ? { source: ideaSource, name: ov.plan.live } : null;
       return { source: ideaSource, name: w.plan };
+    }
+    if (tab === "memory") {
+      // The file last read there, else the index. Not a text: no document, its
+      // preview stands in the pane's place. No memory: nothing yet.
+      const v = wsMem.of(id);
+      const path = pick ?? memPath(id);
+      if (!v?.made) return null;
+      const f = fileOf(v, path);
+      return f && f.kind !== "text" ? null : { source: memoryDocs(id), name: path };
     }
     if (tab !== "ideas") return null;
     const linked = ov ? ov.ideas.flatMap((i) => (i.live ? [i.live] : [])) : w?.ideas ?? [];
@@ -6822,7 +6843,7 @@ function App() {
     const to = tabOr(tab, tabsOn);
     const want = tabDoc(id, to, o.doc);
     const cur = mainDocRef.current;
-    const stays = cur && cur.ws === id && cur.tab === to && (!want || sameDoc(cur, want));
+    const stays = cur && cur.ws === id && cur.tab === to && (want ? sameDoc(cur, want) : to !== "memory");
     if (cur && !stays && mainDocApi.current) {
       const from = { sel: selRef.current, ws: wsOpenRef.current };
       const ok = await mainDocApi.current.leave();
@@ -6854,7 +6875,8 @@ function App() {
     if (o.chat !== undefined) { setWsChat((c) => ({ ...c, [id]: o.chat ?? null })); setWsStart(null); }
     setWsSide(o.chat ? "chat" : "docs");
     if (to === "ideas" && o.doc) setWsPick((p) => ({ ...p, [id]: o.doc! }));
-    if (!want || (to !== "plan" && to !== "ideas")) return true;
+    if (to === "memory") setWsTrail((t) => (o.doc || !t[id] ? { ...t, [id]: trailTo(t[id] ?? trailStart(), o.doc ?? "MEMORY.md") } : t));
+    if (!want || (to !== "plan" && to !== "ideas" && to !== "memory")) return true;
     if (o.here) setFloated((f) => (sameDoc(f, want) ? null : f));
     else if (sameDoc(floated, want)) return true;
     if (stays) { if (o.startIn) mainDocApi.current?.edit(); return true; }
@@ -6883,14 +6905,20 @@ function App() {
   // A workspace's plan, or its first idea, arrives or goes while its tab is up.
   const planHere = wsShown?.plan ?? null;
   const anyIdea = (wsShown?.ideas ?? []).length > 0;
+  const madeHere = !!(wsShown && wsMem.of(wsShown.id)?.made);
   useEffect(() => {
-    if (!wsShown || (wsTabNow !== "plan" && wsTabNow !== "ideas")) return;
+    if (!wsShown || (wsTabNow !== "plan" && wsTabNow !== "ideas" && wsTabNow !== "memory")) return;
     const cur = mainDocRef.current;
+    if (wsTabNow === "memory") { if (madeHere && !(cur?.ws === wsShown.id && cur.tab === "memory")) void showWsRef.current(wsShown.id, "memory"); return; }
     if (wsTabNow === "plan" && !planHere) {
       if (cur?.ws === wsShown.id && cur.tab === "plan") void leaveMainDoc();
     } else if (wsTabNow === "plan" || (anyIdea && !(cur?.ws === wsShown.id && cur.tab === "ideas"))) void showWsRef.current(wsShown.id, wsTabNow);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- what is behind the tab is the trigger
-  }, [wsShown?.id, wsTabNow, planHere, anyIdea]);
+  }, [wsShown?.id, wsTabNow, planHere, anyIdea, madeHere]);
+  // Looking at a workspace's memory is seeing what changed in it.
+  const lastHere = wsShown ? wsMem.of(wsShown.id)?.last?.commit : undefined;
+  const lookAt = wsMem.look;
+  useEffect(() => { if (wsShown && wsTabNow === "memory" && lastHere) lookAt(wsShown.id); }, [wsShown?.id, wsTabNow, lastHere, lookAt]); // eslint-disable-line react-hooks/exhaustive-deps
   /** Close the document open in the main area, if it can be left: `false` while
    *  its text is saved nowhere else. */
   const leaveMainDoc = async (): Promise<boolean> => {
@@ -6901,8 +6929,8 @@ function App() {
     return true;
   };
   // Its beta is off, or its workspace is gone: it is closed, once it is saved.
-  // (Every document is the ideas folder's until memory has a source.)
-  const docBeta = !mainDoc || ideasOn;
+  // Ideas' documents are Ideas' beta, a memory's files workspace chats'.
+  const docBeta = !mainDoc || (mainDoc.source === ideaSource ? ideasOn : wsChatsOn);
   const docWs = !mainDoc || !wsList || !!wsById(mainDoc.ws);
   useEffect(() => { if (!docBeta || !docWs) void leaveMainDoc(); }, [docBeta, docWs]); // eslint-disable-line react-hooks/exhaustive-deps
   // What the plan and the ideas say: read again on every list change and every
@@ -6925,12 +6953,48 @@ function App() {
   }, [ideasOn, wsOpen, wsList, ideasTick]);
   /** Open a plan or an idea in the workspace shown: its own plan on the Plan
    *  tab, anything else on Ideas (linked there or not). */
+  /** ‹ › in a memory file: the files read there, one step. */
+  const stepTrail = async (id: string, by: -1 | 1) => {
+    const next = trailStep(wsTrail[id] ?? trailStart(), by);
+    if (!next) return;
+    if (mainDocApi.current && !(await mainDocApi.current.leave())) return;
+    setWsTrail((t) => ({ ...t, [id]: next }));
+    void showWs(id, "memory", { doc: next.paths[next.at] });
+  };
   const openDocHere = (id: string, startIn?: "edit") => {
     if (!ideasOn || !wsOpen) return;
     if (id === tabDoc(wsOpen, "plan")?.name || id === wsById(wsOpen)?.plan) void showWs(wsOpen, "plan", { startIn });
     else void showWs(wsOpen, "ideas", { doc: id, startIn });
   };
-  const docShown = wsShown !== null && mainDoc !== null && wsShown.id === mainDoc.ws && wsTabNow === mainDoc.tab;
+  // A memory file that is not a text has its preview in the pane's place.
+  const memFile = wsShown && wsTabNow === "memory" ? fileOf(wsMem.of(wsShown.id), memPath(wsShown.id)) : null;
+  const docShown = wsShown !== null && mainDoc !== null && wsShown.id === mainDoc.ws && wsTabNow === mainDoc.tab && !(memFile && memFile.kind !== "text");
+  /** Follow a link from a document: to where its source says. */
+  const followDoc = (to: DocTarget) => {
+    if (to.source === ideaSource) {
+      if (!ideasOn) { setNotice("That is an idea, and Ideas is off (Settings → General → Beta features)."); return; }
+      openDocHere(to.name);
+    } else if (wsOpen) void showWs(wsOpen, "memory", { doc: to.name });
+  };
+  /** One of a workspace's memory files, in its tab; `null`: the index. */
+  const openMemory = (id: string, path: string | null) => void showWs(id, "memory", { doc: path ?? "MEMORY.md" });
+  const showChange = async (id: string, commit: string | null) => {
+    const v = wsMem.of(id), f = fileOf(v, memPath(id));
+    if (await showWs(id, "memory", f && f.kind !== "text" ? { doc: "MEMORY.md" } : {})) setMemAt((m) => ({ ws: id, commit, n: (m?.n ?? 0) + 1 }));
+  };
+  const makeMemory = async (id: string) => {
+    setMemBusy(true);
+    try { await wsMem.make(id); } catch (e) { fail(e); }
+    finally { setMemBusy(false); }
+  };
+  /** Why a link in a memory file goes nowhere. */
+  const memView = wsShown ? wsMem.of(wsShown.id) : undefined;
+  const memLinkNote = useCallback((from: string, href: string): string | null => {
+    if (/^#?idea:/.test(href)) return null;
+    const l = memoryLink(from, href);
+    if (l.kind === "none") return l.why;
+    return l.kind === "file" && memView && !memView.truncated && !fileOf(memView, l.path) ? `There is no ${l.path} in this memory.` : null;
+  }, [memView]);
   // "It is still open in its workspace" is answered by going there.
   const docWaits = useRef<string | null>(null);
   useEffect(() => {
@@ -8885,7 +8949,7 @@ function App() {
   const shellHere = stripUp ? frontHere
     : sel ? navSeenFront.current[placeKey(sel.repo, sel.slug)] ?? settings.term_tab_active?.[placeKey(sel.repo, sel.slug)] : undefined;
   // The workspace view is a location too: its tab, and the idea it shows.
-  const wsLoc: Loc["ws"] = !sel && wsShown ? { id: wsShown.id, tab: wsTabNow, ...(wsTabNow === "ideas" ? { doc: tabDoc(wsShown.id, "ideas")?.name } : {}), ...(wsChat[wsShown.id] ? { chat: wsChat[wsShown.id]! } : {}) } : undefined;
+  const wsLoc: Loc["ws"] = !sel && wsShown ? { id: wsShown.id, tab: wsTabNow, ...(wsTabNow === "ideas" ? { doc: tabDoc(wsShown.id, "ideas")?.name } : wsTabNow === "memory" ? { doc: memPath(wsShown.id) } : {}), ...(wsChat[wsShown.id] ? { chat: wsChat[wsShown.id]! } : {}) } : undefined;
   const navLoc: Loc | null = !sel ? { place: null, ...(wsLoc ? { ws: wsLoc } : {}) } : !selected ? null : stripUp && frontHere === undefined ? null : {
     place: { repo: sel.repo, slug: sel.slug },
     dock: {
@@ -9740,8 +9804,8 @@ function App() {
                       <DocChips
                         chips={docChips({ ideas: ideasOn, chats: wsChatsOn }).map((tab) => ({
                           tab,
-                          // Nothing is behind Memory until its engine is here.
-                          has: tab === "plan" ? !!w.plan : tab === "ideas" ? (w.ideas ?? []).length > 0 : false,
+                          has: tab === "plan" ? !!w.plan : tab === "ideas" ? (w.ideas ?? []).length > 0 : !!wsMem.of(w.id)?.made,
+                          fresh: tab === "memory" && wsMem.unseen(w.id) && !(wsShown?.id === w.id && wsTabNow === "memory"),
                           count: tab === "ideas" ? (w.ideas ?? []).length : undefined,
                           on: !guestOpen && wsShown?.id === w.id && wsTabNow === tab,
                           floated: !!floated && (tab === "plan" ? w.plan === floated.name : tab === "ideas" && (w.ideas ?? []).includes(floated.name)),
@@ -10649,7 +10713,7 @@ function App() {
                 side={wsSide}
                 setSide={setWsSide}
                 chatsTab={wsShown && wsChatsOn && (
-                  <ChatsTab rows={wsChats.rows(wsShown.id)} on={wsChat[wsShown.id] ?? null} starting={wsStart?.why === null} ago={ago}
+                  <ChatsTab note={(n) => openMemory(wsShown.id, notePath(n))} rows={wsChats.rows(wsShown.id)} on={wsChat[wsShown.id] ?? null} starting={wsStart?.why === null} ago={ago}
                     open={(conv) => openChat(wsShown.id, conv)} start={() => void startChat(wsShown.id)} />
                 )}
                 showTab={(t) => { if (wsShown) void showWs(wsShown.id, t); }}
@@ -10670,6 +10734,15 @@ function App() {
                     })}
                     goTo={(a) => { if (a.kind === "chat") openChat(wsShown.id, a.conv); else if (a.kind === "unsaved" && mainDoc) void showWs(wsById(mainDoc.ws) ? mainDoc.ws : wsShown.id, mainDoc.tab, { doc: mainDoc.name }); else void showWs(wsShown.id, "plan"); }}
                     showTab={(t) => void showWs(wsShown.id, t)}
+                    memory={!wsChatsOn ? null : wsMem.error(wsShown.id) ? <MemoryUnread why={wsMem.error(wsShown.id)!} retry={() => void wsMem.refresh(wsShown.id)} />
+                      : !memView ? <p className="ws-ov-none">Reading…</p>
+                      : !memView.made ? <NoMemory newChat={() => void startChat(wsShown.id)} make={() => void makeMemory(wsShown.id)} busy={memBusy} />
+                      : (
+                        <MemoryCard ws={wsShown.id} view={memView} ago={ago} open={(path) => openMemory(wsShown.id, path)} diff={(commit) => void showChange(wsShown.id, commit)}
+                          follow={(href) => { const to = memoryDocs(wsShown.id).target("MEMORY.md", href); if (to) followDoc(to); }}
+                          changed={() => void wsMem.refresh(wsShown.id)} />
+                      )}
+                    memorySide={memView?.made && memView.index ? `${memView.index.path} · ${sizeWords(memView.index.size)} · ${memView.count} files` : null}
                     chats={wsChatsOn ? <ChatLines rows={navRows(wsChats.rows(wsShown.id)).rows} ago={ago} open={(conv) => openChat(wsShown.id, conv)} /> : null}
                     chatCount={wsChats.of(wsShown.id)?.chats.length ?? 0}
                     newChat={() => void startChat(wsShown.id)}
@@ -10683,7 +10756,15 @@ function App() {
                     addProject={(e) => wsMenuAt(e, wsShown.id)}
                   />
                 )}
-                has={wsShown ? (wsTabNow === "plan" ? !!wsShown.plan : anyIdea) : false}
+                has={wsShown ? (wsTabNow === "plan" ? !!wsShown.plan : wsTabNow === "memory" ? madeHere : anyIdea) : false}
+                memory={{
+                  count: memView?.count ?? 0,
+                  files: wsShown && memView?.made && !wsMem.error(wsShown.id) ? <MemoryFiles view={memView} on={memPath(wsShown.id)} ago={ago} open={(path) => openMemory(wsShown.id, path)} /> : null,
+                  instead: !wsShown ? null
+                    : wsMem.error(wsShown.id) ? <MemoryUnread why={wsMem.error(wsShown.id)!} retry={() => void wsMem.refresh(wsShown.id)} />
+                    : memView && !memView.made ? <NoMemory newChat={() => void startChat(wsShown.id)} make={() => void makeMemory(wsShown.id)} busy={memBusy} />
+                    : memFile && memFile.kind !== "text" ? <MemoryPreview ws={wsShown.id} file={memFile} tick={wsMem.tick(wsShown.id)} reveal={memView ? () => { revealOnHost(`${memView.dir}/${memFile.path}`).catch((e) => fail(e)); } : null} /> : null,
+                }}
                 floated={floated && wsShown && sameDoc(floated, tabDoc(wsShown.id, wsTabNow)) ? {
                   title: floated.title,
                   show: () => openIdeaDoc(floated.name),
@@ -10692,7 +10773,7 @@ function App() {
                 openId={wsShown ? tabDoc(wsShown.id, wsTabNow)?.name ?? null : null}
                 openTitle={ideaDocs.find((d) => d.id === wsPick[wsShown?.id ?? ""])?.title ?? null}
                 docShown={docShown}
-                openTab={() => { if (wsShown) void showWs(wsShown.id, wsTabNow, { here: true }); }}
+                openTab={() => { if (wsShown) void showWs(wsShown.id, wsTabNow, wsTabNow === "memory" ? { doc: "MEMORY.md" } : { here: true }); }}
                 dockLeft={dockLeft}
                 doc={mainDoc && (
                   <MainDocument
@@ -10711,11 +10792,34 @@ function App() {
                       setMainDoc(was);
                       if (wsShown) { setWsOpen(was.ws); setWsTab(was.tab); }
                     }}
-                    follow={(to) => openDocHere(to.name)}
+                    follow={followDoc}
                     stuck={setDocStuck}
                     waits={(title) => { docWaits.current = `“${title}” has text that is not saved. It is still open in its workspace.`; setNotice(docWaits.current); }}
                     closed={() => setMainDoc(null)}
-                    float={(to, title) => { setMainDoc(null); setFloated({ ...to, title }); openIdeaDoc(to.name); }}
+                    // The Ideas window takes an idea's id: a memory file has no
+                    // hand-off to it yet, so it does not float.
+                    float={mainDoc.source === ideaSource ? (to, title) => { setMainDoc(null); setFloated({ ...to, title }); openIdeaDoc(to.name); } : undefined}
+                    {...(mainDoc.tab === "memory" ? {
+                      title: mainDoc.name.slice(mainDoc.name.lastIndexOf("/") + 1),
+                      lead: (
+                        <>
+                          <span className="wsm-trail" role="group" aria-label="Files read">
+                            <button className="icon-btn" data-testid="memory-back" title="Back to the file before" disabled={!trailStep(wsTrail[mainDoc.ws] ?? trailStart(), -1)} onClick={() => stepTrail(mainDoc.ws, -1)}><Icons.ChevronLeft size={13} /></button>
+                            <button className="icon-btn" data-testid="memory-forward" title="Forward" disabled={!trailStep(wsTrail[mainDoc.ws] ?? trailStart(), 1)} onClick={() => stepTrail(mainDoc.ws, 1)}><Icons.ChevronRight size={13} /></button>
+                          </span>
+                          {mainDoc.name.includes("/") && <span className="wsm-crumb">{mainDoc.name.slice(0, mainDoc.name.lastIndexOf("/")).replace(/\//g, " ▸ ")} ▸</span>}
+                        </>
+                      ),
+                      linkNote: memLinkNote,
+                      historyAsk: memAt?.ws === mainDoc.ws ? memAt.n : 0,
+                      history: (close: () => void) => (
+                        <MemoryHistory key={`${mainDoc.ws}|${mainDoc.name}|${memAt?.ws === mainDoc.ws ? memAt.n : 0}`} ws={mainDoc.ws} path={mainDoc.name} at={memAt?.ws === mainDoc.ws ? memAt.commit : null} tick={wsMem.tick(mainDoc.ws)}
+                          open={(path) => { close(); setMemAt(null); openMemory(mainDoc.ws, path); }} close={() => { close(); setMemAt(null); }} />
+                      ),
+                      strips: mainDoc.name === "MEMORY.md" && memView && longIndex(memView) ? (
+                        <div className="wsm-long" data-testid="memory-long" role="status"><span>{longIndex(memView)}</span><button className="ctrl sm" disabled title="Not yet: it starts a chat that moves detail into topics">Tidy…</button></div>
+                      ) : undefined,
+                    } : {})}
                   />
                 )}
               />

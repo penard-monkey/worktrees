@@ -101,6 +101,7 @@ const V = (tab, doc, id = "w1") => ({ place: null, ws: { id, tab, ...(doc ? { do
 eq("a workspace is not Home", H.locKey(V("overview")) === H.locKey(HOME), false);
 eq("two tabs of it are two locations", H.locKey(V("plan")) === H.locKey(V("overview")), false);
 eq("…and two ideas on one tab", H.locKey(V("ideas", "a")) === H.locKey(V("ideas", "b")), false);
+eq("a file on the Memory tab is its own location", H.locKey(V("memory", "a.md")) === H.locKey(V("memory", "b.md")), false);
 eq("an idea means nothing off the Ideas tab", H.locKey(V("plan", "a")), H.locKey(V("plan")));
 eq("a place drops a workspace left beside it", H.normalize({ ...P("a"), ws: { id: "w1", tab: "plan" } }), P("a"));
 let v = H.record(H.empty(), HOME, 1000);

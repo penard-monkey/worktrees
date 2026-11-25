@@ -11,7 +11,7 @@ export type DockTab = "files" | "terminal" | "docs" | "plan" | "prs";
 export type WsTab = "overview" | "memory" | "plan" | "ideas" | "chats";
 
 /** What the panes show. `place: null` is Home, or the workspace view when `ws`
- *  names one: its id, its tab, on Ideas the idea picked, and the chat in its
+ *  names one: its id, its tab, on Ideas the idea picked (on Memory the file), and the chat in its
  *  middle column. `dock.file` only means anything
  *  on the Files tab and `dock.shell` only on Terminal — `normalize` drops the
  *  other, so two locations that LOOK the same compare equal. */
@@ -36,7 +36,7 @@ export const COALESCE_MS = 600;
 export const empty = (): History => ({ entries: [], index: -1, at: 0 });
 
 export const normalize = (l: Loc): Loc => {
-  if (!l.place) return l.ws ? { place: null, ws: { id: l.ws.id, tab: l.ws.tab, ...(l.ws.tab === "ideas" && l.ws.doc ? { doc: l.ws.doc } : {}), ...(l.ws.chat ? { chat: l.ws.chat } : {}) } } : { place: null };
+  if (!l.place) return l.ws ? { place: null, ws: { id: l.ws.id, tab: l.ws.tab, ...((l.ws.tab === "ideas" || l.ws.tab === "memory") && l.ws.doc ? { doc: l.ws.doc } : {}), ...(l.ws.chat ? { chat: l.ws.chat } : {}) } } : { place: null };
   const out: Loc = { place: { repo: l.place.repo, slug: l.place.slug } };
   if (l.agent) out.agent = l.agent;
   if (l.dock) {

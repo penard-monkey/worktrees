@@ -4151,8 +4151,9 @@ body.dragging .ws-h { cursor: grabbing; }
 .wsf-docs[data-room="narrow"] .wsf-col-main { flex: none; }
 .wsf-docs[data-room="narrow"] .wsf-col-main:has(> .wsf-card-tall) { order: 1; }
 .wsf-card { border: 1px solid var(--line); border-radius: 8px; background: var(--bg-panel); overflow: hidden; min-width: 0; }
-.wsf-docs[data-room="wide"] .wsf-card-tall { min-height: 320px; }
 .wsf-card-h { display: flex; align-items: center; gap: var(--s2); min-height: 34px; box-sizing: border-box; padding: 4px var(--s3); border-bottom: 1px solid var(--line); }
+.wsf-card-side { flex: 0 1 auto; min-width: 0; margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--txt); font-size: var(--fs-meta); }
+.wsf-card-h:has(> .wsf-card-side) > .wsf-card-name { flex: none; }
 .wsf-card-name { flex: 1 1 auto; white-space: nowrap; color: var(--txt); font-size: var(--fs-meta); letter-spacing: 0.08em; text-transform: uppercase; font-weight: var(--fw-med); }
 .wsf-side > .wsf-card-name { flex: none; margin-top: var(--s2); }
 .wsf-card-acts { flex: 0 1 auto; min-width: 0; display: flex; align-items: center; gap: var(--s1); }

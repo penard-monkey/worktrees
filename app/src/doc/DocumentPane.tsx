@@ -49,14 +49,15 @@ function DocPicture({ source, from, src, alt }: { source: DocSource; from: strin
  *  as nothing — later phases' anchors are comments (§4.4); other raw HTML stays
  *  literal, inert text. A mermaid fence is code here: mermaid lives in the docs
  *  viewer's bundle alone. What a link or an image is, the source says. */
-function ReadView({ open, text, follow }: { open: Open; text: string; follow(to: DocTarget): void }) {
+function ReadView({ open, text, follow, linkNote }: { open: Open; text: string; follow(to: DocTarget): void; linkNote?: (from: string, href: string) => string | null }) {
   const { source, id } = open;
   const body = useMemo(() => source.readBody(text), [source, text]);
   const draw = useMemo(() => source.image && ((src: string, alt: string) => <DocPicture source={source} from={id} src={src} alt={alt} />), [source, id]);
+  const note = useMemo(() => linkNote && ((href: string) => linkNote(id, href)), [linkNote, id]);
   return (
     <div className="ix-read" data-testid="ideas-read">
       <Markdown src={body} renderHtml={(raw) => (commentOnly(raw) ? "" : null)}
-        renderImage={draw} onLink={(href) => { const to = source.target(id, href); if (to) follow(to); }} />
+        renderImage={draw} linkNote={note} onLink={(href) => { const to = source.target(id, href); if (to) follow(to); }} />
     </div>
   );
 }
@@ -84,6 +85,10 @@ export function DocumentPane(props: {
   doc: DocHandle;
   /** Before the title. */
   lead?: ReactNode;
+  /** The title, when it is not the document's own (a memory file's name). */
+  title?: string;
+  /** Why a link in Read goes nowhere, when it does. */
+  linkNote?: (from: string, href: string) => string | null;
   /** Between Edit | Read and History, at every width: one control. `small`:
    *  there is room for its icon alone. */
   tool?: (small: boolean) => ReactNode;
@@ -96,7 +101,8 @@ export function DocumentPane(props: {
    *  is (the owner, 2026-11-24). `acts[].first`: before History. */
   buttons?: boolean;
   /** What History shows, when the source's own is not it: a source whose
-   *  history is its folder's. Absent: the document's versions. */
+   *  history is its folder's. It takes the document's place. Absent: the
+   *  document's versions, over it. */
   history?: (close: () => void) => ReactNode;
   /** Under the header, over the document. */
   strips?: ReactNode;
@@ -154,7 +160,7 @@ export function DocumentPane(props: {
             onBlur={() => doc.setRenaming(null)}
           />
         ) : (
-          <h1 className="ix-title" title={`${open.file} · ${state}`}>{open.title || "Untitled"}</h1>
+          <h1 className="ix-title" title={`${open.file} · ${state}`}>{props.title ?? (open.title || "Untitled")}</h1>
         )}
         <div className="ix-tools">
           <span className="ix-state" data-testid="ideas-save" data-state={save.kind} hidden={tier === 0 && !bad(save)}>{state}</span>
@@ -210,11 +216,11 @@ export function DocumentPane(props: {
           <button className="ix-btn" onClick={() => void session.current?.flush()}>Try again</button>
         </div>
       )}
-      <div className="ix-body">
+      <div className="ix-body" hidden={doc.history && !!props.history}>
         {(edited || mode === "edit") && (
           <EditorHost open={open} handle={doc.handle} held={doc.held} hooks={doc.hooks} cursorNext={doc.cursorNext} replaced={doc.replaced} hidden={mode !== "edit"} textDrag={props.textDrag} />
         )}
-        {mode === "read" && <ReadView open={open} text={doc.readBody} follow={props.follow} />}
+        {mode === "read" && <ReadView open={open} text={doc.readBody} follow={props.follow} linkNote={props.linkNote} />}
         {doc.picker && mode === "edit" && <LinkPicker x={doc.picker.x} y={doc.picker.y} rows={doc.pickRows} index={doc.pickIdx} pick={doc.insertLink} />}
       </div>
     </>

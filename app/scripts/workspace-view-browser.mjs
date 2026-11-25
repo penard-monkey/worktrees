@@ -109,7 +109,7 @@ async function gates(page, tag) {
   ok(await page.locator("[data-testid=ideas-rail]").count() === 0, `${tag} …without the lightbulb: Ideas is its own switch`);
   const other = await page.evaluate(() => [...document.querySelectorAll("[data-testid=ws-name]")].map((e) => e.textContent).find((n) => !n.startsWith("Everything")));
   await pickWs(page, other);
-  for (const [t, words, buttons] of [["memory", "No memory yet. It starts with the first chat.", ["New chat", "Make memory"]], ["chats", "No chats yet.", ["New chat"]]]) {
+  for (const [t, words, buttons] of [["chats", "No chats yet.", ["New chat"]]]) {
     await tab(page, t);
     const e = await page.evaluate((t) => { const el = document.querySelector(`[data-testid=ws-no-${t}]`); return el && { words: el.querySelector("p").textContent, b: [...el.querySelectorAll("button")].map((x) => [x.textContent, x.disabled, x.title]) }; }, t);
     ok(e?.words === words && JSON.stringify(e.b.map((x) => x[0])) === JSON.stringify(buttons) && e.b.find((x) => x[0] === "New chat")[1] === false, `${tag} ${t}'s empty state, with New chat (${JSON.stringify(e)})`);
@@ -129,10 +129,10 @@ async function frame(page, tag, name) {
   ok(!(await homeLit(page)), `${tag} Home is not lit while a workspace is shown`);
   ok(await group(page, "Everything").locator(".ws-icon").first().evaluate((e) => e.classList.contains("waiting")), `${tag} the card's dot is waiting, though lanes work in it too`);
   const chips = await page.evaluate(() => [...document.querySelectorAll("[data-testid=ws-docs]")[0].querySelectorAll("button")].map((b) => [b.dataset.testid, b.classList.contains("none"), b.querySelector(".wsf-chip-n")?.textContent ?? ""]));
-  ok(JSON.stringify(chips) === JSON.stringify([["ws-doc-memory", true, ""], ["ws-doc-plan", false, ""], ["ws-doc-ideas", false, "2"]]), `${tag} its chips: Memory dashed, Plan, Ideas 2 (${JSON.stringify(chips)})`);
+  ok(JSON.stringify(chips) === JSON.stringify([["ws-doc-memory", false, ""], ["ws-doc-plan", false, ""], ["ws-doc-ideas", false, "2"]]), `${tag} its chips: Memory, Plan, Ideas 2 (${JSON.stringify(chips)})`);
   ok(await page.evaluate(() => { const g = document.querySelector("[data-testid=ws-group]"); const c = g.querySelector("[data-testid=ws-docs]"), p = g.querySelector(".project"); return !!(c.compareDocumentPosition(p) & Node.DOCUMENT_POSITION_FOLLOWING); }), `${tag} …above its projects`);
   await page.click("[data-testid=ws-doc-memory]");
-  ok(await isTab(page, "memory"), `${tag} a dashed chip opens its tab`);
+  ok(await isTab(page, "memory"), `${tag} a chip opens its tab`);
   if (SHOTS) { await tab(page, "overview"); await page.screenshot({ path: `${SHOTS}/wsv-overview-${name}.png` }); }
 
   // ── the overview's acts ──
@@ -286,7 +286,7 @@ async function life(page, tag) {
   ok(await isTab(page, "plan"), `${tag} its tab does not change`);
   await pickPlace(page);
   ok(await until(page, () => /is still open in its workspace/i.test(document.body.innerText)) && await same(), `${tag} a place is not refused: the text waits behind it, and the window says so`);
-  ok(await until(page, () => !!document.querySelector("[data-testid=ws-doc-plan] .wsf-chip-dot")), `${tag} its chip is marked`);
+  ok(await until(page, () => !!document.querySelector("[data-testid=ws-doc-plan] .wsf-chip-dot:not(.new)")), `${tag} its chip is marked`);
   await pickWs(page, other);
   ok(await until(page, () => /has text that is not saved/.test(document.querySelector("[data-testid=ws-attention][data-kind=unsaved]")?.textContent ?? "")) && /in Everything/.test(await page.locator("[data-testid=ws-attention][data-kind=unsaved]").innerText()), `${tag} another workspace's Overview says which document, and where`);
   await page.click("[data-testid=ws-attention-go]");
@@ -295,7 +295,7 @@ async function life(page, tag) {
   await pickWs(page);
   ok(await isDoc(page, plan) && await isTab(page, "plan") && !!(await page.$("[data-testid=ideas-conflict]")), `${tag} its workspace's name goes to it too`);
   await page.click("[data-testid=ideas-keep-mine]");
-  ok(await until(page, (id) => window.__mock.ideaFile(id).content.includes(" MINE"), plan) && await until(page, () => !document.querySelector(".wsf-chip-dot")), `${tag} Keep mine saves it, and the mark goes`);
+  ok(await until(page, (id) => window.__mock.ideaFile(id).content.includes(" MINE"), plan) && await until(page, () => !document.querySelector(".wsf-chip-dot:not(.new)")), `${tag} Keep mine saves it, and the mark goes`);
 
   // ── a slow save, and a newer click: the newer one wins ──
   await page.evaluate(() => window.__mock.ideaSlowWrites(1200));

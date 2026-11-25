@@ -40,7 +40,13 @@ export function MainDocument(props: {
   /** It is open no more: closed from its banner. */
   closed(): void;
   /** Saved and closed here: the other window opens it. */
-  float(to: DocTarget, title: string): void;
+  float?(to: DocTarget, title: string): void;
+  lead?: ReactNode;
+  title?: string;
+  strips?: ReactNode;
+  linkNote?: (from: string, href: string) => string | null;
+  /** Moves when History is asked for from elsewhere. */
+  historyAsk?: number;
   /** History, when it is not the document's own versions. */
   history?: (close: () => void) => ReactNode;
 }) {
@@ -110,6 +116,9 @@ export function MainDocument(props: {
     return () => { back = true; };
   }, [props.shown, leave]);
 
+  const { setHistory } = doc;
+  useEffect(() => { if (props.historyAsk) setHistory(true); }, [props.historyAsk, setHistory]);
+
   const stuck = open && (save.kind === "conflict" || save.kind === "removed" || save.kind === "error") && session.current?.dirty() ? open.title || "Untitled" : null;
   // "Not saved, keep yours or reload" is answered by its being saved.
   useEffect(() => { at.current.stuck(stuck); if (!stuck && refusedNow.current) { refusedNow.current = false; setNotice(null); } }, [stuck]);
@@ -131,7 +140,7 @@ export function MainDocument(props: {
     const title = openRef.current?.title || "Untitled";
     had.current = false;
     closeOpen();
-    props.float(to, title);
+    props.float?.(to, title);
   };
   // The document before, until the one asked for is here: kept mounted (the
   // editor with it), out of reach, and gone from sight if the read is slow.
@@ -140,8 +149,8 @@ export function MainDocument(props: {
     <section className="ix-doc ix-in-main" data-testid="main-doc" data-doc={wait ? undefined : open?.id} data-wait={wait || undefined} hidden={!props.shown}>
       {notice && <DocNotice text={notice} dismiss={() => setNotice(null)} />}
       {open ? (
-        <DocumentPane doc={doc} follow={props.follow} history={props.history}
-          float={{ title: "Float: move it to the Ideas window", run: () => void float() }} />
+        <DocumentPane doc={doc} follow={props.follow} history={props.history} lead={props.lead} title={props.title} strips={props.strips} linkNote={props.linkNote}
+          float={props.float && { title: "Float: move it to the Ideas window", run: () => void float() }} />
       ) : (
         <header className="ix-head">
           <h1 className="ix-title">{failed ? "Not open" : "Opening…"}</h1>
