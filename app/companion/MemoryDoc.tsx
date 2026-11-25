@@ -2,11 +2,11 @@
 // comes by Float, with the folder's files beside it as its neighbours, and Dock takes
 // it back. The same pane as everywhere (doc/MainDocument.tsx); no row of its own.
 import { useCallback, useEffect, useMemo, useState, type RefObject } from "react";
-import { invoke } from "../src/ipc";
+import { invoke, listen } from "../src/ipc";
 import { MainDocument, type MainDocApi } from "../src/doc/MainDocument";
 import { memoryDocs, type MemoryView } from "../src/doc/memory";
 import { sameDoc, type DocTarget } from "../src/doc/source";
-import { MemoryFiles, MemoryHistory, MemoryPreview } from "../src/WorkspaceMemory";
+import { MemoryFailing, MemoryFiles, MemoryHistory, MemoryPreview } from "../src/WorkspaceMemory";
 import { fileOf } from "../src/wsmemory";
 
 export type MemoryOpen = { ws: string; name: string; path: string };
@@ -17,6 +17,11 @@ export function useMemoryView(ws: string | null): { view: MemoryView | null; err
   const [got, setGot] = useState<{ ws: string; view: MemoryView | null; error: string | null } | null>(null);
   const [tick, setTick] = useState(0);
   useEffect(() => (ws ? memoryDocs(ws).watch(() => setTick((n) => n + 1)) : undefined), [ws]);
+  useEffect(() => {
+    if (!ws) return;
+    const un = listen<{ id?: string }>("workspaces:history", (e) => { if (e.payload?.id === ws) setTick((n) => n + 1); });
+    return () => { un.then((f) => f()).catch(() => {}); };
+  }, [ws]);
   useEffect(() => {
     if (!ws) return;
     let gone = false;
@@ -89,6 +94,7 @@ export function MemoryDoc(props: {
       closed={props.closed}
       title={at.path.startsWith("notes/") ? undefined : at.path.slice(at.path.lastIndexOf("/") + 1)}
       landed={(to, ok) => props.landed(to.name, ok && sameDoc(to, target))}
+      strips={<MemoryFailing error={props.view?.commit_error ?? null} />}
       float={(to) => props.dock(to.name)}
       floated={props.docked}
       floatAs={{ label: "Dock", title: `Dock: put it back in ${at.name || "its workspace"}`, asking: "Opening it in the main window…", to: "the main window" }}

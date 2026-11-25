@@ -13,7 +13,7 @@ import * as Icons from "./icons";
 import { DeskTerminalPane } from "./TerminalPane";
 import { useArmed } from "./useArmed";
 import {
-  activeAt, ageWords, asksTrust, endedLine, engineLine, failedWords, firstMessage, foldOf, foldRuns, introWords, isDefaultTitle, monthOf, navRows, readsWords, stateWords, titleFrom, transcriptGone, TRUST_WORDS, whenWords,
+  accessWords, activeAt, ageWords, asksTrust, endedLine, engineLine, failedWords, firstMessage, foldOf, foldRuns, introWords, isDefaultTitle, monthOf, navRows, readsWords, stateWords, titleFrom, transcriptGone, TRUST_WORDS, whenWords,
   type ChatRow, type DocRead, type ProjectRead, type RowState, type WsChat, type WsChats,
 } from "./wschats";
 import type { WsChatsLive } from "./useWsChats";
@@ -76,8 +76,17 @@ export function NavChats(props: {
 }
 
 /** Which projects a chat reads, and why not the others. */
-function Reads({ projects, documents }: { projects: readonly ProjectRead[]; documents: readonly DocRead[] }) {
+function Reads({ chat, projects, documents, limits }: { chat: WsChat; projects: readonly ProjectRead[]; documents: readonly DocRead[]; limits?: string }) {
   return (
+    <>
+    {chat.access === "stale" && (
+      <div className="wsc-stale" data-testid="ws-chat-stale">
+        <p>What it may read has changed since it started:</p>
+        <ul>{(chat.access_changes ?? []).map((c, i) => <li key={i} title={c.path || undefined}>{accessWords(c)}</li>)}</ul>
+        <p>It keeps the rules it started with. Close and start a new chat to apply the new ones.</p>
+      </div>
+    )}
+    {chat.access === "unknown" && <p className="wsc-stale" data-testid="ws-chat-access-unknown">Whether its rules are still current cannot be told. Close and start a new chat to be sure.</p>}
     <ul className="wsc-reads" data-testid="ws-chat-reads">
       {projects.length === 0 && <li>This workspace has no projects.</li>}
       {projects.map((p) => (
@@ -93,6 +102,8 @@ function Reads({ projects, documents }: { projects: readonly ProjectRead[]; docu
         </li>
       ))}
     </ul>
+    {limits && <p className="wsc-limits" data-testid="ws-chat-limits">{limits}</p>}
+    </>
   );
 }
 
@@ -179,6 +190,8 @@ export function WorkspaceChatColumn(props: {
   }
   const at = (kind: "chats" | "reads" | "close") => (e: React.MouseEvent) => {
     const r = e.currentTarget.getBoundingClientRect();
+    // What it reads, as it is now.
+    if (kind === "reads") void live.refresh(ws.id);
     setMenu((m) => (m?.kind === kind ? null : { kind, x: kind === "close" ? r.right - 180 : r.left, y: r.bottom + 4 }));
   };
   const resume = () => void act("resume it", () => live.resume(ws.id, conv));
@@ -216,6 +229,7 @@ export function WorkspaceChatColumn(props: {
           </button>
         )}
         <button className="wsc-readsb" data-testid="ws-chat-readsb" data-track="workspace.chat.reads" title="Which projects this chat reads" aria-expanded={menu?.kind === "reads"} onClick={at("reads")}>{readsWords(info.projects)} ▾</button>
+        {c.access === "stale" && <button className="wsc-stale-b" data-testid="ws-chat-stale-chip" title="What it may read has changed since it started" onClick={at("reads")}>its rules changed</button>}
         <span className="wsc-acts">
           {row.live && (
             <span className="agent-view" role="group" aria-label="View">
@@ -258,7 +272,7 @@ export function WorkspaceChatColumn(props: {
             activity={row.state === "busy" ? "busy" : row.state === "waiting" ? "waiting" : ""}
             doneAt={activeAt(c)} paneDraft={null} uiRem={props.uiRem} to="this chat" quiet={(t) => engineLine(t, conv)}
             promptNote={(lines) => (asksTrust(lines) ? <p className="wsc-trust" data-testid="ws-chat-trust">{TRUST_WORDS}</p> : null)}
-            intro={<>A chat of <b>{ws.name}</b>. {introWords(info.projects)}</>}
+            intro={<>A chat of <b>{ws.name}</b>. {introWords(info.projects, info.limits)}</>}
             onTerminal={() => setView("terminal")} onOpenPath={() => {}} reloadToken={0} onError={props.onError}
             insert={c.fold?.state === "done" && c.fold.commit && !running ? {
               at: change?.at ?? Number.MAX_SAFE_INTEGER,
@@ -294,7 +308,7 @@ export function WorkspaceChatColumn(props: {
           </div>
         </CtxMenu>
       )}
-      {menu?.kind === "reads" && <CtxMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}><Reads projects={info.projects} documents={info.documents ?? []} /></CtxMenu>}
+      {menu?.kind === "reads" && <CtxMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}><Reads chat={c} projects={info.projects} documents={info.documents ?? []} limits={info.limits} /></CtxMenu>}
       {menu?.kind === "close" && (
         <CtxMenu x={menu.x} y={menu.y} onClose={() => { setMenu(null); arm.disarm(); }}>
           {row.live && (

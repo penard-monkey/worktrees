@@ -191,6 +191,34 @@ async function hist(page, tag, eng) {
   ok(await isDoc(page, path) && !(await page.$("[data-testid=memory-history]")), `${tag} Open opens the file`);
 }
 
+/** A commit is no change to a file: its own event moves what shows the history. */
+async function commits(page, tag) {
+  const ws = await boot(page, ["beta_workspace_chats"], "&memquiet=400&memtick=100");
+  await name(page);
+  await page.waitForSelector("[data-testid=memory-last]");
+  const was = await page.locator("[data-testid=memory-last]").innerText();
+  await page.click("[data-testid=ws-tab][data-tab=memory]");
+  await isDoc(page, "MEMORY.md");
+  await page.click("[data-testid=ideas-versions-toggle], [data-testid=doc-menu-open]");
+  if (!(await page.$("[data-testid=memory-history]"))) await page.click("[data-testid=doc-menu-history]");
+  await page.click("[data-testid=memory-hist-all]").catch(() => {});
+  const n = await page.locator("[data-testid=memory-log-row]").count();
+  await page.evaluate((id) => window.__mock.memoryEdit(id, "topics/nas-layout.md", "# NAS layout\n\nQuietly.\n"), ws);
+  ok(await until(page, (n) => document.querySelectorAll("[data-testid=memory-log-row]").length === n + 1, n, 5000), `${tag} a quiet commit is in an open History`);
+  await page.click("[data-testid=ws-tab][data-tab=overview]");
+  ok(await until(page, (was) => { const t = document.querySelector("[data-testid=memory-last]")?.innerText; return !!t && t !== was && /1 file/.test(t); }, was), `${tag} …and what last changed on the Overview`);
+  // ── commits that keep failing ──
+  const p = await page.context().newPage();
+  await boot(p, ["beta_workspace_chats"], "&memfail=1");
+  await name(p);
+  const words = /Changes are not reaching this memory's history: git commit failed: fatal: no space left on device\. The files are saved\. Tried 4 times since /;
+  ok(await until(p, () => !!document.querySelector("[data-testid=memory-failing]")) && words.test(await p.locator("[data-testid=memory-failing]").first().innerText()), `${tag} commits that keep failing are said on the Overview`);
+  await p.click("[data-testid=ws-tab][data-tab=memory]");
+  await isDoc(p, "MEMORY.md");
+  ok(words.test(await p.locator("[data-testid=main-doc] [data-testid=memory-failing]").innerText()), `${tag} …and on the Memory tab`);
+  await p.close();
+}
+
 async function states(page, tag) {
   const ws = await boot(page, ["beta_workspace_chats"], "&memory=none");
   ok(await page.locator("[data-testid=ws-doc-memory]").first().evaluate((e) => e.classList.contains("none")) && !(await page.$("[data-testid=memory-fresh]")), `${tag} no memory: a dashed chip, no dot`);
@@ -365,7 +393,7 @@ async function themes(page, tag, eng) {
 const only = process.env.ONLY?.split(",");
 for (const [engine, eng] of [[chromium, "chromium"], [webkit, "webkit"]]) {
   const browser = await engine.launch();
-  for (const part of [overview, tabs, hist, states, edit, themes]) {
+  for (const part of [overview, tabs, hist, states, edit, themes, commits]) {
     if (only && !only.includes(part.name)) continue;
     const page = await (await browser.newContext({ viewport: { width: 1440, height: 900 } })).newPage();
     const errors = [];

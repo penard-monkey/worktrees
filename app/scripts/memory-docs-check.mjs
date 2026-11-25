@@ -111,6 +111,15 @@ eq(await go(() => D.write("a.md", "x", 40, false)), { mtime_ms: 41, file: "a.md"
 eq(calls[0][1], { id: "W1", path: "a.md", content: "x", expectedMtime: 40 }, "an ordinary save sends no keepHistory");
 await go(() => D.write("a.md", "x", 40, true));
 eq(calls[0][1].keepHistory, true, "keep mine says so");
+await go(() => D.write("a.md", "x", 40, false, "r1"));
+eq(calls[0][1], { id: "W1", path: "a.md", content: "x", expectedMtime: 40, expectedRev: "r1" }, "the revision it was read with goes beside the mtime");
+answer.workspace_memory_file = (a) => ({ ...put(a.path, 40), content: "new", rev: "r1" });
+answer.workspace_memory_write = (a) => ({ ...put(a.path, 41), rev: "r2" });
+eq([(await go(() => D.read("a.md"))).rev, (await go(() => D.write("a.md", "x", 40, false, "r1"))).rev], ["r1", "r2"], "a read and a save answer with theirs");
+answer.workspace_memory_file = (a) => ({ ...put(a.path, a.commit ? 0 : 40), content: a.commit ? "old" : "new", rev: "r1" });
+eq([(await go(() => D.restore("a.md", "c1", 40, "r1"))).rev, calls.at(-1)[1].expectedRev], ["r2", "r1"], "…and a restore's is written over it");
+answer.workspace_memory_file = (a) => ({ ...put(a.path, a.commit ? 0 : 40), content: a.commit ? "old" : "new" });
+answer.workspace_memory_write = (a) => put(a.path, 41);
 await go(() => D.create("topics/n.md", "x"));
 check(!("expectedMtime" in calls[0][1]), "a new file carries no mtime");
 eq((await go(() => D.versions("a.md"))).map((v) => v.version), ["c1"], "a version is a change that left the file a text");
@@ -142,10 +151,7 @@ for (const [r, args] of rows) {
   const got = [...(sent.get(r) ?? [])].map(snake);
   check(sent.has(r), `${r} is called`);
   check(got.every((k) => args.includes(k)), `${r} is sent only what it reads (${got.join(", ")})`);
-  // OWED: the row reads it and this source does not send it yet. Sent, its
-  // entry here goes.
-  const owed = r === "workspace_memory_write" ? ["expected_rev"] : [];
-  check(args.every((k) => got.includes(k) !== owed.includes(k)), `and something sends each argument it reads (${args.join(", ")})`);
+  check(args.every((k) => got.includes(k)), `and something sends each argument it reads (${args.join(", ")})`);
 }
 
 // ── the event ───────────────────────────────────────────────────────────────

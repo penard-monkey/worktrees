@@ -31,7 +31,9 @@ export type WsChatsLive = {
   rename(id: string, conv: string, title: string): Promise<void>;
 };
 
-export function useWsChats(on: boolean, ids: readonly string[]): WsChatsLive {
+/** `also`: what a chat may read is made from it, so a new one reads the lists again
+ *  (whether a live chat's rules are current is told by the list alone). */
+export function useWsChats(on: boolean, ids: readonly string[], also: unknown): WsChatsLive {
   const [lists, setLists] = useState<Record<string, WsChats>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [sessions, setSessions] = useState<WsSessionsEv | null>(null);
@@ -58,11 +60,16 @@ export function useWsChats(on: boolean, ids: readonly string[]): WsChatsLive {
     return () => { un.then((f) => f()).catch(() => {}); };
   }, [on]);
   const key = ids.join(",");
-  const pushed = useMemo(() => JSON.stringify(sessions), [sessions]);
   useEffect(() => {
     if (!on) return;
     for (const id of key ? key.split(",") : []) void refresh(id);
-  }, [on, key, pushed, refresh]);
+  }, [on, key, sessions, also, refresh]);
+  useEffect(() => {
+    if (!on) return;
+    const again = () => { for (const id of key ? key.split(",") : []) void refresh(id); };
+    window.addEventListener("focus", again);
+    return () => window.removeEventListener("focus", again);
+  }, [on, key, refresh]);
 
   // A push that agrees with what this window did ends the expectation.
   useEffect(() => {

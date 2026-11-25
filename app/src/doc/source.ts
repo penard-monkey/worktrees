@@ -19,6 +19,8 @@ export type Doc = {
   /** The file's name, for a person. */
   file: string;
   mtime_ms: number;
+  /** The name of its bytes, where the source gives one. */
+  rev?: string;
   content: string;
   kind?: DocKind;
   /** The id asked for was merged into this one. */
@@ -40,7 +42,7 @@ export interface DocSource {
   read(id: string): Promise<Doc>;
   /** Save, refused when the file is no longer at `expectedMtime`.
    *  `keepHistory`: copy what is being overwritten to history first. */
-  write(id: string, content: string, expectedMtime: number, keepHistory: boolean): Promise<Saved>;
+  write(id: string, content: string, expectedMtime: number, keepHistory: boolean, expectedRev?: string): Promise<Saved>;
   /** Hear what changed under the source's root. Returns the unlisten. */
   watch(on: (ev: Changed) => void): () => void;
   /** Where a text that is overwritten on purpose (Keep mine) goes first. */
@@ -49,7 +51,7 @@ export interface DocSource {
    *  is its folder's (memory) leaves both out and hands the pane a panel of its
    *  own (DocumentPane's `history`). */
   versions?(id: string): Promise<Version[]>;
-  restore?(id: string, version: string, expectedMtime: number | undefined): Promise<Doc>;
+  restore?(id: string, version: string, expectedMtime: number | undefined, expectedRev?: string): Promise<Doc>;
   /** The file's name from a title, when the source can. */
   rename?(id: string, title: string, expectedMtime: number): Promise<Doc>;
   /** A removed document's text, kept as a new one. */

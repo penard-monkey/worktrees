@@ -6699,7 +6699,7 @@ function App() {
     invoke<WsList>(cmd, args).then((l) => { setWsList(l); return l; }).catch((e) => { fail(e); return null; });
   const wsById = (id: string) => wsList?.workspaces.find((w) => w.id === id) ?? null;
   // The workspaces' chats (workspace chats' beta), for the nav, ⌘K and the view.
-  const wsChats = useWsChats(wsChatsOn && !!wsList, useMemo(() => (wsList?.workspaces ?? []).map((w) => w.id), [wsList]));
+  const wsChats = useWsChats(wsChatsOn && !!wsList, useMemo(() => (wsList?.workspaces ?? []).map((w) => w.id), [wsList]), wsList);
   const wsMem = useWsMemory(wsChatsOn && !!wsList, useMemo(() => (wsList?.workspaces ?? []).map((w) => w.id), [wsList]));
   const chatWaits = (wsList?.workspaces ?? []).some((w) => wsChats.rows(w.id).some((x) => x.state === "waiting"));
   // Re-read whenever the registry's roots change: "not registered" is the
@@ -10993,7 +10993,7 @@ function App() {
                           open={(path) => { close(); setMemAt(null); openMemory(mainDoc.ws, path); }} close={() => { close(); setMemAt(null); }} />
                       ),
                       strips: (mode: "edit" | "read") => (
-                        <MemoryStrips mode={mode} long={mainDoc.name === "MEMORY.md" && memView ? longIndex(memView) : null}
+                        <MemoryStrips failing={memView?.commit_error ?? null} mode={mode} long={mainDoc.name === "MEMORY.md" && memView ? longIndex(memView) : null}
                           live={wsChats.rows(mainDoc.ws).filter((x) => x.live).map((x) => x.chat.title)}
                           heard={memHeard.has(`${mainDoc.ws}|${mainDoc.name}`)} hear={() => setMemHeard((h) => new Set([...h, `${mainDoc.ws}|${mainDoc.name}`]))}
                           under={memUnder?.ws === mainDoc.ws && memUnder.name === mainDoc.name ? memUnder : null} seen={() => setMemUnder(null)} />

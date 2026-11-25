@@ -3,7 +3,7 @@
  *  Overview's column. The texts themselves are the document pane's, on
  *  `memoryDocs` (doc/memory.ts). Module scope: it holds state. */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { memoryDocs, type MemoryChange, type MemoryFile, type MemoryFileDiff, type MemoryImage, type MemoryView } from "./doc/memory";
+import { memoryDocs, type CommitError, type MemoryChange, type MemoryFile, type MemoryFileDiff, type MemoryImage, type MemoryView } from "./doc/memory";
 import { isImagePath, linkTo, topicPath } from "./doc/memorypath";
 import { readableLinks } from "./doc/ideasrelate";
 import { parseUnifiedDiff } from "./diff";
@@ -12,7 +12,7 @@ import { Markdown } from "./markdown";
 import { useArmed } from "./useArmed";
 import { useEscape } from "./useEscape";
 import {
-  changeFiles, changedBy, changedUnderWords, changeWords, conflictWords, fileGroups, fileName, filesWords, lineDiff, linkText, mayEdit, nameAt, newFilePath, putName,
+  changeFiles, changedBy, changedUnderWords, changeWords, conflictWords, failingWords, fileGroups, fileName, filesWords, lineDiff, linkText, mayEdit, nameAt, newFilePath, putName,
   revertOf, sizeWords, STATUS_WORDS, titleOf, tooBig, whileLive,
 } from "./wsmemory";
 import { whenWords } from "./wschats";
@@ -103,7 +103,11 @@ function NewFile({ ws, made }: { ws: string; made(path: string): void }) {
 
 /** Over a memory file: a long index, who else may write it, and what changed
  *  under the person with nothing of theirs unsaved. */
+export function MemoryFailing({ error }: { error: CommitError | null }) {
+  return error ? <div className="wsm-long" data-testid="memory-failing" role="alert"><span>{failingWords(error, whenWords(new Date(error.since * 1000).toISOString()))}</span></div> : null;
+}
 export function MemoryStrips(props: {
+  failing: CommitError | null;
   mode: "edit" | "read";
   long: string | null;
   /** The titles of the live chats. */
@@ -120,6 +124,7 @@ export function MemoryStrips(props: {
   const may = props.mode === "edit" && !props.heard ? mayEdit(props.live) : null;
   return (
     <>
+      <MemoryFailing error={props.failing} />
       {props.long && <div className="wsm-long" data-testid="memory-long" role="status"><span>{props.long}</span><button className="ctrl sm" disabled title="Not yet: it starts a chat that moves detail into topics">Tidy…</button></div>}
       {may && (
         <div className="wsm-long" data-testid="memory-may-edit" role="status">
@@ -404,6 +409,7 @@ export function MemoryCard(props: {
   }, [box]);
   return (
     <>
+      <MemoryFailing error={view.commit_error ?? null} />
       {last && (
         <div className="wsm-last" data-testid="memory-last">
           <span className="wsm-last-w">{changedBy(last, props.chat)} {props.ago(last.at)}{props.ago(last.at) === "now" ? "" : " ago"} <span className="wsm-change-d">{filesWords(last.files.length)} <Lines added={last.added} removed={last.removed} /></span></span>
