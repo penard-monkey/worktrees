@@ -66,11 +66,11 @@ pub trait FoldIo: Send + Sync {
     fn clock(&self) -> Duration;
     fn live(&self, session: &str) -> bool;
     /// Whether the chat could be relaunched (the limits), before it is ended.
-    fn admit(&self, root: &Path, w: &Workspace, conv: &str) -> Result<(), String>;
+    fn admit(&self, root: &Path, ideas: &Path, w: &Workspace, conv: &str) -> Result<(), String>;
     /// End the chat's session; whether it ran.
     fn close(&self, conv: &str) -> Result<bool, String>;
     /// Launch the conversation again, resumed on `opener`.
-    fn relaunch(&self, root: &Path, w: &Workspace, conv: &str, opener: String) -> Result<String, String>;
+    fn relaunch(&self, root: &Path, ideas: &Path, w: &Workspace, conv: &str, opener: String) -> Result<String, String>;
 }
 
 struct Live;
@@ -86,14 +86,14 @@ impl FoldIo for Live {
     fn live(&self, session: &str) -> bool {
         tmux::session_exists(session)
     }
-    fn admit(&self, root: &Path, w: &Workspace, conv: &str) -> Result<(), String> {
-        chats::may_relaunch_at(root, w, conv)
+    fn admit(&self, root: &Path, ideas: &Path, w: &Workspace, conv: &str) -> Result<(), String> {
+        chats::may_relaunch_at(root, ideas, w, conv)
     }
     fn close(&self, conv: &str) -> Result<bool, String> {
         chats::close(conv)
     }
-    fn relaunch(&self, root: &Path, w: &Workspace, conv: &str, opener: String) -> Result<String, String> {
-        chats::launch_at(root, w, conv, chats::Start::Resume, Some(opener))
+    fn relaunch(&self, root: &Path, ideas: &Path, w: &Workspace, conv: &str, opener: String) -> Result<String, String> {
+        chats::launch_at(root, ideas, w, conv, chats::Start::Resume, Some(opener))
     }
 }
 
@@ -336,7 +336,7 @@ pub fn workspace_chat_fold(ctx: &Ctx, id: String, conv: String) -> Result<Value,
     if live {
         quiet(ctx, &at)?;
     }
-    io.admit(root, &w, &conv)?;
+    io.admit(root, ctx.ideas_dir(), &w, &conv)?;
     crate::memory::before_launch(ctx, &w)?;
     crate::memory::memory_commit_if_dirty(ctx, &id, None).map_err(|e| format!("the memory could not be committed, so nothing was folded: {e}"))?;
     ctx.memory.hold(&id);
@@ -370,7 +370,7 @@ fn begin(ctx: &Ctx, w: &Workspace, c: &Chat, live: bool) -> Result<(String, Fold
         }
     }
     ctx.folds.runs().insert(c.id.clone(), Run::new(&w.id, asked, Said::Folding));
-    match io.relaunch(root, w, &c.id, opener) {
+    match io.relaunch(root, ctx.ideas_dir(), w, &c.id, opener) {
         Ok(session) => Ok((session, fold)),
         Err(e) => {
             let why = format!("it could not be launched again: {e}");
@@ -613,7 +613,7 @@ mod tests {
         fn live(&self, session: &str) -> bool {
             self.up.lock().unwrap().contains(session)
         }
-        fn admit(&self, _: &Path, _: &Workspace, _: &str) -> Result<(), String> {
+        fn admit(&self, _: &Path, _: &Path, _: &Workspace, _: &str) -> Result<(), String> {
             self.refuse.lock().unwrap().0.clone().map_or(Ok(()), Err)
         }
         fn close(&self, conv: &str) -> Result<bool, String> {
@@ -623,7 +623,7 @@ mod tests {
             }
             Ok(was)
         }
-        fn relaunch(&self, _: &Path, _: &Workspace, conv: &str, opener: String) -> Result<String, String> {
+        fn relaunch(&self, _: &Path, _: &Path, _: &Workspace, conv: &str, opener: String) -> Result<String, String> {
             if let Some(e) = self.refuse.lock().unwrap().1.clone() {
                 return Err(e);
             }

@@ -8,7 +8,7 @@
 // `?memquiet=<ms>` the quiet minute (60000).
 type F = { text: string | null; b64: string | null; mtime: number };
 type Files = Map<string, F>;
-type C = { commit: string; at: number; subject: string; kind: string; before: Map<string, F>; after: Map<string, F>; reverts: string | null };
+type C = { commit: string; at: number; subject: string; kind: string; before: Map<string, F>; after: Map<string, F>; reverts: string | null; live: string[] };
 type Mem = { name: string; files: Files; commits: C[]; seen: Map<string, string>; tick: number | null; quiet: number | null };
 type Emit = (event: string, payload: unknown) => void;
 
@@ -137,7 +137,7 @@ function tree(m: Mem, n: number): Files {
   }
   return out;
 }
-function commit(m: Mem, subject: string | null, k: string, at = Date.now(), reverts: string | null = null): C | null {
+function commit(m: Mem, subject: string | null, k: string, at = Date.now(), reverts: string | null = null, live: string[] = []): C | null {
   const h = head(m);
   const before = new Map<string, F>(), after = new Map<string, F>();
   for (const p of new Set([...h.keys(), ...m.files.keys()])) {
@@ -148,7 +148,7 @@ function commit(m: Mem, subject: string | null, k: string, at = Date.now(), reve
   }
   const paths = [...new Set([...before.keys(), ...after.keys()])].sort();
   if (!paths.length) return null;
-  const c: C = { commit: sha(), at: Math.floor(at / 1000), subject: subject ?? `Edited: ${paths.slice(0, 3).join(", ")}${paths.length > 3 ? ` and ${paths.length - 3} more` : ""}`, kind: k, before, after, reverts };
+  const c: C = { commit: sha(), at: Math.floor(at / 1000), subject: subject ?? `Edited: ${paths.slice(0, 3).join(", ")}${paths.length > 3 ? ` and ${paths.length - 3} more` : ""}`, kind: k, before, after, reverts, live };
   m.commits.push(c);
   return c;
 }
@@ -193,7 +193,7 @@ function change(m: Mem, c: C) {
   // Newest first: a revert counts while nothing has reverted it.
   const by = new Map<string, string>();
   for (const x of [...m.commits].reverse()) if (x.reverts && !by.has(x.commit) && !by.has(x.reverts)) by.set(x.reverts, x.commit);
-  return { commit: c.commit, at: c.at, subject: c.subject, kind: c.kind, files, added: files.reduce((n, f) => n + (f.added ?? 0), 0), removed: files.reduce((n, f) => n + (f.removed ?? 0), 0), reverts: c.reverts, reverted_by: by.get(c.commit) ?? null };
+  return { commit: c.commit, at: c.at, subject: c.subject, kind: c.kind, files, added: files.reduce((n, f) => n + (f.added ?? 0), 0), removed: files.reduce((n, f) => n + (f.removed ?? 0), 0), reverts: c.reverts, reverted_by: by.get(c.commit) ?? null, live: c.live };
 }
 
 // ── the rows ────────────────────────────────────────────────────────────────
@@ -201,7 +201,7 @@ export type MemoryMock = ReturnType<typeof memoryMock>;
 
 /** `nameOf` refuses an id `workspaces.json` does not know, as the resolver
  *  does; `noteOf` is where a workspace's chat of that title keeps its note. */
-export function memoryMock(emit: Emit, nameOf: (id: unknown) => string, noteOf: (id: string, title: string) => string | null) {
+export function memoryMock(emit: Emit, nameOf: (id: unknown) => string, noteOf: (id: string, title: string) => string | null, liveOf: (id: string) => string[]) {
   const none = Q.get("memory") === "none";
   // Workspaces a fold holds: no quiet commit and no undo there.
   const held = new Set<string>();
@@ -221,7 +221,7 @@ export function memoryMock(emit: Emit, nameOf: (id: unknown) => string, noteOf: 
   const row = (p: string, f: F) => ({ path: p, file: name(p), title: title(f.text) ?? name(p), mtime_ms: f.mtime, size: size(f) });
   function touched(id: string, m: Mem) {
     if (m.quiet !== null) clearTimeout(m.quiet);
-    m.quiet = window.setTimeout(() => { m.quiet = null; if (!held.has(id)) commit(m, null, "edit"); }, QUIET);
+    m.quiet = window.setTimeout(() => { m.quiet = null; if (!held.has(id)) commit(m, null, "edit", Date.now(), null, liveOf(id)); }, QUIET);
     if (m.tick !== null) return;
     m.tick = window.setTimeout(() => {
       m.tick = null;

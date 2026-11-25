@@ -72,6 +72,10 @@ const LOG_MAX: usize = 200;
 const MADE: &str = "Memory made";
 /// git's own words, which [`revert_at`] keeps in the commits it makes.
 const REVERTS: &str = "This reverts commit ";
+/// The trailer that names a chat, one a line, in a quiet-minute commit's body.
+const LIVE: &str = "Live-chat: ";
+/// The most chats one commit names.
+const LIVE_MAX: usize = 16;
 
 /// The refusals a client tells apart (`app/src/doc/memory.ts` mirrors them,
 /// `memory-docs-check.mjs` holds the two equal).
@@ -198,6 +202,10 @@ pub struct Change {
     pub reverts: Option<String>,
     /// The commit that undid this one, while that still stands.
     pub reverted_by: Option<String>,
+    /// The chats that were live while what a quiet-minute commit holds was
+    /// changed ([`commit_quiet_at`]). Live, not its author: nobody is told
+    /// which of them, or which person, wrote it.
+    pub live: Vec<String>,
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq, Eq, Default)]
@@ -857,7 +865,7 @@ pub fn write_at(root: &Path, id: &str, path: &str, content: &str, expected_mtime
     if keep_history {
         let repo = Repo::open(&mem)?;
         repo.recover();
-        commit_specs(&repo, &[format!(":(top,literal){path}")], Some(&format!("Before keeping your text: {path}")))?;
+        commit_specs(&repo, &[format!(":(top,literal){path}")], Some(&format!("Before keeping your text: {path}")), &[])?;
     }
     let mode = fs::symlink_metadata(&dst).ok().map(|m| m.permissions());
     fsx::write_atomic(&dst, content.as_bytes(), mode).map_err(|e| format!("{path}: {e}"))?;
@@ -923,10 +931,10 @@ fn edited(paths: &[String]) -> String {
 
 /// Commit whatever is dirty, or answer `None`. The lock is held.
 fn commit_held(repo: &Repo, message: Option<&str>) -> Result<Option<Change>, String> {
-    commit_specs(repo, &repo.pathspecs()?, message)
+    commit_specs(repo, &repo.pathspecs()?, message, &[])
 }
 
-fn commit_specs(repo: &Repo, specs: &[String], message: Option<&str>) -> Result<Option<Change>, String> {
+fn commit_specs(repo: &Repo, specs: &[String], message: Option<&str>, live: &[String]) -> Result<Option<Change>, String> {
     let dirty = repo.dirty(specs)?;
     if dirty.is_empty() {
         return Ok(None);
@@ -939,7 +947,14 @@ fn commit_specs(repo: &Repo, specs: &[String], message: Option<&str>) -> Result<
         return Ok(None);
     }
     let msg = message.map(subject).filter(|m| !m.is_empty()).unwrap_or_else(|| subject(&edited(&dirty)));
-    repo.bytes(&["commit", "--quiet", "--no-verify", "--cleanup=whitespace", &format!("--message={msg}")])?;
+    let msg = format!("--message={msg}");
+    let named: Vec<String> = live.iter().filter(|c| crate::ulid::is_valid(c)).take(LIVE_MAX).map(|c| format!("{LIVE}{c}")).collect();
+    let trailer = format!("--message={}", named.join("\n"));
+    let mut args = vec!["commit", "--quiet", "--no-verify", "--cleanup=whitespace", &msg];
+    if !named.is_empty() {
+        args.push(&trailer);
+    }
+    repo.bytes(&args)?;
     Ok(head(repo)?)
 }
 
@@ -960,6 +975,24 @@ pub fn commit_if_dirty_at(root: &Path, id: &str, message: Option<&str>) -> Resul
     let repo = Repo::open(&mem)?;
     repo.recover();
     commit_held(&repo, message)
+}
+
+/// The quiet minute's commit: [`commit_if_dirty_at`] with no message, and the
+/// chats that were live in the body. `live` is asked with the time of the
+/// commit before it (seconds since the epoch, 0 for none), under the lock, so
+/// it can leave out what that commit already holds.
+pub fn commit_quiet_at(root: &Path, id: &str, live: impl FnOnce(i64) -> Vec<String>) -> Result<Option<Change>, String> {
+    wsfolder::refuse_real(root)?;
+    let folder = wsfolder::folder_at(root, id)?;
+    let mem = folder.join(DIR);
+    if !is_made(&mem) {
+        return Ok(None);
+    }
+    let _held = hold(&folder)?;
+    let repo = Repo::open(&mem)?;
+    repo.recover();
+    let last = head(&repo)?.map_or(0, |c| c.at);
+    commit_specs(&repo, &repo.pathspecs()?, None, &live(last))
 }
 
 // ── history ─────────────────────────────────────────────────────────────────
@@ -995,6 +1028,11 @@ fn reverts_in(body: &str) -> Option<String> {
     body.lines().find_map(|l| l.strip_prefix(REVERTS)).and_then(|r| r.get(..40)).filter(|s| is_sha(s)).map(String::from)
 }
 
+/// The chats a commit's body names: ids and nothing else.
+fn live_in(body: &str) -> Vec<String> {
+    body.lines().filter_map(|l| l.strip_prefix(LIVE)).map(str::trim).filter(|c| crate::ulid::is_valid(c)).take(LIVE_MAX).map(String::from).collect()
+}
+
 const FORMAT: &str = "--format=tformat:%x01%H%x02%at%x02%s%x02%b%x02";
 
 /// `git log -z --raw --numstat` with [`FORMAT`]. A raw record is followed by
@@ -1018,6 +1056,7 @@ fn parse_log(out: &str) -> Vec<Change> {
                 removed: 0,
                 reverts: reverts_in(p[3]),
                 reverted_by: None,
+                live: live_in(p[3]),
             });
             continue;
         }
@@ -1297,6 +1336,33 @@ mod tests {
         b.extend(1u32.to_be_bytes());
         b.extend([8, 2, 0, 0, 0, 0, 0, 0, 0]);
         b
+    }
+
+    /// The chats live while it was changed, as a trailer: ids and nothing else,
+    /// never in the subject, and only on the quiet minute's own commit.
+    #[test]
+    fn a_quiet_commit_names_the_chats_that_were_live_and_nothing_else_does() {
+        let s = Scratch::made("live");
+        let (a, b) = (crate::ulid::new(), crate::ulid::new());
+        s.put("topics/t.md", "one\n");
+        let mut told = None;
+        let c = commit_quiet_at(&s.root, &s.id, |at| {
+            told = Some(at);
+            vec![a.clone(), "x\nSubject: forged".into(), b.clone()]
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(told, Some(s.log()[1].at), "the commit before it");
+        assert_eq!((c.subject.as_str(), c.kind, c.live.clone()), ("Edited: topics/t.md", ChangeKind::Edit, vec![a, b]));
+        assert_eq!(s.log()[0].live, c.live, "as History reads it");
+        // Nobody live is no body; and nothing else carries one.
+        s.put("topics/t.md", "two\n");
+        assert!(commit_quiet_at(&s.root, &s.id, |_| vec![]).unwrap().unwrap().live.is_empty());
+        s.put("topics/t.md", "three\n");
+        assert!(s.commit("fold: X").live.is_empty());
+        let undone = s.revert(&c).map(|r| r.conflicts);
+        assert_eq!(undone.unwrap(), vec!["topics/t.md"]);
+        assert_eq!(commit_quiet_at(&s.root, &s.id, |_| vec![crate::ulid::new()]).unwrap(), None, "clean is no commit");
     }
 
     #[test]

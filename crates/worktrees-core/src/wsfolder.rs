@@ -67,7 +67,7 @@ pub fn make_at(root: &Path, id: &str) -> Result<PathBuf, String> {
 /// The path as it resolves: its longest existing part canonicalised, the rest
 /// as written. `fs::canonicalize` alone cannot answer for a folder that is
 /// about to be made.
-fn resolved(p: &Path) -> PathBuf {
+pub(crate) fn resolved(p: &Path) -> PathBuf {
     let mut base = p;
     let mut rest = Vec::new();
     loop {
