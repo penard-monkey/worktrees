@@ -10750,10 +10750,11 @@ function App() {
                 tabs={tabsOn}
                 tab={wsTabNow}
                 counts={{ ideas: wsShown?.ideas?.length ?? 0, chats: wsShown && wsChatsOn ? wsChats.of(wsShown.id)?.chats.length ?? 0 : 0 }}
-                newChat={wsShown && wsChatsOn ? { busy: wsStart?.ws === wsShown.id && wsStart.why === null, run: () => void startChat(wsShown.id) } : null}
+                newChat={wsShown && wsChatsOn && (wsChats.of(wsShown.id)?.chats.length ?? 0) > 0 ? { busy: wsStart?.ws === wsShown.id && wsStart.why === null, run: () => void startChat(wsShown.id) } : null}
                 middle={wsMiddle}
                 side={wsSide}
                 setSide={setWsSide}
+                firstChat={() => { if (wsShown) void startChat(wsShown.id); }}
                 chatsTab={wsShown && wsChatsOn && (
                   <ChatsTab note={(n) => openMemory(wsShown.id, notePath(n))} rows={wsChats.rows(wsShown.id)} on={wsChat[wsShown.id] ?? null} starting={wsStart?.why === null} ago={ago}
                     open={(conv) => openChat(wsShown.id, conv)} start={() => void startChat(wsShown.id)} />
@@ -10778,7 +10779,7 @@ function App() {
                     showTab={(t) => void showWs(wsShown.id, t)}
                     memory={!wsChatsOn ? null : wsMem.error(wsShown.id) ? <MemoryUnread why={wsMem.error(wsShown.id)!} retry={() => void wsMem.refresh(wsShown.id)} />
                       : !memView ? <p className="ws-ov-none">Reading…</p>
-                      : !memView.made ? <NoMemory newChat={() => void startChat(wsShown.id)} make={() => void makeMemory(wsShown.id)} busy={memBusy} />
+                      : !memView.made ? <NoMemory make={() => void makeMemory(wsShown.id)} busy={memBusy} />
                       : (
                         <MemoryCard ws={wsShown.id} view={memView} ago={ago} open={(path) => openMemory(wsShown.id, path)} diff={(commit) => void showChange(wsShown.id, commit)}
                           follow={(href) => { const to = memoryDocs(wsShown.id).target("MEMORY.md", href); if (to) followDoc(to); }}
@@ -10788,7 +10789,6 @@ function App() {
                     chats={wsChatsOn ? <ChatLines rows={navRows(wsChats.rows(wsShown.id)).rows} ago={ago} open={(conv) => openChat(wsShown.id, conv)} /> : null}
                     chatCount={wsChats.of(wsShown.id)?.chats.length ?? 0}
                     newChat={() => void startChat(wsShown.id)}
-                    starting={wsStart?.why === null}
                     projects={wsShown.projects.map((p) => {
                       const places = (ws?.projects.find((v) => v.root === p.root)?.snapshot?.places ?? []);
                       return { root: p.root, name: basename(p.root), registered: p.registered, places: places.length,

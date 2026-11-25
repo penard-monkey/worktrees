@@ -109,6 +109,7 @@ async function gates(page, tag) {
   ok(await page.locator("[data-testid=ideas-rail]").count() === 0, `${tag} …without the lightbulb: Ideas is its own switch`);
   const other = await page.evaluate(() => [...document.querySelectorAll("[data-testid=ws-name]")].map((e) => e.textContent).find((n) => !n.startsWith("Everything")));
   await pickWs(page, other);
+  ok(await page.locator("button", { hasText: /^New chat$/ }).evaluateAll((b) => b.filter((x) => x.getBoundingClientRect().width).map((x) => x.dataset.testid).join()) === "ws-new-chat" && !(await page.$("[data-testid=ws-frame-new-chat]")), `${tag} an empty Overview offers New chat once (and the nav's +)`);
   for (const [t, words, buttons] of [["chats", "No chats yet.", ["New chat"]]]) {
     await tab(page, t);
     const e = await page.evaluate((t) => { const el = document.querySelector(`[data-testid=ws-no-${t}]`); return el && { words: el.querySelector("p").textContent, b: [...el.querySelectorAll("button")].map((x) => [x.textContent, x.disabled, x.title]) }; }, t);

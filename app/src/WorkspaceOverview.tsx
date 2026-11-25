@@ -264,12 +264,12 @@ function ProjectsCard(props: { projects: WsProjectRow[]; takeOut(root: string): 
 }
 
 /** No memory, and no chats: the designed empty states. */
-export function NoMemory({ newChat, make, busy }: { newChat: () => void; make: () => void; busy: boolean }) {
+export function NoMemory({ newChat, make, busy }: { newChat?: () => void; make: () => void; busy: boolean }) {
   return (
     <div className="wsf-empty" data-testid="ws-no-memory">
       <p>No memory yet. It starts with the first chat.</p>
       <div className="ws-ov-line">
-        <button className="ctrl sm" data-testid="ws-new-chat-memory" onClick={newChat}>New chat</button>
+        {newChat && <button className="ctrl sm" data-testid="ws-new-chat-memory" onClick={newChat}>New chat</button>}
         <button className="ctrl sm" data-testid="ws-make-memory" disabled={busy} onClick={make} title="A folder of its own with an index, kept as a history. A chat makes one by itself.">Make memory</button>
       </div>
     </div>
@@ -303,7 +303,6 @@ export function WorkspaceOverview(props: WsParts & {
   memorySide: string | null;
   chats: ReactNode;
   chatCount: number;
-  starting: boolean;
   newChat(): void;
 }) {
   const work = props.ideasOn && <WorkCard {...props} />;
@@ -324,10 +323,7 @@ export function WorkspaceOverview(props: WsParts & {
             : work}
         </div>
         <div className="wsf-col wsf-col-side">
-          {props.chatsOn && <Card name="Chats" testId="ws-ov-card-chats" act={<>
-            {props.chatCount > 0 && <button className="ctrl sm" data-testid="ws-ov-chats-all" onClick={() => props.showTab("chats")}>All {props.chatCount}</button>}
-            <button className="ctrl sm" data-testid="ws-ov-new-chat" disabled={props.starting} onClick={props.newChat}>New chat</button>
-          </>}>{props.chatCount > 0 ? props.chats : <NoChats newChat={props.newChat} />}</Card>}
+          {props.chatsOn && <Card name="Chats" testId="ws-ov-card-chats" act={props.chatCount > 0 && <button className="ctrl sm" data-testid="ws-ov-chats-all" onClick={() => props.showTab("chats")}>All {props.chatCount}</button>}>{props.chatCount > 0 ? props.chats : <NoChats newChat={props.newChat} />}</Card>}
           {props.chatsOn && work}
           {props.ideasOn && <IdeasCard {...props} />}
           <ProjectsCard projects={props.projects} takeOut={props.takeOut} addProject={props.addProject} />
