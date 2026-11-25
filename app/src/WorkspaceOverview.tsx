@@ -72,7 +72,8 @@ export function NoPlan(props: Pick<WsParts, "freePlans" | "arm" | "setPlan" | "m
         <span className="ws-ov-none">No plan.</span>
         <button className="ctrl sm" data-testid="ws-ov-link-plan" onClick={() => setPick((p) => !p)}>Link a plan ▸</button>
         <button className="ctrl sm" data-testid="ws-ov-make-plan" disabled={!props.makePlan} onClick={() => props.makePlan?.()}
-          title={props.makePlan ? "Make a plan from the linked ideas; it becomes this workspace's" : "A plan is made from ideas: link one first"}>Make a plan</button>
+          title={props.makePlan ? "Make a plan from the linked ideas; it becomes this workspace's" : undefined}>Make a plan</button>
+        {!props.makePlan && <span className="ws-ov-none" data-testid="ws-ov-make-why">A plan is made from ideas: link one first.</span>}
       </div>
       {pick && <PlanPicker {...props} picked={() => setPick(false)} />}
     </>

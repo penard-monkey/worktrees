@@ -363,6 +363,8 @@ async function orphan(page, tag) {
 /** A workspace changed in the Ideas window (or by anybody else). */
 async function elsewhere(page, tag) {
   await boot(page, ["beta_ideas"]);
+  await page.click("[data-testid=ws-doc-plan]");
+  ok(await until(page, () => /A plan is made from ideas: link one first\./.test(document.querySelector("[data-testid=ws-no-plan]")?.textContent ?? "")) && await page.locator("[data-testid=ws-ov-make-plan]").isDisabled(), `${tag} Make a plan with no idea linked says why, in words`);
   const ws = (await call(page, "workspaces_list", {})).workspaces.find((w) => w.name === "Everything").id;
   await pickWs(page);
   await page.waitForSelector("[data-testid=ws-overview]");
