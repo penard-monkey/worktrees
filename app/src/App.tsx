@@ -6912,6 +6912,8 @@ function App() {
     setWsSide("chat");
     setWsStart({ ws: id, why: null });
     const got = await wsChats.start(id);
+    // A workspace's first chat makes its memory.
+    void wsMem.refresh(id);
     if ("refused" in got) { setWsStart({ ws: id, why: got.refused }); return; }
     setWsStart(null);
     setWsChat((c) => ({ ...c, [id]: got.conv }));
