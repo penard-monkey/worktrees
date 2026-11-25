@@ -804,8 +804,10 @@ pub fn image_at(root: &Path, id: &str, path: &str, etag: Option<&str>) -> Result
 
 /// The person's save. `expected_mtime` is the file's mtime when it was read,
 /// and the save is refused when that is no longer it; `None` MAKES the file
-/// and is refused when there is one. `keep_history`: commit what is on disk
-/// first, for a text written knowingly over one that came from elsewhere.
+/// and is refused when there is one. `keep_history`: commit what is on disk at
+/// `path` first, for a text written knowingly over one that came from
+/// elsewhere. That one file and no other, so it takes nothing more of a fold
+/// that is being written than what is about to be overwritten.
 pub fn write_at(root: &Path, id: &str, path: &str, content: &str, expected_mtime: Option<u64>, keep_history: bool) -> Result<Saved, String> {
     wsfolder::refuse_real(root)?;
     rel_ok(path)?;
@@ -846,7 +848,7 @@ pub fn write_at(root: &Path, id: &str, path: &str, content: &str, expected_mtime
     if keep_history {
         let repo = Repo::open(&mem)?;
         repo.recover();
-        commit_held(&repo, Some(&format!("Before keeping your text: {path}")))?;
+        commit_specs(&repo, &[format!(":(top,literal){path}")], Some(&format!("Before keeping your text: {path}")))?;
     }
     let mode = fs::symlink_metadata(&dst).ok().map(|m| m.permissions());
     fsx::write_atomic(&dst, content.as_bytes(), mode).map_err(|e| format!("{path}: {e}"))?;
@@ -912,8 +914,11 @@ fn edited(paths: &[String]) -> String {
 
 /// Commit whatever is dirty, or answer `None`. The lock is held.
 fn commit_held(repo: &Repo, message: Option<&str>) -> Result<Option<Change>, String> {
-    let specs = repo.pathspecs()?;
-    let dirty = repo.dirty(&specs)?;
+    commit_specs(repo, &repo.pathspecs()?, message)
+}
+
+fn commit_specs(repo: &Repo, specs: &[String], message: Option<&str>) -> Result<Option<Change>, String> {
+    let dirty = repo.dirty(specs)?;
     if dirty.is_empty() {
         return Ok(None);
     }
@@ -1515,6 +1520,8 @@ mod tests {
         let m = s.read(INDEX).unwrap().mtime_ms;
         write_at(&s.root, &s.id, INDEX, "# Mine\n", Some(m), true).unwrap();
         let top = &s.log()[0];
+        assert_eq!(top.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), vec![INDEX], "that file and no other");
+        assert!(status_at(&s.root, &s.id).unwrap().dirty.contains(&"topics/deep/new.md".to_string()));
         assert_eq!(top.subject, "Before keeping your text: MEMORY.md");
         assert_eq!(read_commit_at(&s.root, &s.id, INDEX, &top.commit).unwrap().content, "# Theirs\n");
         assert_eq!(s.text(INDEX), "# Mine\n");

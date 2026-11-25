@@ -122,12 +122,10 @@ pub fn workspace_memory_image(ctx: &Ctx, id: String, path: String, etag: Option<
 }
 
 /// The person's save. `expected_mtime` absent makes the file, and is refused
-/// when there is one; `keep_history` commits what is on disk first.
+/// when there is one; `keep_history` commits what is on disk at `path` first,
+/// a fold in progress or not: that text is nowhere else.
 pub fn workspace_memory_write(ctx: &Ctx, id: String, path: String, content: String, expected_mtime: Option<u64>, keep_history: Option<bool>) -> Result<Saved, String> {
-    // A fold's commit is the fold's: an edit of the person's may ride in it,
-    // and no commit of theirs may take its half-written files.
-    let keep = keep_history == Some(true) && !ctx.memory.is_held(&id);
-    store::write_at(root(ctx), &id, &path, &content, expected_mtime, keep)
+    store::write_at(root(ctx), &id, &path, &content, expected_mtime, keep_history == Some(true))
 }
 
 /// Put a file under `files/`: `name` is a plain file name, `data` its bytes as
@@ -389,13 +387,17 @@ mod tests {
         assert_eq!((v["file"]["diff"]["before"].is_null(), v["file"]["diff"]["after"]["b64"].as_str()), (true, Some(b64_encode(&png).as_str())));
         let v = serde_json::to_value(workspace_memory_diff(c, id(), done.commit.clone(), Some("topics/t.md".into())).unwrap()).unwrap();
         assert!(v["file"]["diff"]["kind"] == "text" && v["file"]["diff"]["patch"].as_str().unwrap().contains("+# T"), "{v}");
-        // A fold in progress owns the dirty tree: no undo, and no commit for a kept text.
+        // A fold in progress owns the dirty tree: no undo. A text kept over
+        // what it wrote commits that one file, and nothing else of its.
         c.memory.hold(&s.id);
         assert!(workspace_memory_revert(c, id(), done.commit.clone()).unwrap_err().contains("folding"));
         s.put("topics/t.md", "# Theirs\n");
+        s.put("notes/half.md", "half\n");
         let m = workspace_memory_file(c, id(), "topics/t.md".into(), None).unwrap().mtime_ms;
         workspace_memory_write(c, id(), "topics/t.md".into(), "# Mine\n".into(), Some(m), Some(true)).unwrap();
-        assert_eq!(workspace_memory_log(c, id(), None, None, None).unwrap().changes.len(), 2, "nothing was committed");
+        let top = workspace_memory_log(c, id(), None, None, Some(1)).unwrap().changes.remove(0);
+        assert_eq!(top.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), vec!["topics/t.md"]);
+        assert_eq!(workspace_memory_file(c, id(), "topics/t.md".into(), Some(top.commit)).unwrap().content, "# Theirs\n");
         c.memory.release(&s.id);
         let r = workspace_memory_revert(c, id(), done.commit).unwrap();
         assert_eq!((r.change, r.conflicts), (None, vec!["topics/t.md".to_string()]));
