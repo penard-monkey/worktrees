@@ -19,19 +19,19 @@
 //   (write theirs over it, against the file's current mtime — and with
 //   `keepHistory`, so the text it overwrites is copied to `.history/` first:
 //   no text is ever lost, including the other editor's).
-// - **`ideas:changed`** (`external`): a `changed` entry for this idea whose
-//   mtime is one a write of OURS returned is our own save, a tick late.
-//   ANY mtime ours ever got, not only the last: a tick that fell between
-//   two of our saves reports the first. Anything else is an edit made
-//   elsewhere: reloaded when the editor is clean, a conflict when it is not.
-//   An event that arrives while a write is in flight waits for its answer —
-//   until then the mtime it carries may be that write's.
+// - **`ideas:changed`** (`external`): an entry for this document, changed or
+//   removed, READS the file, and its text decides. The text we last saved or
+//   loaded: our own save a tick late, or a touch, and nothing to do but know
+//   its mtime. Another text: an edit made elsewhere, reloaded when the editor
+//   is clean, a conflict when it is not. Never the mtime alone: two programs
+//   can write in one millisecond, and an event can come late.
+//   An event that arrives while a write is in flight waits for its answer.
 // - **A save can rename the file**: the first heading names it
 //   (`ideas::write_at`), and `idea_write` answers with the idea as saved —
 //   its mtime and its `file`. The move keeps the mtime, so the watcher's
-//   vanish-and-appear of the old and new names carries an mtime that is
-//   already ours (and a `removed` for the instant two names hold the id is
-//   confirmed by id, below). The window hears the new name through
+//   vanish-and-appear of the old and new names reads as the text we have (and
+//   a `removed` for the instant two names hold the id is confirmed by id,
+//   below). The window hears the new name through
 //   `onSaved`, never by reading the list.
 // - **A `removed` entry** is confirmed with `idea_read` before anything
 //   closes, because an editor that saves by rename makes a file vanish for an
@@ -104,8 +104,6 @@ export class Session {
   readonly id: string;
   private base: string;
   private mtime: number;
-  /** Every mtime a write of ours was answered with. */
-  private own = new Set<number>();
   private timer: unknown = null;
   private inflight: Promise<void> | null = null;
   private again = false;
@@ -179,7 +177,6 @@ export class Session {
         const m = saved.mtime_ms;
         this.base = content;
         this.mtime = m;
-        this.own.add(m);
         if (!this.closed) this.deps.onSaved?.(saved);
         this.set(this.dirty() ? { kind: "dirty" } : { kind: "clean", savedAt: this.deps.clock.now() });
       } catch (e) {
@@ -207,42 +204,40 @@ export class Session {
   async external(ev: Changed): Promise<void> {
     if (this.closed) return;
     if (this.inflight) { this.pending.push(ev); return; }
-    const ch = ev.changed.find((c) => c.id === this.id);
-    if (ch) {
-      if (this.own.has(ch.mtime_ms) || ch.mtime_ms === this.mtime) return;
-      return this.elsewhere();
-    }
-    if (ev.removed.includes(this.id)) {
-      try {
-        const d = await this.deps.rows.read(this.id);
-        if (this.own.has(d.mtime_ms) || d.mtime_ms === this.mtime) return;
-        return this.elsewhere(d);
-      } catch (e) {
-        if (this.gone(errText(e))) {
-          if (this.timer !== null) { this.deps.clock.clearTimeout(this.timer); this.timer = null; }
-          this.set({ kind: "removed" });
-        }
+    if (ev.changed.some((c) => c.id === this.id) || ev.removed.includes(this.id)) return this.look();
+  }
+
+  /** Something moved: our own save, a tick late, or another's edit. Only the text
+   *  says which; a millisecond does not (two writes can share one). */
+  private async look(): Promise<void> {
+    for (;;) {
+      const [base, mtime] = [this.base, this.mtime];
+      let d: Read;
+      try { d = await this.deps.rows.read(this.id); } catch (e) {
+        if (this.closed || !this.gone(errText(e))) return;
+        if (this.timer !== null) { this.deps.clock.clearTimeout(this.timer); this.timer = null; }
+        this.set({ kind: "removed" });
+        return;
       }
+      if (this.closed || this.state.kind === "removed") return;
+      // A save is out: asked again after its answer, as any event is.
+      if (this.inflight) { this.pending.push({ changed: [{ id: this.id, mtime_ms: mtime }], removed: [] }); return; }
+      // One landed while this read was: the text read is from before it.
+      if (this.base !== base || this.mtime !== mtime) continue;
+      if (d.content !== this.base) return this.elsewhere(d);
+      // Touched, or ours: the next save is against the mtime it has.
+      this.mtime = d.mtime_ms;
+      return;
     }
   }
 
-  /** The file changed and the change is not ours. */
-  private async elsewhere(known?: Read): Promise<void> {
-    if (this.state.kind === "removed") return;
+  /** The file has another text, and it is not ours. */
+  private elsewhere(d: Read): void {
     if (this.dirty() || this.state.kind === "conflict") {
       if (this.timer !== null) { this.deps.clock.clearTimeout(this.timer); this.timer = null; }
       this.set({ kind: "conflict", why: "elsewhere" });
       return;
     }
-    let d = known;
-    if (!d) {
-      try { d = await this.deps.rows.read(this.id); } catch (e) {
-        if (this.gone(errText(e))) this.set({ kind: "removed" });
-        return;
-      }
-    }
-    // Typing may have begun while the read was out.
-    if (this.dirty()) { this.set({ kind: "conflict", why: "elsewhere" }); return; }
     this.take(d);
   }
 
@@ -280,7 +275,6 @@ export class Session {
    *  its new text and mtime, which are ours. Typed into while that act was out,
    *  the editor keeps the person's text and asks. */
   adopt(content: string, mtime: number): void {
-    this.own.add(mtime);
     if (this.held()) return;
     if (this.dirty() && this.deps.text() !== content) {
       if (this.timer !== null) { this.deps.clock.clearTimeout(this.timer); this.timer = null; }
