@@ -7,7 +7,8 @@
 //
 // Why: the owner's guest saw the alt text in italics where each picture should
 // be (2026-11-24). It holds that the pictures SHOW (decoded, hit by a click,
-// enlarged and closed), that a person's message draws none, that a Read outside
+// enlarged and closed), that a person's message draws only what the host
+// stored (the attachment) and is quiet about the rest, that a Read outside
 // the place has no thumbnail, that a host from before the row looks as it did,
 // that pictures are asked for one at a time, and that one arriving late neither
 // leaves a reader at the bottom short of it nor moves a reader above.
@@ -39,10 +40,11 @@ for (const engine of ["webkit", "chromium"]) {
       const pics = [...g.querySelectorAll("[data-testid=chat-img] img")];
       return {
         alts: pics.map((i) => i.alt), decoded: pics.every((i) => i.naturalWidth === 640 && i.getBoundingClientRect().width > 100),
-        thumbs: g.querySelectorAll("[data-testid=chat-img-thumb] img").length,
+        thumbs: g.querySelectorAll("[data-testid=guest-agent] [data-testid=chat-img-thumb] img").length,
         reads: [...g.querySelectorAll("[data-testid=guest-call]")].filter((r) => r.textContent.startsWith("Read")).length,
         notes: [...g.querySelectorAll(".err-note, .md-img-note")].map((n) => n.textContent),
-        userImg: [...g.querySelectorAll("[data-testid=guest-user]")].some((u) => u.querySelector("img, .err-note")),
+        userImg: [...g.querySelectorAll("[data-testid=guest-user] img")].map((i) => i.alt),
+        userErr: [...g.querySelectorAll("[data-testid=guest-user] .err-note")].length,
         remote: [...document.querySelectorAll("img")].some((i) => /^https?:/.test(i.getAttribute("src") ?? "")),
         asked: window.__mock.guestImages(),
       };
@@ -50,7 +52,7 @@ for (const engine of ["webkit", "chromium"]) {
     check(JSON.stringify(m.alts) === JSON.stringify(["Home view", "Place view"]) && m.decoded, `${engine}: the reply's pictures show (${m.alts.join(", ")})`);
     check(m.thumbs === 1 && m.reads === 2, `${engine}: the Read inside the place has a thumbnail, the one outside none (${m.thumbs} of ${m.reads})`);
     check(m.notes.some((n) => n === "image not shown — not found: shots/missing.png") && m.notes.some((n) => /remote image not loaded: Logo/.test(n)) && m.notes.length === 2, `${engine}: a refusal and a remote URL are said (${m.notes.join(" | ")})`);
-    check(!m.userImg && !m.remote && !m.asked.calls.includes("shots/mine.png"), `${engine}: a person's message draws no picture, and nothing remote is loaded`);
+    check(JSON.stringify(m.userImg) === JSON.stringify(["Attached: 20261124-00000000000000aa.png"]) && m.userErr === 0 && !m.remote, `${engine}: a person's message draws the picture the host stored, says nothing of the one it refused, and nothing remote is loaded (${m.userImg.join(", ")})`);
     check(m.asked.most === 1, `${engine}: one picture at a time (${m.asked.most})`);
     if (SHOT) { await page.evaluate(() => document.querySelector(".guest-session [data-testid=chat-img]").scrollIntoView({ block: "center" })); await page.waitForTimeout(300); await page.screenshot({ path: `${SHOT}-${engine}.png` }); }
     const btn = page.locator(".guest-session .chat-img-btn").first();

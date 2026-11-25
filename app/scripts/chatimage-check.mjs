@@ -203,7 +203,13 @@ try {
     check(G.refusalShows("outside this place: /tmp/a.png", true) === "plain" && G.refusalShows("outside this place: a.png", false) === "words" && G.refusalShows("not found: a.png", true) === "words", "guest: a Read outside the place has no thumbnail; every other refusal is said");
     check(door === 0, "guest: nothing went through the engine door");
     const gs = fs.readFileSync(path.join(ROOT, "src/GuestSession.tsx"), "utf8");
-    check((gs.match(/<Markdown [^>]*renderImage=/g) ?? []).length === 1 && /chat-bubble-agent"><Markdown [^>]*renderImage=/.test(gs), "guest: the agent's bubble draws pictures, a person's does not (a guest's own words reach it)");
+    check((gs.match(/<Markdown [^>]*renderImage=/g) ?? []).length === 2 && /chat-bubble-agent"><Markdown [^>]*renderImage=\{renderImage\}/.test(gs) && /<Markdown src=\{sent\.text\} [^>]*renderImage=\{renderPersonImage\}/.test(gs) && /sharedImageNode\(src, alt, at, t\.seq, true\)/.test(gs), "guest: the agent's bubble draws pictures, and a person's asks as a PERSON's (the host shows only what it stored)");
+    check(G.refusalShows("not shown in this shared session: a.png", false, true) === "plain" && G.refusalShows("not shown in this shared session: a.png", true, true) === "plain" && G.refusalShows("not shown in this shared session: a.png", false) === "words" && G.refusalShows("not found: a.png", false, true) === "words", "guest: a person's picture the host will not show is its alt text; the agent's is said");
+    check(/<SharedAttachment key=\{p\} at=\{at\} turn=\{turn\} path=\{p\} \/>/.test(gs) && /attachedKind\(p\) === "image"/.test(gs), "guest: an image attached to a person's message is asked for, by its turn");
+    // The guest view reads the `[attached: …]` tail with its own copy of
+    // chat.ts's reader (it may not import chat.ts): the two regexes are one.
+    const re = (f) => /^const ATTACHED = (\/.*\/[a-z]*);$/m.exec(fs.readFileSync(path.join(ROOT, f), "utf8"))?.[1] ?? null;
+    check(re("src/attached.ts") !== null && re("src/attached.ts") === re("src/chat.ts"), "guest: attached.ts reads the `[attached: …]` tail exactly as chat.ts does");
     check(/<SharedThumb [^>]*readImagePath\(props\.name, props\.summary, props\.failed\)/.test(gs), "guest: a Read of an image draws its thumbnail");
     // `marked` hands the path as the host's `image_paths` reads it (the Rust
     // test's own table): the two must agree or a picture is refused.

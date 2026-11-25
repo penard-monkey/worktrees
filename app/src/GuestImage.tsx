@@ -6,7 +6,11 @@
 // the rule the owner's chat is under, after checking that turn draws it.
 //
 // What is drawn: the images of the AGENT's text, and a Read of one inside the
-// place. A Read of a file outside it is the picture only the owner's console is
+// place; and in a PERSON's message, the pictures the owner attached or drew,
+// which the host shows only when IT stored them during the share (its upload
+// ledger: a guest's own words reach a person's message through *Use these*).
+// A person's picture the host will not show looks as it did, its alt text. A
+// Read of a file outside the place is the picture only the owner's console is
 // given (`agent_call_image`), so it has no thumbnail here, and neither it nor a
 // host too old to have the row is an error to read: both look as they did.
 //
@@ -56,12 +60,13 @@ export function loadSharedImage(at: SharedAt, turn: number, path: string, now = 
 /** What a refusal shows: nothing but what stood there before (`plain`), or the
  *  host's words. A host from before the row, and a Read outside the place, are
  *  not errors. Pure, for the check. */
-export function refusalShows(e: string, thumb: boolean): "plain" | "words" {
+export function refusalShows(e: string, thumb: boolean, person = false): "plain" | "words" {
   if (e.startsWith("unknown command")) return "plain";
+  if (person && e.startsWith("not shown in this shared session")) return "plain";
   return thumb && e.startsWith("outside this place") ? "plain" : "words";
 }
 
-function GuestImage({ at, turn, path, alt, thumb = false }: { at: SharedAt; turn: number; path: string; alt: string; thumb?: boolean }) {
+function GuestImage({ at, turn, path, alt, thumb = false, person = false }: { at: SharedAt; turn: number; path: string; alt: string; thumb?: boolean; person?: boolean }) {
   const [blob, setBlob] = useState<PlaceBlob | null>(() => peekSharedImage(at, path));
   const [err, setErr] = useState<string | null>(null);
   const { link, host, share, binding, isMain, up } = at;
@@ -83,7 +88,7 @@ function GuestImage({ at, turn, path, alt, thumb = false }: { at: SharedAt; turn
     return () => { alive = false; };
   }, [link, host, share, binding, isMain, up, turn, path]);
 
-  if (err !== null && refusalShows(err, thumb) === "plain") return thumb ? null : <em>{alt}</em>;
+  if (err !== null && refusalShows(err, thumb, person) === "plain") return thumb ? null : <em>{alt}</em>;
   const pic = <ImagePicture blob={blob} err={err} path={path} inline enlarge alt={alt} thumb={thumb} errPrefix={thumb ? "preview not shown — " : "image not shown — "} />;
   if (!thumb) return pic;
   // A Read's thumbnail says nothing until it is known to be one: whether the
@@ -93,10 +98,16 @@ function GuestImage({ at, turn, path, alt, thumb = false }: { at: SharedAt; turn
 
 /** `![alt](src)` in the agent's text: the picture, or a note that names what
  *  is never asked for (a remote URL, another scheme, `..`, no image). */
-export function sharedImageNode(src: string, alt: string, at: SharedAt, turn: number): ReactNode {
+export function sharedImageNode(src: string, alt: string, at: SharedAt, turn: number, person = false): ReactNode {
   const r = chatImageSrc(src, alt, null, at.isMain);
   if (r.kind === "note") return <em className="md-img-note" data-testid="chat-img-note">{r.text}</em>;
-  return <GuestImage key={r.path} at={at} turn={turn} path={r.path} alt={alt} />;
+  return <GuestImage key={r.path} at={at} turn={turn} path={r.path} alt={alt} person={person} />;
+}
+
+/** A picture attached to a person's message (`[attached: …]`): a thumbnail
+ *  once the host shows it, nothing when it will not. */
+export function SharedAttachment({ at, turn, path }: { at: SharedAt; turn: number; path: string }) {
+  return <GuestImage key={path} at={at} turn={turn} path={path} alt={`Attached: ${path.split("/").pop()}`} thumb person />;
 }
 
 /** A Read's thumbnail: `path` is `readImagePath`'s, or null for no picture. */

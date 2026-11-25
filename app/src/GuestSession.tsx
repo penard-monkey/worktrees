@@ -21,15 +21,17 @@
 //
 // A live permission prompt is the owner's alone (D8): a guest sees "waiting
 // for David" where an unanswered question or plan sits in the transcript.
-// Pictures: the images in the agent's text, and a Read of one inside the place,
-// are asked for over the same connection (`shared_image`, GuestImage.tsx).
+// Pictures: the images in the agent's text, a Read of one inside the place, and
+// the owner's own pictures in his messages (attached, or drawn in his text) are
+// asked for over the same connection (`shared_image`, GuestImage.tsx).
 // David's host offline: the last page stays, in memory only (§3.4, §6).
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Notice, Step } from "./chat";
 import { chatLinkAction } from "./chatlink";
 import { closeShare, guestLinkOf, joinShare, useGuests, type GuestHostView, type GuestShare } from "./guest";
-import { SharedThumb, sharedImageNode, type SharedAt } from "./GuestImage";
+import { attachedKind, splitAttached } from "./attached";
+import { SharedAttachment, SharedThumb, sharedImageNode, type SharedAt } from "./GuestImage";
 import { readImagePath } from "./imgsrc";
 import { leavesGap, mergeNewest, mergeOlder, piecesOf, removedWords, standing, turnKeys, type SharedPage, type SharedTurn } from "./guestview";
 import type { GuestLink } from "./guestdoor";
@@ -183,11 +185,25 @@ function Asked({ st, owner }: { st: Extract<Step, { kind: "question" | "permissi
   return <li className="chat-note" data-testid="guest-asked">{what} · {owner} {answer}</li>;
 }
 
+/** The files a person's message named, as the owner's chat lists them (names,
+ *  the full path the title), and under them the pictures the host shows. */
+function SentFiles({ paths, at, turn }: { paths: string[]; at: SharedAt; turn: number }) {
+  return (
+    <>
+      <ul className="chat-sent-files" aria-label={paths.length === 1 ? "1 attached file" : `${paths.length} attached files`} data-testid="guest-sent-files">
+        {paths.map((p) => <li key={p} className="chat-sent-file" title={p}>{p.split("/").pop()}</li>)}
+      </ul>
+      {paths.filter((p) => attachedKind(p) === "image").map((p) => <SharedAttachment key={p} at={at} turn={turn} path={p} />)}
+    </>
+  );
+}
+
 function TurnItems({ t, agent, owner, at, onLink }: { t: SharedTurn; agent: string; owner: string; at: SharedAt; onLink: (href: string) => void }) {
   const { link, share, binding } = at;
-  // The agent's text alone: a person's message draws no picture here, because a
-  // guest's own words reach it (*Use these*) and the host refuses its paths.
   const renderImage = useCallback((src: string, alt: string) => sharedImageNode(src, alt, at, t.seq), [at, t.seq]);
+  // A person's message: a guest's own words reach it (*Use these*), so the host
+  // shows only a picture IT stored during the share, and a refusal is quiet.
+  const renderPersonImage = useCallback((src: string, alt: string) => sharedImageNode(src, alt, at, t.seq, true), [at, t.seq]);
   return (
     <>
       {piecesOf(t).map((p, n) => {
@@ -202,16 +218,19 @@ function TurnItems({ t, agent, owner, at, onLink }: { t: SharedTurn; agent: stri
               </li>
             );
           }
-          case "user":
+          case "user": {
+            const sent = splitAttached(p.text);
             return (
               <li key={n} className="chat-row chat-row-user">
                 <p className="chat-name" aria-hidden="true">{owner}</p>
                 <div className="chat-bubble chat-bubble-user" role="group" aria-label={owner} data-testid="guest-user">
-                  <Markdown src={p.text} onLink={onLink} />
+                  <Markdown src={sent.text} onLink={onLink} renderImage={renderPersonImage} />
+                  {sent.paths.length > 0 && <SentFiles paths={sent.paths} at={at} turn={t.seq} />}
                   {p.mid && <p className="chat-bubble-note chat-midturn-caption">Sent while {agent} was working</p>}
                 </div>
               </li>
             );
+          }
           case "asked":
             return <Asked key={n} st={p.st} owner={owner} />;
           case "agent":

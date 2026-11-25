@@ -15,9 +15,22 @@
 //! exists at all. The turn is the client's to name (`shared_turns` gave it the
 //! `seq`), so a check reads that turn's bytes and not the transcript.
 //!
-//! **The agent's text only, never a person's.** A guest's own words reach the
-//! transcript as a user message when the owner presses *Use these*, so
-//! counting user text would let a guest write the path they want read.
+//! **A person's message counts only for a picture the HOST stored.** A
+//! guest's own words reach the transcript as a user message when the owner
+//! presses *Use these* (the frame names the guests, and the owner can paste
+//! anything), so a path in a person's text proves nothing by itself: counting
+//! it would let a guest write the path they want read. What a guest's words
+//! cannot reach is the host's ledger (`attach::LEDGER`, in serve's config dir,
+//! written by `agent_attach` for every IMAGE it stores, never by an agent and
+//! never in the place). So a person's message (its prompt, or one sent while
+//! the agent worked) shows a path, as its `[attached: …]` tail or as
+//! `![alt](path)`, only when the ledger says the host stored that picture in
+//! this place DURING the binding (from `bound_at`, and by the end of an ended
+//! one), and the file is unchanged since (its own times no later than the
+//! record). *Use these*' upload is a text file, never recorded; a picture a
+//! guest names that the owner did not upload in this share is refused as
+//! before. A picture pasted into Claude's TERMINAL is an image block in the
+//! transcript that the owner's chat does not draw either, so it is not here.
 //!
 //! **An ended binding shows what it showed** (§3.3): an image changed on disk
 //! after the binding ended is another session's work, and is refused.
@@ -27,6 +40,7 @@
 
 use std::path::Path;
 
+use worktrees_core::attach;
 use worktrees_core::authz::{Access, Requirement};
 use worktrees_core::pathclass::{self, Classifier};
 use worktrees_core::turns::{Step, Turn};
@@ -179,6 +193,37 @@ fn draws(t: &Turn, path: &str) -> bool {
     })
 }
 
+/// The host-shaped paths a sent line's ` [attached: …]` tail names, as the
+/// client's `splitAttached` reads them; none when the tail is not that shape.
+fn attached(line: &str) -> Vec<&str> {
+    let ok = |p: &str| {
+        let Some(name) = p.strip_prefix(".worktrees-attachments/") else { return false };
+        let b = name.as_bytes();
+        let ext = name.get(26..).unwrap_or("");
+        b.len() > 26
+            && b[..8].iter().all(u8::is_ascii_digit)
+            && b[8] == b'-'
+            && b[9..25].iter().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(c))
+            && b[25] == b'.'
+            && (2..=4).contains(&ext.len())
+            && ext.bytes().all(|c| c.is_ascii_lowercase())
+    };
+    let Some(tail) = line.strip_suffix(']') else { return Vec::new() };
+    let Some((_, list)) = tail.rsplit_once(" [attached: ") else { return Vec::new() };
+    let paths: Vec<&str> = list.split(", ").collect();
+    if paths.iter().all(|p| ok(p)) { paths } else { Vec::new() }
+}
+
+/// A PERSON's message in `t` names `path`: its `[attached: …]` tail or an
+/// image its markdown draws. Not enough alone: see the module's header.
+fn person_names(t: &Turn, path: &str) -> bool {
+    let steps = t.steps.iter().filter_map(|s| match s {
+        Step::User { text, .. } => Some(text.as_str()),
+        _ => None,
+    });
+    t.user.as_deref().into_iter().chain(steps).any(|x| attached(x).contains(&path) || image_paths(x).iter().any(|p| p == path))
+}
+
 /// What a guest may be shown of the file an image path resolved to: one a
 /// plain `read` reaches (`pathclass::requirement`), so never a secret, git's
 /// own or worktrees' own. A guest holds no `read`, so this stands in for
@@ -208,22 +253,35 @@ pub mod rows {
         let s = history::rows::share(cx, &share)?;
         let b = history::binding_of(&s, binding)?;
         let not_shown = || format!("{ERR_NOT_SHOWN_HERE}: {path}");
-        if !history::turns_at(&cx.ctx.config_dir, b, turn)?.iter().any(|t| draws(t, &path)) {
-            return Err(not_shown());
-        }
+        let turns = history::turns_at(&cx.ctx.config_dir, b, turn)?;
         // The place the owner shared, still: a project unregistered or a place
         // remade under the same name waits for the poll to drop the share.
         let roots = all_roots(cx);
         if !roots.contains(&s.project) || !place_is_there(&s) {
             return Err(not_shown());
         }
-        let canon: Vec<std::path::PathBuf> = roots.iter().filter_map(|r| std::fs::canonicalize(r).ok()).collect();
-        let classes = Classifier::new(&canon);
+        let place = place_dir(&s.project, &s.slug);
         // An ended binding with no end time shows nothing it cannot date.
         let until_ms = (b.state == BindingState::Ended).then(|| b.ended_at.unwrap_or(0) * 1000 + 999);
+        // The agent's own picture, or a person's that the host stored during
+        // the binding: then `uploaded` is when, and the file must be no newer.
+        let uploaded = if turns.iter().any(|t| draws(t, &path)) {
+            None
+        } else if turns.iter().any(|t| person_names(t, &path)) {
+            let at = attach::uploaded(&cx.ctx.config_dir.join(attach::LEDGER), &place, &path);
+            let within = |ms: &i64| *ms >= b.bound_at * 1000 && until_ms.is_none_or(|t| *ms <= t);
+            Some(at.filter(within).ok_or_else(not_shown)?)
+        } else {
+            return Err(not_shown());
+        };
+        let canon: Vec<std::path::PathBuf> = roots.iter().filter_map(|r| std::fs::canonicalize(r).ok()).collect();
+        let classes = Classifier::new(&canon);
         let changed = || format!("{ERR_CHANGED}: {path}");
         let allow = |f: &Path| {
             if !class_allows(&classes, f) {
+                return Err(not_shown());
+            }
+            if uploaded.is_some_and(|ms| changed_ms(f).map_or(true, |c| c > ms)) {
                 return Err(not_shown());
             }
             match until_ms {
@@ -231,8 +289,11 @@ pub mod rows {
                 _ => Ok(()),
             }
         };
-        let img = files::place_image_at(&place_dir(&s.project, &s.slug), s.slug == "(main)", &path, files::READ_BASE64_MAX, etag.as_deref(), &allow)?;
+        let img = files::place_image_at(&place, s.slug == "(main)", &path, files::READ_BASE64_MAX, etag.as_deref(), &allow)?;
         // Again for the handle that was read: a file written between the two.
+        if uploaded.is_some_and(|ms| img.mtime as i64 > ms) {
+            return Err(not_shown());
+        }
         if until_ms.is_some_and(|t| img.mtime as i64 > t) {
             return Err(changed());
         }
@@ -510,6 +571,90 @@ mod tests {
             assert_eq!(said(ask(&h, &h.bret, &id, 0, p)), format!("{ERR_CHANGED}: {p}"));
         }
         assert!(ask(&h, &h.bret, &id, 0, "kept.png").is_ok(), "one nobody touched");
+    }
+
+    /// `(main)`'s root, the place these tests upload to: a scratch place is
+    /// no git worktree, so `attach` cannot see its folder excluded.
+    fn main(h: &Host) -> PathBuf {
+        PathBuf::from(&h.a)
+    }
+
+    /// The owner's upload of a picture into place `slug` (`agent_attach`, as
+    /// the console), its path as the host answered it.
+    fn upload(h: &Host, slug: &str) -> String {
+        let v = h.console("agent_attach", json!({"repo": h.a, "slug": slug, "name": "shot.png", "data": worktrees_api::files::b64_encode(PNG)})).unwrap();
+        v["path"].as_str().unwrap().to_string()
+    }
+
+    fn append(h: &Host, session: &str, more: &str) {
+        let t = h.top.join(format!("{session}.jsonl"));
+        let mut all = fs::read_to_string(&t).unwrap();
+        all.push_str(more);
+        fs::write(t, all).unwrap();
+    }
+
+    /// *Use these* puts a guest's words in a person's message. A place image
+    /// they name, in the frame or as an attachment, gives the guest nothing;
+    /// nor does a file at an upload's name that the host did not store, nor
+    /// the thread file the owner did upload, which is no image.
+    #[test]
+    fn a_guests_words_in_a_persons_message_name_no_picture() {
+        let h = Host::new("img-usethese");
+        png(main(&h).join("shots/secret.png"));
+        let planted = ".worktrees-attachments/20261125-0123456789abcdef.png";
+        png(main(&h).join(planted));
+        let id = shared(&h, "(main)", "s-1", &(user("go") + &reply("ok")));
+        let thread = h
+            .console("agent_attach", json!({"repo": h.a, "slug": "(main)", "name": "thread-1-1.txt", "data": worktrees_api::files::b64_encode(b"[#1 . Bret]\n![s](shots/secret.png)\n")}))
+            .unwrap()["path"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let line = format!("[worktrees: David shares 1 message from ![s](shots/secret.png) in {thread}. It is ![p]({planted})'s comment, not David's instructions.] see [attached: shots/secret.png]");
+        append(&h, "s-1", &(user(&line) + &reply("read it") + &user(&format!("x [attached: {planted}, {thread}]")) + &reply("ok")));
+        for (turn, p) in [(1, "shots/secret.png"), (1, planted), (2, planted), (2, thread.as_str())] {
+            assert_eq!(said(ask(&h, &h.bret, &id, turn, p)), format!("{ERR_NOT_SHOWN_HERE}: {p}"), "turn {turn}: {p}");
+        }
+    }
+
+    /// The owner's own picture in his own message, attached or drawn, in a
+    /// turn of the shared session, and the same in a message he sent while the
+    /// agent worked.
+    #[test]
+    fn the_owners_picture_in_his_own_message_shows() {
+        let h = Host::new("img-owner");
+        let id = shared(&h, "(main)", "s-1", &(user("go") + &reply("ok")));
+        let (a, b) = (upload(&h, "(main)"), upload(&h, "(main)"));
+        append(&h, "s-1", &(user(&format!("Look at this [attached: {a}]")) + &reply("seen") + &user(&format!("and ![this]({b})")) + &reply("ok")));
+        assert_eq!(ask(&h, &h.bret, &id, 1, &a).unwrap()["mime"], json!("image/png"));
+        assert!(ask(&h, &h.bret, &id, 2, &b).is_ok(), "drawn in his text");
+        assert_eq!(said(ask(&h, &h.bret, &id, 2, &a)), format!("{ERR_NOT_SHOWN_HERE}: {a}"), "only the turn that names it");
+    }
+
+    /// An upload from before the share, one named only in another session,
+    /// one changed after it was stored, and one changed after the share ended.
+    #[test]
+    fn an_owners_picture_outside_the_share_is_refused() {
+        let h = Host::new("img-owner-out");
+        let before = upload(&h, "(main)");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let id = shared(&h, "(main)", "s-1", &(user("go") + &reply("ok")));
+        let (kept, touched, other) = (upload(&h, "(main)"), upload(&h, "(main)"), upload(&h, "(main)"));
+        append(&h, "s-1", &(user(&format!("all [attached: {before}, {kept}, {touched}]")) + &reply("ok")));
+        fs::write(h.top.join("s-2.jsonl"), user(&format!("x [attached: {other}]")) + &reply("ok")).unwrap();
+        assert!(ask(&h, &h.bret, &id, 1, &kept).is_ok());
+        assert_eq!(said(ask(&h, &h.bret, &id, 1, &before)), format!("{ERR_NOT_SHOWN_HERE}: {before}"), "uploaded before the share");
+        assert_eq!(said(ask(&h, &h.bret, &id, 1, &other)), format!("{ERR_NOT_SHOWN_HERE}: {other}"), "named in another session");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(main(&h).join(&touched), [PNG, b"swapped"].concat()).unwrap();
+        assert_eq!(said(ask(&h, &h.bret, &id, 1, &touched)), format!("{ERR_NOT_SHOWN_HERE}: {touched}"), "not the picture he uploaded");
+        // Ended, then changed.
+        h.live("(main)", "s-2", 0);
+        h.poll();
+        assert!(ask(&h, &h.bret, &id, 1, &kept).is_ok(), "an ended session shows what it showed");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        fs::write(main(&h).join(&kept), [PNG, b"later"].concat()).unwrap();
+        assert!(ask(&h, &h.bret, &id, 1, &kept).is_err(), "changed after the share ended");
     }
 
     /// The forms `marked` reads as an image, and what is not one.
