@@ -11,6 +11,7 @@ import { GUEST_HOST, guestHelpers, guestInvoke } from "./guest";
 import { agentSessions, initialWorkspace, sessionName, type Place, type Workspace } from "./fixtures";
 import { isHarness, type Harness } from "../harness";
 import { cloneSource, type CloneErrorKind, type CloneProgress } from "../clone";
+import { memoryMock } from "./memory";
 import { mockProjectPrs } from "./prs";
 import type { PlaceBranch } from "../prs";
 import type { By } from "../provenance";
@@ -417,6 +418,8 @@ const mockWsGet = (id: unknown) => {
   if (!w) throw `no workspace ${id}`;
   return w;
 };
+/** A workspace's memory (`worktrees_api::memory`): ./memory.ts. */
+const mockMemory = memoryMock((e, p) => emitEvent(e, p), (id) => { mockWsView(); return mockWsGet(id).name; });
 // The launch gate's `[quota]` policy (`quota_settings`): `?quota=off` starts
 // with the gate off, `?quotapct=<n>` with a weekly threshold, and
 // `?quotapct=bad` with a hand-edit the gate ignored (so the problems line shows).
@@ -2933,6 +2936,17 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       emitEvent("places:changed", null);
       return mockCrossProject();
     }
+    // ── a workspace's memory (`worktrees_api::memory`): ./memory.ts ──
+    case "workspace_memory":
+    case "workspace_memory_make":
+    case "workspace_memory_file":
+    case "workspace_memory_image":
+    case "workspace_memory_write":
+    case "workspace_memory_put":
+    case "workspace_memory_log":
+    case "workspace_memory_diff":
+    case "workspace_memory_revert":
+      return mockMemory.call(cmd, args);
     // ── named workspaces (core `workspaces`, api `workspaces.rs`) ──
     case "workspaces_list":
       return mockWsView();
@@ -6867,6 +6881,9 @@ let mockNotifyGranted = new URLSearchParams(location.search).get("notify") === "
 };
 (window as any).__mock = {
   ...guestHelpers,
+  // ── a workspace's memory: what an agent does to it, and what the page sent ──
+  memoryEdit: (id: string, path: string, text: string | null) => mockMemory.edit(id, path, text),
+  memoryWrites: () => mockMemory.writes(),
   // ── ideas: what another editor, Finder or a person does to the folder ──
   /** Every idea_write the page sent, in order. */
   ideaWrites: () => mockIdeaWrites.slice(),

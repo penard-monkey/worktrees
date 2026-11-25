@@ -153,6 +153,9 @@ pub enum Obj {
     /// A conversation of an idea: `(conv, id)`, a ULID in that idea's record
     /// (`ideasessions::find_at`). The idea is resolved too.
     IdeaConv(&'static str, &'static str),
+    /// A named workspace: an id `workspaces.json` knows. The host's, not a
+    /// project's: only `HostConsole` rows name one.
+    Workspace(&'static str),
     /// A share (group chat §2), read from `shares.json` on every request: for
     /// the console, one that exists; for anyone else, one that names the
     /// caller's principal among its guests — another's reads as missing. An
@@ -173,7 +176,7 @@ impl Obj {
             Project(a) | OptProject(a, _) | Slug(a) | Root(a) | File(a) | Probe(a) | Session(a) | Attach(a) | Close(a) | ShellRef(a) | Job(a)
             | NewJob(a) | Device(a) | Revocable(a) | NewPath(a) | RemoteUrl(a) | Places(a) | Roots(a) | Candidates(a) => vec![a],
             SessionIn(s, _) => vec![s],
-            Idea(a) | Share(a) => vec![a],
+            Idea(a) | Workspace(a) | Share(a) => vec![a],
             IdeaConv(c, i) => vec![c, i],
             Place(r, s) => vec![r, s],
             SessionOf(s, _, _) => vec![s],
@@ -687,6 +690,13 @@ impl St<'_> {
                 let id: String = self.get(args, i)?;
                 let conv: String = self.get(args, c)?;
                 worktrees_core::ideasessions::find_at(self.cx.ctx.ideas_dir(), &id, &conv).map_err(Refusal::not_found)?;
+            }
+            Obj::Workspace(a) => {
+                let id: String = self.get(args, a)?;
+                let file = worktrees_core::workspaces::read().map_err(Refusal::not_found)?;
+                if !file.workspaces.iter().any(|w| w.id == id) {
+                    return Err(Refusal::not_found(format!("no workspace {id}")));
+                }
             }
             Obj::Share(a) => {
                 let id: String = self.get(args, a)?;

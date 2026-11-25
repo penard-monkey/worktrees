@@ -1860,10 +1860,14 @@ fn recorded(row: &Row) -> bool {
 /// (start, resume, close, remove, rename, send, answer, interrupt) is still
 /// recorded.
 ///
+/// A workspace's memory's reads join them: a window re-reads on every
+/// `workspaces:memory`. Make, write, put and revert are recorded.
+///
 /// Group chat's console listings join them: the shares, the guests and the
 /// open requests, which the owner's app reads on every `shares:changed`.
 const CONSOLE_READS: &[&str] = &[
-    "idea_conversations", "idea_turns", "idea_turn_text", "idea_tool_call", "idea_prompt", "shares_all", "guests_list", "share_requests_list",
+    "idea_conversations", "idea_turns", "idea_turn_text", "idea_tool_call", "idea_prompt",
+    "workspace_memory", "workspace_memory_file", "workspace_memory_image", "workspace_memory_log", "workspace_memory_diff", "shares_all", "guests_list", "share_requests_list",
 ];
 
 /// A drive-class act, as the audit budget counts one: what step-up guards
@@ -2093,6 +2097,20 @@ impl ConnAudit {
                 }
                 if let Some(Value::String(b)) = arg(args, "branch") {
                     detail.insert("branch".into(), json!(ident(b)));
+                }
+            }
+            // A workspace's memory: the workspace, and a save's length and
+            // hash or the change an undo names. Never the text.
+            "workspace_memory_make" | "workspace_memory_write" | "workspace_memory_put" | "workspace_memory_revert" => {
+                if let Some(Value::String(id)) = arg(args, "id") {
+                    detail.insert("workspace".into(), json!(ident(id)));
+                }
+                if let Some(Value::String(t)) = arg(args, "content").or_else(|| arg(args, "data")) {
+                    detail.insert("bytes".into(), json!(t.len()));
+                    detail.insert("sha256".into(), json!(sha256_hex(t.as_bytes())));
+                }
+                if let Some(Value::String(c)) = arg(args, "commit") {
+                    detail.insert("commit".into(), json!(ident(c)));
                 }
             }
             // An idea conversation's terminal: which conversation, by its id.

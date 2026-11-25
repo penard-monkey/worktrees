@@ -40,7 +40,7 @@ export function VersionsPanel(props: { versions: Version[] | null; armed: string
             <li key={v.version} className="ix-version" data-testid="ideas-version" data-version={v.version}>
               <span className="ix-version-when">{versionWhen(v.at)}</span>
               <span className="ix-version-title">{v.title ?? "(no title)"}</span>
-              <span className="ix-version-size">{v.size < 1024 ? `${v.size} B` : `${(v.size / 1024).toFixed(1)} KB`}</span>
+              <span className="ix-version-size">{v.size === undefined ? "" : v.size < 1024 ? `${v.size} B` : `${(v.size / 1024).toFixed(1)} KB`}</span>
               <button className={`ix-btn ix-btn-small${props.armed === v.version ? " ix-btn-armed" : ""}`} data-testid="ideas-version-restore"
                 title="Puts this version back. The current text is kept in Versions first." onClick={() => props.restore(v)}>
                 {props.armed === v.version ? "Restore? Current kept" : "Restore"}

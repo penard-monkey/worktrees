@@ -69,6 +69,7 @@ pub mod harness_updates;
 pub mod keepawake;
 pub mod log;
 pub mod macprivacy;
+pub mod memory;
 pub mod meta;
 pub mod project;
 pub mod projects;
@@ -185,6 +186,13 @@ pub struct Ctx {
     /// that runs the engine in-process moves it with [`Ctx::with_ideas_dir`],
     /// never with `set_var`.
     ideas_dir: Arc<PathBuf>,
+    /// The folder the workspaces' own folders sit in
+    /// (`worktrees_core::wsfolder::root()` at start, so
+    /// `WORKTREES_WORKSPACES_DIR` moves it for a spawned engine). A test that
+    /// runs the engine in-process moves it with [`Ctx::with_workspaces_dir`].
+    workspaces_dir: Arc<PathBuf>,
+    /// Which workspaces' memory is someone's to commit (`memory`).
+    pub memory: Arc<memory::Memory>,
     /// The hold on this host's idle sleep (`keepawake`). One per engine.
     pub keep_awake: Arc<keepawake::KeepAwake>,
 }
@@ -207,6 +215,8 @@ impl Ctx {
             console: true,
             acting: Arc::new(None),
             ideas_dir: Arc::new(worktrees_core::ideas::dir()),
+            workspaces_dir: Arc::new(worktrees_core::wsfolder::root()),
+            memory: Arc::new(memory::Memory::default()),
         }
     }
 
@@ -218,6 +228,16 @@ impl Ctx {
     /// This engine with its ideas in `dir`: a test's own folder.
     pub fn with_ideas_dir(self, dir: PathBuf) -> Ctx {
         Ctx { ideas_dir: Arc::new(dir), ..self }
+    }
+
+    /// The folder the workspaces' folders sit in (`wsfolder`).
+    pub fn workspaces_dir(&self) -> &std::path::Path {
+        &self.workspaces_dir
+    }
+
+    /// This engine with its workspaces' folders in `dir`: a test's own.
+    pub fn with_workspaces_dir(self, dir: PathBuf) -> Ctx {
+        Ctx { workspaces_dir: Arc::new(dir), ..self }
     }
 
     /// The same engine, seen by a caller whose grant reaches `scope`. Every

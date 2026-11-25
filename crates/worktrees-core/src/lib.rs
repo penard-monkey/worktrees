@@ -41,6 +41,7 @@ pub mod kimi_usage;
 pub mod kimimodels;
 pub mod kimiplace;
 pub mod materialize;
+pub mod memory;
 pub mod mcpsetup;
 pub mod mcpmigrate;
 pub mod mention;
@@ -90,6 +91,7 @@ pub mod ideasessions;
 pub mod plans;
 pub mod ulid;
 pub mod workspaces;
+pub mod wsfolder;
 pub mod ui;
 
 pub use error::{Result, WtError};

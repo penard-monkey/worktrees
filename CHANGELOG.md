@@ -9,6 +9,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 - **Ideas and plans open in the main window (Ideas, beta).** In a workspace's overview, **plan ▸** and an idea now open in the main area, in the same editor the Ideas window has: saved as you type, Versions, Rename, Read, `[[` links, and the same handling when the file changed elsewhere. The button with the workspace's name goes back to the overview, and **Float** opens the document in the Ideas window, where it can stay open beside this one; each window follows what the other saves, and when both have unsaved text nothing is written over until you choose. Picking a place in the sidebar saves the document and closes it; if its text cannot be saved it stays open in its workspace and the window says so. The editor is fetched the first time you open a document, so the app's start does not carry it. **Edit in Ideas** in a work item's review is **Edit the plan** now, and opens it here.
 
+- **The engine for a workspace's memory.** A workspace can have a memory: a folder of its own, `~/.local/share/worktrees/workspaces/<id>/memory/`, with an index (`MEMORY.md`), notes, topics and files, kept as a git repository of its own that Worktrees commits after a quiet minute. It has no remote, nothing in it runs when Worktrees commits it (no hook, filter or monitor, whatever its own git config says), and an undo is a new commit. Nothing shows it yet: this is what the workspace screens will read. Desktop only; a paired device reaches none of it.
+
 ### Fixed
 
 - **Ideas: an open idea's title follows a heading changed elsewhere.** When another window or editor changed the first heading, the text was reloaded but the header kept the old title until the idea was opened again.

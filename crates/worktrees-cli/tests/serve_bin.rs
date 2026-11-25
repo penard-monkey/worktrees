@@ -1313,6 +1313,108 @@ fn remove_project_names_the_sessions_it_leaves_running() {
     assert_eq!(sb.terminate().code(), Some(0));
 }
 
+/// A workspace's memory over the wire, in a SPAWNED serve: made under the
+/// folder `WORKTREES_WORKSPACES_DIR` names and never `$HOME`'s, a save the next
+/// tick names at the mtime the row answered with, an edit made outside at one
+/// no row did, a commit, its diff, an undo. The audit log has the workspace,
+/// the change and a save's hash, never its text; the reads are no records.
+#[test]
+fn a_spawned_serves_workspace_memory_end_to_end() {
+    let mut sb = Sandbox::new("wsmem");
+    let folder = sb.root.join("ws-here");
+    let sf = sb.launch_env(&[], &[("WORKTREES_WORKSPACES_DIR", folder.to_str().unwrap()), ("GIT_DIR", "/nonexistent"), ("GIT_AUTHOR_NAME", "Somebody")]);
+    let mut ws = connect(&sf, "tauri://localhost");
+    listen(&mut ws, &["workspaces:memory"]);
+    let mut n = 0;
+    let mut call = |ws: &mut WebSocket<TcpStream>, cmd: &str, args: Value| {
+        n += 1;
+        rpc(ws, n, cmd, args)
+    };
+    let made = call(&mut ws, "workspace_create", json!({ "name": "Personal" }))["ok"].clone();
+    let id = made["workspaces"][0]["id"].as_str().unwrap_or_else(|| panic!("{made}")).to_string();
+    assert_eq!(call(&mut ws, "workspace_memory", json!({ "id": id }))["ok"]["made"], json!(false));
+    assert!(!folder.exists(), "asking makes nothing");
+    let m = call(&mut ws, "workspace_memory_make", json!({ "id": id }))["ok"].clone();
+    assert!(m["index"]["content"].as_str().is_some_and(|t| t.starts_with("# Memory: Personal")), "{m}");
+    let mem = folder.join(&id).join("memory");
+    assert!(mem.join(".git").is_dir());
+    assert!(!sb.root.join("home/.local/share/worktrees/workspaces").exists(), "not under HOME");
+    let wait = |ws: &mut WebSocket<TcpStream>, path: &str, want: &dyn Fn(u64) -> bool| -> u64 {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            assert!(Instant::now() < deadline, "no workspaces:memory for {path}");
+            let v: Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
+            if v["event"] != json!("workspaces:memory") {
+                continue;
+            }
+            assert_eq!(v["payload"]["id"], json!(id));
+            for c in v["payload"]["changed"].as_array().unwrap() {
+                let at = c["mtime_ms"].as_u64().unwrap();
+                if c["path"] == json!(path) && want(at) {
+                    return at;
+                }
+            }
+        }
+    };
+    // The memory's first sight is a baseline, so the poll must have had one:
+    // a file made now, and again until it is seen to move.
+    let probe = mem.join("topics/probe.md");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut i = 0;
+    loop {
+        assert!(Instant::now() < deadline, "the poll never saw the memory");
+        i += 1;
+        std::fs::write(&probe, "x".repeat(i)).unwrap();
+        ws.get_mut().set_read_timeout(Some(Duration::from_secs(4))).unwrap();
+        let Ok(msg) = ws.read() else { continue };
+        let v: Value = serde_json::from_str(msg.to_text().unwrap()).unwrap_or(Value::Null);
+        if v["event"] == json!("workspaces:memory") {
+            break;
+        }
+    }
+    ws.get_mut().set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    let secret = "# NAS\nSECRET-MEMORY\n";
+    let w = call(&mut ws, "workspace_memory_write", json!({ "id": id, "path": "topics/nas.md", "content": secret }))["ok"].clone();
+    let saved = w["mtime_ms"].as_u64().unwrap_or_else(|| panic!("{w}"));
+    assert_eq!(wait(&mut ws, "topics/nas.md", &|m| m == saved), saved, "its own save");
+    std::fs::write(mem.join("topics/nas.md"), "# NAS\nan agent's\n").unwrap();
+    let theirs = wait(&mut ws, "topics/nas.md", &|m| m != saved);
+    let e = call(&mut ws, "workspace_memory_write", json!({ "id": id, "path": "topics/nas.md", "content": secret, "expectedMtime": saved }));
+    assert!(e["err"].as_str().is_some_and(|e| e.contains("changed on disk")), "{e}");
+    let k = call(&mut ws, "workspace_memory_write", json!({ "id": id, "path": "topics/nas.md", "content": secret, "expectedMtime": theirs, "keepHistory": true }));
+    assert!(k["ok"]["mtime_ms"].is_u64(), "{k}");
+    let l = call(&mut ws, "workspace_memory_log", json!({ "id": id }))["ok"].clone();
+    let kept = l["changes"][0].clone();
+    assert!(kept["subject"].as_str().is_some_and(|s| s.starts_with("Before keeping your text")), "{l}");
+    let commit = kept["commit"].as_str().unwrap();
+    let d = call(&mut ws, "workspace_memory_diff", json!({ "id": id, "commit": commit, "path": "topics/nas.md" }))["ok"].clone();
+    assert!(d["file"]["diff"]["patch"].as_str().is_some_and(|p| p.contains("+an agent's")), "{d}");
+    let old = call(&mut ws, "workspace_memory_file", json!({ "id": id, "path": "topics/nas.md", "commit": commit }))["ok"].clone();
+    assert_eq!(old["content"], json!("# NAS\nan agent's\n"));
+    let r = call(&mut ws, "workspace_memory_revert", json!({ "id": id, "commit": commit }))["ok"].clone();
+    assert_eq!((r["change"].is_null(), &r["conflicts"]), (true, &json!(["topics/nas.md"])), "the file was saved over since: {r}");
+    let l = call(&mut ws, "workspace_memory_log", json!({ "id": id, "n": 1 }))["ok"].clone();
+    let edit = l["changes"][0]["commit"].as_str().unwrap().to_string();
+    assert_eq!(l["changes"][0]["kind"], json!("edit"), "the dirty tree was committed first: {l}");
+    let r = call(&mut ws, "workspace_memory_revert", json!({ "id": id, "commit": edit }))["ok"].clone();
+    assert_eq!(r["change"]["kind"], json!("undo"), "{r}");
+    assert_eq!(std::fs::read_to_string(mem.join("topics/nas.md")).unwrap(), "# NAS\nan agent's\n");
+    let p = call(&mut ws, "workspace_memory_file", json!({ "id": id, "path": "../chats.json" }));
+    assert!(p["err"].is_string(), "{p}");
+    drop(ws);
+    assert_eq!(sb.terminate().code(), Some(0));
+    let log = std::fs::read_to_string(sb.cfg().join("audit.jsonl")).unwrap();
+    assert!(!log.contains("SECRET-MEMORY"), "the memory's text reached the log");
+    let recs: Vec<Value> = log.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    let of = |row: &str| recs.iter().filter(|r| r["cmd"] == json!(row)).cloned().collect::<Vec<_>>();
+    assert_eq!((of("workspace_memory_make").len(), of("workspace_memory_write").len(), of("workspace_memory_revert").len()), (1, 3, 2));
+    assert_eq!((&of("workspace_memory_revert")[1]["detail"]["commit"], &of("workspace_memory_revert")[1]["detail"]["workspace"]), (&json!(edit), &json!(id)));
+    assert!(of("workspace_memory_write")[0]["detail"]["sha256"].is_string());
+    for r in ["workspace_memory", "workspace_memory_file", "workspace_memory_log", "workspace_memory_diff"] {
+        assert!(of(r).is_empty(), "{r} is a read");
+    }
+}
+
 /// The ideas folder of a SPAWNED serve is the one `WORKTREES_IDEAS_DIR`
 /// names, never `$HOME`'s, and an edit made outside the app reaches a client
 /// as `ideas:changed` carrying an mtime no row answered with — which is how a
