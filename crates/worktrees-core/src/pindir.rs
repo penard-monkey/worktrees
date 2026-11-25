@@ -183,6 +183,17 @@ unsafe fn errno() -> *mut libc::c_int {
     unsafe { libc::__errno_location() }
 }
 
+/// What an open file is.
+pub fn stat_file(f: &File) -> io::Result<Stat> {
+    let mut s = std::mem::MaybeUninit::<libc::stat>::zeroed();
+    // SAFETY: a live descriptor and room for one stat.
+    if unsafe { libc::fstat(f.as_raw_fd(), s.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: filled in by the call that just succeeded.
+    Ok(stat_of(&unsafe { s.assume_init() }))
+}
+
 // The fields' widths differ by platform.
 #[allow(clippy::unnecessary_cast)]
 fn stat_of(s: &libc::stat) -> Stat {

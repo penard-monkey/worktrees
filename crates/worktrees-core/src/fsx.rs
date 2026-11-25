@@ -568,7 +568,6 @@ mod tests {
         ("worktrees-core/src/fsx.rs", "tmp.push(format!", "the helper itself"),
         ("worktrees-core/src/pihosts.rs", "wt-pihosts-test-", "cfg(test) only: a DIRECTORY per test process, written through write_atomic"),
         ("worktrees-core/src/fsx.rs", "strip_suffix(\".tmp\")", "recognises the helper's own temps for a sweep; builds nothing"),
-        ("worktrees-core/src/memory.rs", "b\".DS_Store\\n.*.tmp\\n\"", "an exclude pattern over the helper's own temps; builds nothing"),
         ("worktrees-core/src/materialize.rs", ".wt-tmp-", "links only: symlink(2) makes the link and refuses an existing name"),
         ("worktrees-core/src/slots.rs", "format!(\".{}.tmp\", me.pid)", "$XDG_STATE_HOME, and the fd must stay locked across the rename"),
         ("worktrees-core/src/guidance.rs", "format!(\".tmp-{}-{}\"", "a staged DIRECTORY in the user's data dir"),
