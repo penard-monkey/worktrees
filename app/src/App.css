@@ -936,6 +936,8 @@ html[data-guides="off"] .kids > .places::after { display: none; }
   font-size: var(--fs-meta); color: var(--txt-dim);
 }
 .topbar-proj-name { min-width: 2ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A count never breaks from its glyph. */
+.topbar .s { white-space: nowrap; }
 .topbar-proj-sep { flex: none; color: var(--txt-mute); }
 /* The slug beside a renamed place. Quieter than the branch chip and NOT a
    chip — it is what the directory and the tmux session are called, so it has to
@@ -3970,14 +3972,14 @@ body.dragging .grip { cursor: grabbing; }
   border: 1px solid var(--line-strong); border-radius: var(--r-md);
   background: var(--bg-tree);
 }
-.ws-group[data-ws-color="blue"], .wsf[data-ws-color="blue"] { --ws-hue: var(--hue-blue); }
-.ws-group[data-ws-color="purple"], .wsf[data-ws-color="purple"] { --ws-hue: var(--hue-purple); }
-.ws-group[data-ws-color="green"], .wsf[data-ws-color="green"] { --ws-hue: var(--hue-green); }
-.ws-group[data-ws-color="amber"], .wsf[data-ws-color="amber"] { --ws-hue: var(--hue-amber); }
-.ws-group[data-ws-color="orange"], .wsf[data-ws-color="orange"] { --ws-hue: var(--hue-orange); }
-.ws-group[data-ws-color="red"], .wsf[data-ws-color="red"] { --ws-hue: var(--hue-red); }
-.ws-group[data-ws-color="teal"], .wsf[data-ws-color="teal"] { --ws-hue: var(--hue-teal); }
-.ws-group[data-ws-color="gray"], .wsf[data-ws-color="gray"] { --ws-hue: var(--hue-gray); }
+.ws-group[data-ws-color="blue"], .wsf[data-ws-color="blue"], .wsd-crumb[data-ws-color="blue"] { --ws-hue: var(--hue-blue); }
+.ws-group[data-ws-color="purple"], .wsf[data-ws-color="purple"], .wsd-crumb[data-ws-color="purple"] { --ws-hue: var(--hue-purple); }
+.ws-group[data-ws-color="green"], .wsf[data-ws-color="green"], .wsd-crumb[data-ws-color="green"] { --ws-hue: var(--hue-green); }
+.ws-group[data-ws-color="amber"], .wsf[data-ws-color="amber"], .wsd-crumb[data-ws-color="amber"] { --ws-hue: var(--hue-amber); }
+.ws-group[data-ws-color="orange"], .wsf[data-ws-color="orange"], .wsd-crumb[data-ws-color="orange"] { --ws-hue: var(--hue-orange); }
+.ws-group[data-ws-color="red"], .wsf[data-ws-color="red"], .wsd-crumb[data-ws-color="red"] { --ws-hue: var(--hue-red); }
+.ws-group[data-ws-color="teal"], .wsf[data-ws-color="teal"], .wsd-crumb[data-ws-color="teal"] { --ws-hue: var(--hue-teal); }
+.ws-group[data-ws-color="gray"], .wsf[data-ws-color="gray"], .wsd-crumb[data-ws-color="gray"] { --ws-hue: var(--hue-gray); }
 .ws-group + .ws-group, .drop-gap.ws + .ws-group { margin-top: var(--s3); }
 .ws-group.dragged { opacity: 0.4; }
 /* Everything Else: derived and fixed, so no grab cursor on its title. Its hue
@@ -4191,6 +4193,23 @@ body.dragging .ws-h { cursor: grabbing; }
 .wsf-chip-f { margin-left: 4px; }
 .wsf-chip-dot { display: inline-block; width: 6px; height: 6px; margin-left: 5px; border-radius: 50%; background: var(--warn); vertical-align: 1px; }
 @container (max-width: 250px) { .wsf-chip-i { display: none; } .wsf-chip { padding: 1px 6px; } }
+
+/* ── a place's workspace (workspace-view-design.md §6; WorkspaceDock.tsx) ── */
+/* It gives way right after the project, down to its icon: the place keeps its name. */
+.wsd-crumb { --ws-hue: var(--accent); flex: 0 500 auto; min-width: 2.9rem; display: inline-flex; align-items: center; gap: var(--s2); }
+.wsd-crumb .wsf-name { min-width: 0; border: 0; font-family: inherit; max-width: 16rem; }
+.wsd-crumb .wsf-name:hover { filter: brightness(1.1); }
+.wsd-crumb-in { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
+.wsd-crumb-in > svg { flex: none; }
+.wsd { flex: 1 1 auto; min-height: 0; min-width: 0; height: 100%; display: flex; flex-direction: column; background: var(--bg-abyss); }
+.wsd-h, .wsd-doc { flex: none; display: flex; align-items: center; gap: var(--s2); padding: 4px var(--s3); border-bottom: 1px solid var(--line); background: var(--bg-panel); min-height: 34px; box-sizing: border-box; }
+.wsd-name { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--txt-hi); font-size: var(--fs-label); font-weight: var(--fw-med); }
+.wsd-name svg { vertical-align: -2px; }
+.wsd-files { flex: 1 1 0; min-width: 0; border: 0; background: transparent; padding: 2px 0; color: var(--txt-hi); font: inherit; font-size: var(--fs-label); font-weight: var(--fw-med); text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wsd-doc .ctrl { flex: 0 1 auto; min-width: 0; color: var(--txt-hi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wsd-list { flex: none; max-height: 45%; overflow-y: auto; border-bottom: 1px solid var(--line); background: var(--bg-panel); padding: var(--s1) 0; }
+.wsd-read { position: relative; flex: 1 1 auto; min-height: 0; }
+.wsd-none { margin: 0; padding: var(--s5); color: var(--txt-hi); font-size: var(--fs-label); overflow-wrap: anywhere; }
 
 /* ── a workspace's plan and ideas (idea board phase 4, WorkspaceOverview.tsx) ── */
 /* Marked in the card's own color; its tint stays, or the card would lose its

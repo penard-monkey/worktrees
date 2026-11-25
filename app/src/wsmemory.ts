@@ -24,6 +24,19 @@ const monthOf = (f: MemoryFile): string => {
 /** How a file is called in the list: a note by its heading, anything else by its name. */
 export const fileName = (f: MemoryFile): string => (f.path.startsWith("notes/") && f.title ? f.title : f.name);
 
+/** How a path is called where a person reads it: a note by its heading (its path is
+ *  the hover text), anything else by its path. A note that is no longer in the
+ *  folder is called by the words its name was made of. */
+export function nameAt(v: MemoryView | null | undefined, path: string): string {
+  if (!path.startsWith("notes/")) return path;
+  const title = fileOf(v, path)?.title;
+  if (title) return title;
+  const words = /^notes\/(?:\d{4}-\d{2}-\d{2}-)?(.+?)(?:-[0-9a-z]{6})?\.md$/.exec(path)?.[1];
+  return words && !/^[0-9a-hjkmnp-tv-z]{26}$/i.test(words) ? titleOf(`${words}.md`) : "A note";
+}
+/** A chat's note in the memory folder: none until its first fold names it. */
+export const chatNote = (c: { note: string; note_exists: boolean }): string | null => (c.note_exists && c.note ? notePath(c.note) : null);
+
 const ORDER = ["", "notes", "topics", "files"];
 const rank = (n: string) => { const i = ORDER.indexOf(n); return i < 0 ? ORDER.length : i; };
 const newest = (a: MemoryFile, b: MemoryFile) => (a.name < b.name ? 1 : a.name > b.name ? -1 : 0);

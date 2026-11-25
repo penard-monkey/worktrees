@@ -69,6 +69,28 @@ export function lastView(raw: string | null): LastView | null {
   } catch { return null; }
 }
 
+/** The workspaces that hold a project, in their order. */
+export const placeWorkspaces = <T extends { id: string; projects: readonly { root: string }[] }>(all: readonly T[], root: string): T[] => all.filter((w) => w.projects.some((p) => p.root === root));
+/** Which of them a place is in: the card it was clicked in, while that still holds
+ *  its project; else the only one. `null`: none, or a person has to say. */
+export const placeWorkspace = <T extends { id: string }>(holds: readonly T[], from: string | null | undefined): T | null =>
+  holds.find((w) => w.id === from) ?? (holds.length === 1 ? holds[0] : null);
+/** Which card each place was last clicked in, as stored: bounded, and read as
+ *  anything may be in it. */
+export const PLACE_WS_KEY = "wt.place.ws";
+export function placeWsRead(raw: string | null): Record<string, string> {
+  try {
+    const v = JSON.parse(raw ?? "null") as Record<string, unknown> | null;
+    return v && typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).filter((e): e is [string, string] => typeof e[1] === "string" && !!e[1])) : {};
+  } catch { return {}; }
+}
+export const PLACE_WS_MAX = 200;
+export function placeWsSet(cur: Record<string, string>, key: string, ws: string | null): Record<string, string> {
+  const { [key]: _, ...rest } = cur;
+  if (!ws) return rest;
+  return Object.fromEntries([...Object.entries(rest), [key, ws] as const].slice(-PLACE_WS_MAX));
+}
+
 /** The counts beside a workspace's name. */
 export const wsCounts = (projects: number, liveChats = 0): string =>
   `${projects} project${projects === 1 ? "" : "s"}${liveChats ? ` · ${liveChats} chat${liveChats === 1 ? "" : "s"} live` : ""}`;

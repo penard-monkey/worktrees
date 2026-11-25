@@ -46,6 +46,17 @@ eq("a tab that is not drawn is Overview", [V.tabOr("plan", ["overview", "memory"
 eq("a chat that waits is first, one line each", V.attentionOf({ ...none, unsaved: { title: "P", elsewhere: null }, chats: [{ conv: "c1", title: "Who", failed: false }, { conv: "c2", title: "Sub", failed: true }] }).map((a) => a.text),
   ["“Who” is waiting for an answer.", "The fold of “Sub” did not finish.", "“P” has text that is not saved."]);
 eq("live chats are counted", [V.wsCounts(3, 2), V.wsCounts(1, 1), V.wsCounts(2, 0)], ["3 projects · 2 chats live", "1 project · 1 chat live", "2 projects"]);
+// ── a place's workspace ──
+const WS = [{ id: "a", projects: [{ root: "/p" }, { root: "/q" }] }, { id: "b", projects: [{ root: "/p" }] }, { id: "c", projects: [] }];
+const holds = (r) => V.placeWorkspaces(WS, r);
+eq("the workspaces that hold its project", [holds("/p").map((w) => w.id), holds("/q").map((w) => w.id), holds("/z")], [["a", "b"], ["a"], []]);
+eq("the card it was clicked in; else the only one; else nobody has said", [V.placeWorkspace(holds("/p"), "b")?.id, V.placeWorkspace(holds("/q"), null)?.id, V.placeWorkspace(holds("/p"), null), V.placeWorkspace(holds("/z"), "a")], ["b", "a", null, null]);
+eq("a card that no longer holds it is not it", [V.placeWorkspace(holds("/q"), "b")?.id, V.placeWorkspace(holds("/p"), "gone")], ["a", null]);
+eq("what is stored, as anything may be", ['{"x":"a","y":1,"z":""}', "[]", "{", null, "7"].map(V.placeWsRead), [{ x: "a" }, {}, {}, {}, {}]);
+const full = Object.fromEntries(Array.from({ length: V.PLACE_WS_MAX }, (_, i) => [`k${i}`, "a"]));
+const more = V.placeWsSet(full, "new", "b");
+eq("bounded: the oldest goes", [Object.keys(more).length, "k0" in more, more.new], [V.PLACE_WS_MAX, false, "b"]);
+eq("from All projects it is forgotten", V.placeWsSet({ x: "a", y: "b" }, "x", null), { y: "b" });
 eq("counts", [V.wsCounts(0), V.wsCounts(1), V.wsCounts(3)], ["0 projects", "1 project", "3 projects"]);
 
 // ── the pane's header by its own width (§4.1) ──

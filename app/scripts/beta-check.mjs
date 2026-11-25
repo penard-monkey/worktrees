@@ -169,6 +169,10 @@ ok(/const wsChats = useWsChats\(wsChatsOn && !!wsList,/.test(code) && /if \(!on\
 ok(/\{wsChatsOn && \(\s*<NavChats/.test(code) && (code.match(/<NavChats\b/g) ?? []).length === 1, "a card's Chats group is drawn only with it on");
 ok(/const wsMiddle = !wsShown \|\| !wsChatsOn \? null/.test(code) && (code.match(/<WorkspaceChatColumn\b/g) ?? []).length === 1 && /newChat=\{wsShown && wsChatsOn && /.test(code), "…and so are the middle column and New chat");
 ok(/waits=\{wsChatsOn && chatWaits\}/.test(code) && /\.\.\.\(wsChatsOn \? wsChats\.rows\(w\.id\) : \[\]\)\.map/.test(code), "…and the switch's dot and ⌘K's chats");
+// Slice 6: a place's crumb and dock tab, with the view on, its parts by their own.
+ok(/const placeWsAll = frameOn && selected && sel && wsList \?/.test(code) && /\(d\.key !== "workspace" \|\| placeWsAll\.length > 0\)/.test(code) && /\{placeWsAll\.length > 0 && \(\s*<span className="wsd-crumb"/.test(code), "a place's crumb and its dock tab are drawn only with the view on, for a project a workspace holds");
+ok(/const tabs = docChips\(\{ ideas: ideasOn, chats: wsChatsOn \}\);\s*const tab = tabs\.includes\(dockDoc\)/.test(code), "…and the tab's Memory, Plan and Ideas by their own helpers");
+{ const dock = read("../src/WorkspaceDock.tsx"); ok(!/useDoc\b|EditorHost|loadeditor|ChatPane|WorkspaceChat"|workspace_send|idea_write|memory_write/.test(dock), "…which read: no editor, no save and no chat in a place's dock"); }
 // A document opens in the view's tabs. The pane may stay mounted behind the
 // gate (a text that could not be saved waits in it), so what is held is that it
 // SHOWS and OPENS nothing.
@@ -197,7 +201,7 @@ const eff = code.match(/useEffect\(\(\) => \{\s*let alive = true;\s*invoke<WsLis
 ok(eff.length > 0, "workspaces_list is fetched with no beta in its way (its effect keys on the registry alone)");
 // The overview's own read (Ideas) keys on the list, so a changed plan is read
 // again; it never writes it. That one effect apart, no line ties the two.
-const ovEff = code.match(/useEffect\(\(\) => \{\s*if \(!ideasOn \|\| !wsOpen\) \{ setWsOv\(null\); return; \}[\s\S]*?\}, \[ideasOn, wsOpen, wsList, ideasTick\]\);/)?.[0] ?? "";
+const ovEff = code.match(/useEffect\(\(\) => \{\s*if \(!ideasOn \|\| !wsFor\) \{ setWsOv\(null\); return; \}[\s\S]*?\}, \[ideasOn, wsFor, wsList, ideasTick\]\);/)?.[0] ?? "";
 ok(/"workspace_overview"/.test(ovEff) && !/setWsList|workspaces_list/.test(ovEff), "the overview's effect reads workspace_overview and leaves the workspace list alone");
 ok(!/ideasOn[^\n;]*\bwsList\b|\bwsList\b[^\n;]*ideasOn/.test(code.replace(ovEff, "")), "no line ties the workspace list to ideasOn");
 // The words from before "All projects" existed are gone.

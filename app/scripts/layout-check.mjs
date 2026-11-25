@@ -362,13 +362,13 @@ if (S.SETTINGS_REV < 4) fail(`SETTINGS_REV is ${S.SETTINGS_REV} — the dock_sid
     if (a < 0 || b < 0) fail("App.tsx: `const lowerSet = …` … `const shownTab = …` is gone — this check evaluates it");
     else {
       const block = app.slice(a, b).replace(/<[A-Za-z|"\[\] ]+>/g, "").replace(/: Settings\["dock_lower"\]/g, "").replace(/\(el: HTMLElement \| null\)/g, "(el)");
-      const js = (await transformWithEsbuild(`export function build(env) { const { settings, dockShown, selected, eff, lowerFits, upperTab, useState, useRef, useCallback, ResizeObserver } = env;\n${block}\n return { lowerOn, shownTab, dockLower }; }`, "derive.ts", { loader: "ts", format: "esm" })).code;
+      const js = (await transformWithEsbuild(`export function build(env) { const { settings, dockShown, selected, dockTabHere, lowerFits, upperTab, useState, useRef, useCallback, ResizeObserver } = env;\n${block}\n return { lowerOn, shownTab, dockLower }; }`, "derive.ts", { loader: "ts", format: "esm" })).code;
       const { build } = await import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));
       const wrong = [];
       for (const lowerSet of [false, true]) for (const dockShown of [false, true]) for (const fits of [false, true]) for (const up of [false, true]) {
         const h = fits ? 490 : 250;
         const r = build({
-          settings: { dock_lower: lowerSet ? "terminal" : null }, dockShown, selected: { tmux_session: { up } }, eff: { dock_tab: "terminal" },
+          settings: { dock_lower: lowerSet ? "terminal" : null }, dockShown, selected: { tmux_session: { up } }, dockTabHere: "terminal",
           lowerFits: S.lowerFits, upperTab: S.upperTab, useState: () => [h, () => {}], useRef: () => ({ current: null }), useCallback: (f) => f, ResizeObserver: class {},
         });
         const tag = `set=${lowerSet} shown=${dockShown} fits=${fits} up=${up}`;
@@ -384,7 +384,7 @@ if (S.SETTINGS_REV < 4) fail(`SETTINGS_REV is ${S.SETTINGS_REV} — the dock_sid
   // asks "what is on screen" reads `shownTab` (the reader's guard once read
   // the preference instead, and kept a reader up over the Terminal tab).
   const readers = app.split("\n").map((l, i) => [l, i]).filter(([l]) => /eff\.dock_tab/.test(l));
-  const allowed = (l) => /const shownTab = upperTab\(eff\.dock_tab/.test(l) || /prsGone/.test(l) || /d\.tab !== eff\.dock_tab/.test(l);
+  const allowed = (l) => /const dockTabHere = eff\.dock_tab === "workspace" && placeWsAll\.length === 0 \? "files" : eff\.dock_tab;/.test(l) || /prsGone/.test(l) || /d\.tab !== eff\.dock_tab/.test(l);
   const stray = readers.filter(([l]) => !allowed(l));
   if (stray.length) fail(`App.tsx reads the STORED tab where it means the shown one: ${stray.map(([l, i]) => `${i + 1}: ${l.trim()}`).join(" | ")}`);
   else ok("only shownTab's definition and the stored-tab bookkeeping read eff.dock_tab");
@@ -403,7 +403,7 @@ if (S.SETTINGS_REV < 4) fail(`SETTINGS_REV is ${S.SETTINGS_REV} — the dock_sid
   else {
     if (terms !== 2 || !body.includes("<TerminalTabs ") || !lower.includes("<TerminalTabs ")) fail(`TerminalTabs renders ${terms} times — want one in the tab chain, one in the lower slot`);
     if (/eff\.dock_tab/.test(body)) fail("the dock body branches on `eff.dock_tab` — with the Terminal below, a stored \"terminal\" tab would mount the shells twice; branch on `shownTab`");
-    if (!/const shownTab = upperTab\(eff\.dock_tab, dockLower\);/.test(app)) fail("`shownTab` is not `upperTab(eff.dock_tab, dockLower)`");
+    if (!/const shownTab = upperTab\(dockTabHere, dockLower\);/.test(app)) fail("`shownTab` is not `upperTab(dockTabHere, dockLower)`");
     if (!/\{lowerOn && \(/.test(app.slice(app.indexOf("{/* ── the lower slot"), app.indexOf('<div className="dock-lower"')))) fail("the lower slot is not gated on `lowerOn`");
     if (!/findOpen=\{findOn === "lower"\}/.test(lower)) fail("the lower shells answer the DOCK's find bar — ⌘F would open two bars");
     if (!/focusToken=\{termFocus \+ lowerFocus\}/.test(lower)) fail("the lower shells cannot be focused on their own (the rail icon's click)");

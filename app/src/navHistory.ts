@@ -5,7 +5,7 @@
 // the current one, or nothing. `app/scripts/navhistory-check.mjs` evaluates
 // this file as-is. Design: docs/proposals/nav-history.md.
 
-export type DockTab = "files" | "terminal" | "docs" | "plan" | "prs";
+export type DockTab = "files" | "terminal" | "docs" | "plan" | "prs" | "workspace";
 
 /** A workspace view's tabs (wsview.ts says which are drawn). */
 export type WsTab = "overview" | "memory" | "plan" | "ideas" | "chats";
@@ -137,7 +137,7 @@ export const prune = (h: History, dead: (l: Loc) => boolean): History => {
 };
 
 const base = (p: string) => p.slice(p.lastIndexOf("/") + 1);
-const TAB_LABEL: Record<DockTab, string> = { files: "Files", terminal: "Terminal", docs: "Docs", plan: "Plan", prs: "Pull requests" };
+const TAB_LABEL: Record<DockTab, string> = { files: "Files", terminal: "Terminal", docs: "Docs", plan: "Plan", prs: "Pull requests", workspace: "Workspace" };
 
 /** A tab's name, on the tab itself and wherever one is named. */
 export const WS_TAB_LABEL: Record<WsTab, string> = { overview: "Overview", memory: "Memory", plan: "Plan", ideas: "Ideas", chats: "Chats" };

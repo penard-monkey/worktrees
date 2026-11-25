@@ -129,6 +129,8 @@ async function tabs(page, tag, eng) {
   ok(await until(page, () => /AGENT SAYS/.test(document.querySelector("[data-testid=main-doc] [data-testid=ideas-read]")?.innerText ?? "")), `${tag} an agent's edit is read as it lands`);
   // ── a chat's note, from the Chats tab ──
   await tab(page, "chats");
+  const noted = (await call(page, "workspace_chats", { id: ws })).chats;
+  ok(noted.some((c) => c.note === "") && (await page.locator("[data-testid=ws-chats-note]").count()) === noted.filter((c) => c.note && c.note_exists).length, `${tag} a chat that was never folded has no note to open`);
   await page.locator("[data-testid=ws-chats-note]").first().click();
   ok(await isTab(page, "memory") && await until(page, () => /^notes\//.test(document.querySelector("[data-testid=main-doc]")?.dataset.doc ?? "")), `${tag} a folded chat's note opens from the Chats tab`);
 }
