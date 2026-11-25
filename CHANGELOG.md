@@ -16,10 +16,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ### Changed
 
+- **Restore last also restores a workspace's view.** With it on (Settings → General), a relaunch comes back to the workspace, the tab and the chat it was quit on.
 - **A waiting agent shows on its project's and its workspace's dot even while others work.** The dot said "working" whenever anything was, so one busy lane hid one that waited for you. Waiting comes first now.
 
 ### Fixed
 
+- **A workspace changed in the Ideas window shows in the main one.** Linking an idea to a workspace, or making a plan its, left the main window's list as it was until the app was opened again.
+- **Ideas: the window's first open is not over the main one.** With no remembered position it opened exactly on top; it opens beside it now, or lower when there is no room.
 - **Ideas: an open idea's title follows a heading changed elsewhere.** When another window or editor changed the first heading, the text was reloaded but the header kept the old title until the idea was opened again.
 
 ## [0.53.1] - 2026-11-23
