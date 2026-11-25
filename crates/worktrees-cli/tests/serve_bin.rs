@@ -845,6 +845,7 @@ fn a_workspace_chat_from_start_to_the_workspaces_removal() {
     let cli = |args: &[&str]| Command::new(bin()).args(args).env("HOME", sb.root.join("home")).env("XDG_CONFIG_HOME", sb.root.join("xdg")).env("WORKTREES_WORKSPACES_DIR", &folder).output().unwrap();
     let o = cli(&["projects", "add", mem.to_str().unwrap()]);
     assert!(!o.status.success() && String::from_utf8_lossy(&o.stderr).contains("never a project"), "{o:?}");
+    assert!(!mem.join(".git/refs/heads/main").exists() && std::fs::read_dir(mem.join(".git/refs/heads")).unwrap().count() == 0, "init_repo committed before it refused");
     std::fs::remove_dir_all(folder.join(&id)).unwrap();
 
     // A refused start (no `--session-id`) leaves nothing at all.
@@ -866,19 +867,20 @@ fn a_workspace_chat_from_start_to_the_workspaces_removal() {
     assert_eq!(got[0], home.to_string_lossy(), "the cwd is the workspace's folder");
     assert_eq!(&got[1..5], ["--name", &session, "--session-id", sid]);
     assert_eq!(got.last().unwrap(), &format!("Read chats/{conv}/start.md and begin."));
-    assert!(got.windows(2).any(|w| w == ["--settings", r#"{"autoMemoryEnabled":false}"#]), "{got:?}");
+    let rules = format!(r#"{{"autoMemoryEnabled":false,"permissions":{{"allow":["Read(/{a}/**)"],"deny":["Edit(/{a}/**)"]}}}}"#);
+    assert!(got.windows(2).any(|w| w == ["--settings", rules.as_str()]), "{got:?}");
     assert!(!got.iter().any(|w| w.starts_with("--add-dir")), "{got:?}");
     let own = folder.join(&id).join("chats").join(&conv);
     assert!(std::fs::read_to_string(own.join("start.md")).unwrap().contains("memory/MEMORY.md"));
     let ctx = std::fs::read_to_string(own.join("context.md")).unwrap();
-    assert!(ctx.contains(&format!("- `alpha`: `{a}` — registered, read by asking\n  - place `(main)`")), "{ctx}");
+    assert!(ctx.contains(&format!("- `alpha`: `{a}` — registered, read\n  - place `(main)`")), "{ctx}");
     assert!(ctx.contains(&format!("- `priv`: `{private}` — registered, NOT READ (private)\n\n")), "{ctx}");
 
     // The list, from the record and tmux.
     let l = call("workspace_chats", json!({ "id": id })).unwrap();
     assert_eq!((l["name"].as_str(), l["folder"].as_str()), (Some("Home"), folder.join(&id).to_str()), "{l}");
     assert_eq!((l["chats"][0]["state"].as_str(), l["chats"][0]["note_exists"].as_bool()), (Some("running"), Some(false)), "{l}");
-    assert_eq!((l["projects"][0]["reads"].as_str(), l["projects"][1]["reads"].as_str(), l["projects"][1]["why"].as_str()), (Some("ask"), Some("no"), Some("private")), "{l}");
+    assert_eq!((l["projects"][0]["reads"].as_str(), l["projects"][1]["reads"].as_str(), l["projects"][1]["why"].as_str()), (Some("yes"), Some("no"), Some("private")), "{l}");
     let places = call("list_places", json!({ "repo": a })).unwrap();
     assert_eq!(places["places"][0]["tmux_session"]["up"], json!(false), "a chat is no place's session: {places}");
 

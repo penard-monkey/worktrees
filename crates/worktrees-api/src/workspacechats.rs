@@ -187,7 +187,7 @@ pub fn workspace_chat_start(ctx: &Ctx, id: String) -> Result<Value, String> {
     let w = workspace(ctx, &id)?;
     // MERGE SEAM (the memory lane): `memory::init_at` and the commit of a
     // dirty tree go here, before the chat is prepared.
-    let (c, session) = chats::start_at(ctx.workspaces_dir(), &id, |conv| chats::context_text(&context(ctx, &w, conv)))?;
+    let (c, session) = chats::start_at(ctx.workspaces_dir(), &w, |conv| chats::context_text(&context(ctx, &w, conv)))?;
     Ok(json!({ "id": id, "chat": c, "session": session }))
 }
 
@@ -204,7 +204,7 @@ pub fn workspace_chat_resume(ctx: &Ctx, id: String, conv: String) -> Result<Valu
         return Err(format!("chat {conv} is already running (tmux session {})", chats::session_name(&conv)));
     }
     chats::write_context_at(root, &id, &conv, &chats::context_text(&context(ctx, &w, &conv)))?;
-    let session = chats::launch_at(root, &id, &conv, Start::Resume, None)?;
+    let session = chats::launch_at(root, &w, &conv, Start::Resume, None)?;
     touched(ctx, &id, &conv);
     Ok(json!({ "id": id, "conv": conv, "session": session }))
 }

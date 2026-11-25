@@ -301,7 +301,6 @@ pub struct Added {
 /// as `worktrees projects add` does, so the two never disagree.
 pub fn add_project(ctx: &Ctx, dir: String) -> Result<Added, String> {
     let project = Project::discover(Path::new(&dir)).map_err(|e| e.msg)?;
-    worktrees_core::wsfolder::refuse_project(Path::new(&project.main_root), ctx.workspaces_dir())?;
     crate::projects::import_app_projects(ctx);
     worktrees_core::registry::add(&project.main_root)?;
     let adopted = worktrees_core::adopt::adopt(&project);
