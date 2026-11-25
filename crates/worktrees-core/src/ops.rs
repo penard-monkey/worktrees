@@ -322,6 +322,7 @@ fn ai_launch_inner(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> crat
                 resume: false,
                 resume_id: None,
                 session_id: None,
+                session_settings: None,
                 force: false,
             }
         }

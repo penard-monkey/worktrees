@@ -139,6 +139,7 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
     let mut last = PaneList::fetch_unnamed().unwrap_or_default().fingerprint();
     let mut busy_gate = BusyGate::default();
     let mut last_ideas: Option<crate::watch::IdeaSessions> = None;
+    let mut last_chats: Option<crate::watch::WorkspaceSessions> = None;
     let mut last_models: Option<Vec<(i32, Option<String>)>> = None;
     let mut ticks: u32 = 0;
     // Inbox requests the last tick left waiting for a client, for its log line.
@@ -327,7 +328,7 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
                 }
             }
         }
-        let ((busy, waiting, models), idea_sessions) = claude_activity(watch, &mut panes, &fp);
+        let ((busy, waiting, models), idea_sessions, chats) = claude_activity(watch, &mut panes, &fp);
         let idea_sessions = if idea_sessions.live.is_empty() { idea_sessions } else { idea_sessions.with_ideas(pollctx.ideas_dir()) };
         // Change-gated like `sessions:busy`, and pushed on the first tick
         // whatever it holds, so a client that declares it has a state.
@@ -335,6 +336,7 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
             pollctx.emit("ideas:sessions", payload(&idea_sessions));
             last_ideas = Some(idea_sessions);
         }
+        crate::workspacechats::tick(&pollctx, chats, &mut last_chats);
         // Every harness without a probe file, read once each (`harness_feed`:
         // codex's rollouts, pi's session files).
         let lanes: Vec<(&'static str, LaneTick)> = provider::PROVIDERS
