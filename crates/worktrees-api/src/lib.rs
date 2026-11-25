@@ -69,6 +69,7 @@ pub mod harness_updates;
 pub mod keepawake;
 pub mod log;
 pub mod macprivacy;
+pub mod memory;
 pub mod meta;
 pub mod project;
 pub mod projects;
@@ -76,6 +77,7 @@ pub mod status;
 pub mod term;
 pub mod watch;
 pub mod workspace;
+pub mod workspacechats;
 pub mod workspaces;
 pub mod util;
 pub mod viewer;
@@ -185,6 +187,15 @@ pub struct Ctx {
     /// that runs the engine in-process moves it with [`Ctx::with_ideas_dir`],
     /// never with `set_var`.
     ideas_dir: Arc<PathBuf>,
+    /// The folder of the workspaces' own folders (`worktrees_core::wsfolder::
+    /// root()` at start, so `WORKTREES_WORKSPACES_DIR` moves it for a spawned
+    /// engine). A test moves it with [`Ctx::with_workspaces_dir`].
+    workspaces_dir: Arc<PathBuf>,
+    /// `workspaces.json`, which says which workspaces there are. A test
+    /// moves it with [`Ctx::with_workspaces_file`].
+    workspaces_file: Arc<PathBuf>,
+    /// Which workspaces' memory is someone's to commit (`memory`).
+    pub memory: Arc<memory::Memory>,
     /// The hold on this host's idle sleep (`keepawake`). One per engine.
     pub keep_awake: Arc<keepawake::KeepAwake>,
 }
@@ -207,6 +218,9 @@ impl Ctx {
             console: true,
             acting: Arc::new(None),
             ideas_dir: Arc::new(worktrees_core::ideas::dir()),
+            workspaces_dir: Arc::new(worktrees_core::wsfolder::root()),
+            memory: Arc::new(memory::Memory::default()),
+            workspaces_file: Arc::new(worktrees_core::workspaces::path()),
         }
     }
 
@@ -218,6 +232,26 @@ impl Ctx {
     /// This engine with its ideas in `dir`: a test's own folder.
     pub fn with_ideas_dir(self, dir: PathBuf) -> Ctx {
         Ctx { ideas_dir: Arc::new(dir), ..self }
+    }
+
+    /// The folder of the workspaces' own folders (`wsfolder`).
+    pub fn workspaces_dir(&self) -> &std::path::Path {
+        &self.workspaces_dir
+    }
+
+    /// This engine with its workspaces' folders in `dir`: a test's own.
+    pub fn with_workspaces_dir(self, dir: PathBuf) -> Ctx {
+        Ctx { workspaces_dir: Arc::new(dir), ..self }
+    }
+
+    /// `workspaces.json`.
+    pub fn workspaces_file(&self) -> &std::path::Path {
+        &self.workspaces_file
+    }
+
+    /// This engine with its workspaces listed in `file`: a test's own.
+    pub fn with_workspaces_file(self, file: PathBuf) -> Ctx {
+        Ctx { workspaces_file: Arc::new(file), ..self }
     }
 
     /// The same engine, seen by a caller whose grant reaches `scope`. Every

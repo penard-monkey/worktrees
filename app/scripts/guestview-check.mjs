@@ -47,7 +47,7 @@ const expect = (what, got, want) => check(same(got, want), `${what}${same(got, w
 
 // ── 1. the graph ─────────────────────────────────────────────────────────────
 const FORBIDDEN_MODULES = ["ipc.ts", "ipcws.ts", "chat.ts", "ChatPane.tsx", "guestboot.ts", "ipcremote.ts"];
-const FORBIDDEN_ROWS = /["'`](agent_send|agent_answer\w*|agent_interrupt|agent_command|idea_send|idea_answer\w*|idea_interrupt)["'`]/;
+const FORBIDDEN_ROWS = /["'`](agent_send|agent_answer\w*|agent_interrupt|agent_command|idea_send|idea_answer\w*|idea_interrupt|workspace_send|workspace_answer\w*|workspace_interrupt)["'`]/;
 
 /** The runtime relative imports of `src`: every `import … from "./x"` that is
  *  not `import type`, and every dynamic `import("./x")`. CSS is not code. */

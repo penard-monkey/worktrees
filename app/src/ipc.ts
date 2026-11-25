@@ -527,6 +527,11 @@ export const CONSOLE_ROWS: readonly string[] = [
   // named workspaces (idea board phase 2): desktop only
   "workspaces_list", "workspace_create", "workspace_rename", "workspace_remove", "workspace_set_projects",
   "workspace_reorder", "workspace_set_color",
+  // workspace chats: Claude in a workspace's own folder, desktop only
+  "workspace_chats", "workspace_chat_start", "workspace_chat_resume", "workspace_chat_close", "workspace_chat_remove",
+  "workspace_chat_rename", "workspace_turns", "workspace_turn_text", "workspace_tool_call", "workspace_prompt",
+  "workspace_answer", "workspace_answer_text", "workspace_answer_many", "workspace_send", "workspace_interrupt",
+  "workspace_term_open",
   // group chat's shares (PR A): the owner's acts and listings
   "share_create", "share_again", "share_allow", "share_remove_guest", "share_stop", "guest_places_hide",
   "share_requests_list", "share_request_dismiss", "shares_all", "guests_list", "guest_remove", "owner_set_name",
@@ -539,6 +544,9 @@ export const CONSOLE_ROWS: readonly string[] = [
   // and what a plan does (phase 5)
   "plan_set_project", "plan_start", "plan_link_place",
   "workspace_from_plan", "workspace_set_plan", "workspace_link_idea", "workspace_unlink_idea", "workspace_overview",
+  // A workspace's memory: the host's own folder, the console's.
+  "workspace_memory", "workspace_memory_make", "workspace_memory_file", "workspace_memory_image", "workspace_memory_write",
+  "workspace_memory_put", "workspace_memory_log", "workspace_memory_diff", "workspace_memory_revert",
 ];
 
 /** The device's capabilities on the host this window drives, from the remote

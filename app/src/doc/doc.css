@@ -64,6 +64,8 @@
 .ix-editor[hidden] { display: none; }
 .ix-read { position: absolute; inset: 0; overflow-y: auto; }
 .ix-read > .md { margin: 0 auto; padding-top: var(--s5); }
+.ix-pic { max-width: 100%; height: auto; border-radius: 6px; }
+.ix-pic-note { color: var(--txt); font-style: italic; }
 .ix-editor-wait { margin: 0; padding: var(--s5); color: var(--txt); font-size: var(--fs-body); }
 /* In the main window: the main area's own column, under its header. */
 .ix-doc.ix-in-main { flex: 1 1 auto; background: var(--bg-abyss); color: var(--txt); font-size: var(--fs-body); }

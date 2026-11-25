@@ -10,8 +10,8 @@ import { DocMenu, LinkPicker, VersionsPanel, type DocAct } from "./DocParts";
 import { EditorHost } from "./EditorHost";
 import type { SaveState } from "./ideasave";
 import { commentOnly } from "./ideatext";
-import type { DocTarget } from "./source";
-import { nounOf, type DocHandle, type Open } from "./useDoc";
+import type { DocImage, DocSource, DocTarget } from "./source";
+import { errText, nounOf, type DocHandle, type Open } from "./useDoc";
 import { useTier } from "./useTier";
 
 function saveWords(s: SaveState): string {
@@ -31,6 +31,20 @@ function saveWords(s: SaveState): string {
   }
 }
 
+/** An image in Read: as its source answers it, or the words of why not. */
+function DocPicture({ source, from, src, alt }: { source: DocSource; from: string; src: string; alt: string }) {
+  const [img, setImg] = useState<DocImage | null>(null);
+  useEffect(() => {
+    let gone = false;
+    source.image?.(from, src).then((i) => { if (!gone) setImg(i); }, (e) => { if (!gone) setImg({ note: errText(e) }); });
+    return () => { gone = true; };
+  }, [source, from, src]);
+  if (!img) return <span className="ix-pic-note">{alt || src}</span>;
+  return "src" in img
+    ? <img className="ix-pic" data-testid="doc-image" src={img.src} alt={alt} title={src} />
+    : <span className="ix-pic-note" data-testid="doc-image-note">{alt ? `${alt}: ` : ""}{img.note}</span>;
+}
+
 /** Read: the dock's markdown renderer on the source's body. HTML comments draw
  *  as nothing — later phases' anchors are comments (§4.4); other raw HTML stays
  *  literal, inert text. A mermaid fence is code here: mermaid lives in the docs
@@ -38,11 +52,11 @@ function saveWords(s: SaveState): string {
 function ReadView({ open, text, follow }: { open: Open; text: string; follow(to: DocTarget): void }) {
   const { source, id } = open;
   const body = useMemo(() => source.readBody(text), [source, text]);
+  const draw = useMemo(() => source.image && ((src: string, alt: string) => <DocPicture source={source} from={id} src={src} alt={alt} />), [source, id]);
   return (
     <div className="ix-read" data-testid="ideas-read">
       <Markdown src={body} renderHtml={(raw) => (commentOnly(raw) ? "" : null)}
-        renderImage={source.image && ((src, alt) => source.image!(src, alt, id))}
-        onLink={(href) => { const to = source.link(href, id); if (to) follow(to); }} />
+        renderImage={draw} onLink={(href) => { const to = source.target(id, href); if (to) follow(to); }} />
     </div>
   );
 }

@@ -5,7 +5,6 @@
 //
 // A source is a FAMILY of documents, and a document is named in it by one
 // string: an idea's id, or for a memory source bound to its workspace, a path.
-import type { ReactNode } from "react";
 import { invoke, listen } from "../ipc";
 import type { DocKind } from "./docmode";
 import type { Changed, Saved } from "./ideasave";
@@ -24,9 +23,12 @@ export type Doc = {
   /** The id asked for was merged into this one. */
   merged?: { id: string; title: string | null; date: string | null };
 };
-export type Version = { version: string; at: string; size: number; title: string | null };
+/** `size` is the copy's bytes, where the source knows it (a memory's versions
+ *  are commits, and a commit's list does not say). */
+export type Version = { version: string; at: string; size?: number; title: string | null };
 
 /** One document, wherever it comes from: its source, and its name in it. */
+export type DocImage = { src: string; size: number } | { note: string };
 export type DocTarget = { source: DocSource; name: string };
 export const sameDoc = (a: DocTarget | null, b: DocTarget | null): boolean =>
   !!a && !!b && a.source === b.source && a.name === b.name;
@@ -51,11 +53,12 @@ export interface DocSource {
   keepAsNew?(title: string, text: string): Promise<Doc>;
   /** The text as Read draws it (the frontmatter is the file's, not the prose). */
   readBody(text: string): string;
-  /** A link in document `from`: the document it points at, in this source or
+  /** The document a link written in `from` points at, in this source or
    *  another. `null`: not one, and nothing happens. */
-  link(href: string, from: string): DocTarget | null;
-  /** An image in document `from`. Left out: its words are drawn instead. */
-  image?(src: string, alt: string, from: string): ReactNode;
+  target(from: string, href: string): DocTarget | null;
+  /** An image written in `from`, as an `<img>` takes it, or why it is not
+   *  shown. Left out: its words are drawn instead. */
+  image?(from: string, src: string): Promise<DocImage>;
   /** The refusals this source's rows give, when they are not the ideas'
    *  (ideasave.ts `isStale`, `isGone`). */
   readonly refusals?: { stale(e: string): boolean; gone(e: string): boolean };
@@ -66,7 +69,7 @@ export const ideaDocs: DocSource = {
   noun: "idea",
   // `idea:` links become `#idea:` ones, which the shared renderer links.
   readBody: (text) => readableLinks(bodyOf(text)),
-  link(href) {
+  target(_from, href) {
     const id = ideaHref(href);
     return id ? { source: ideaDocs, name: id } : null;
   },
