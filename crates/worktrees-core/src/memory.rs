@@ -133,6 +133,8 @@ pub struct Index {
     pub path: String,
     pub content: String,
     pub mtime_ms: u64,
+    /// [`Doc::rev`].
+    pub rev: String,
     pub size: u64,
     pub budget: u64,
     pub over_budget: bool,
@@ -153,6 +155,9 @@ pub struct Doc {
     pub title: String,
     pub content: String,
     pub mtime_ms: u64,
+    /// Which bytes these are: opaque, equal for equal bytes and for no others.
+    /// What a save names its base by.
+    pub rev: String,
     pub size: u64,
 }
 
@@ -162,7 +167,21 @@ pub struct Saved {
     pub file: String,
     pub title: String,
     pub mtime_ms: u64,
+    /// [`Doc::rev`], of what was written.
+    pub rev: String,
     pub size: u64,
+}
+
+/// What a save says the file was when it was read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Base {
+    /// There was none: the save MAKES the file.
+    None,
+    /// These bytes ([`Doc::rev`]).
+    Rev(String),
+    /// A file of this mtime. Two writes can share one: a client that knows
+    /// `rev` sends that.
+    Mtime(u64),
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
@@ -306,6 +325,12 @@ fn mtime_ms(md: &fs::Metadata) -> u64 {
     md.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
+/// [`Doc::rev`]: 128 bits of the bytes' SHA-256.
+pub fn rev_of(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).iter().take(16).map(|b| format!("{b:02x}")).collect()
+}
+
 fn name_of(path: &str) -> String {
     path.rsplit('/').next().unwrap_or(path).to_string()
 }
@@ -337,8 +362,12 @@ fn title_for(path: &str, text: &str) -> String {
 
 struct Found {
     path: String,
-    size: u64,
-    mtime_ms: u64,
+    sig: Sig,
+}
+
+fn sig_of(md: &fs::Metadata) -> Sig {
+    use std::os::unix::fs::MetadataExt;
+    Sig { mtime_ms: mtime_ms(md), size: md.len(), changed_ns: i128::from(md.ctime()) * 1_000_000_000 + i128::from(md.ctime_nsec()), ino: md.ino() }
 }
 
 #[derive(Default)]
@@ -393,7 +422,7 @@ fn walk(mem: &Path) -> std::io::Result<Walk> {
                     todo.push((path, depth + 1));
                 }
             } else if md.is_file() {
-                out.files.push(Found { path, size: md.len(), mtime_ms: mtime_ms(&md) });
+                out.files.push(Found { path, sig: sig_of(&md) });
             } else {
                 out.skipped.push(Skipped { path, why: "not a regular file" });
             }
@@ -402,24 +431,34 @@ fn walk(mem: &Path) -> std::io::Result<Walk> {
     Ok(out)
 }
 
-/// What a tick compares: each file's mtime and size. The size too, because two
-/// writes inside one millisecond leave the mtime where it was. A missing
-/// folder is no files; a folder that cannot be read is an error, never "all
-/// removed".
-pub type Stamp = BTreeMap<String, (u64, u64)>;
+/// What a tick compares of one file. The mtime alone would miss a second write
+/// in its millisecond, and a tool that puts the old one back; the size with it,
+/// one that leaves the size too. Nothing but a write moves the change time,
+/// and a file put in another's place is another file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Sig {
+    pub mtime_ms: u64,
+    pub size: u64,
+    pub changed_ns: i128,
+    pub ino: u64,
+}
+
+/// Every file's. A missing folder is no files; a folder that cannot be read is
+/// an error, never "all removed".
+pub type Stamp = BTreeMap<String, Sig>;
 
 pub fn stamp_at(root: &Path, id: &str) -> Result<Stamp, String> {
     let mem = dir_at(root, id)?;
     match walk(&mem) {
-        Ok(w) => Ok(w.files.into_iter().map(|f| (f.path, (f.mtime_ms, f.size))).collect()),
+        Ok(w) => Ok(w.files.into_iter().map(|f| (f.path, f.sig)).collect()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Stamp::new()),
         Err(e) => Err(format!("{}: {e}", mem.display())),
     }
 }
 
-/// What moved between two stamps: `(changed with mtimes, removed)`.
-pub fn changed_since(before: &Stamp, now: &Stamp) -> (Vec<(String, u64)>, Vec<String>) {
-    let changed = now.iter().filter(|(p, s)| before.get(*p) != Some(s)).map(|(p, s)| (p.clone(), s.0)).collect();
+/// What moved between two stamps: `(changed, removed)`.
+pub fn changed_since(before: &Stamp, now: &Stamp) -> (Vec<(String, Sig)>, Vec<String>) {
+    let changed = now.iter().filter(|(p, s)| before.get(*p) != Some(s)).map(|(p, s)| (p.clone(), *s)).collect();
     let removed = before.keys().filter(|p| !now.contains_key(*p)).cloned().collect();
     (changed, removed)
 }
@@ -597,7 +636,7 @@ impl Repo {
     fn pathspecs(&self) -> Result<Vec<String>, String> {
         let w = walk(&self.mem).map_err(|e| format!("{}: {e}", self.mem.display()))?;
         let nested = w.skipped.iter().filter(|s| s.why.contains("repository")).map(|s| s.path.clone());
-        let large = w.files.iter().filter(|f| f.size > MAX_COMMIT_BYTES).map(|f| f.path.clone());
+        let large = w.files.iter().filter(|f| f.sig.size > MAX_COMMIT_BYTES).map(|f| f.path.clone());
         Ok(std::iter::once(":/".to_string()).chain(nested.chain(large).map(|p| format!(":(top,exclude,literal){p}"))).collect())
     }
 
@@ -723,13 +762,13 @@ pub fn list_at(root: &Path, id: &str) -> Result<Listing, String> {
     let mut out = Listing { count: w.files.len(), truncated: w.truncated, skipped: w.skipped, ..Listing::default() };
     let mut by: BTreeMap<String, Vec<File>> = BTreeMap::new();
     for f in w.files {
-        out.bytes += f.size;
-        if f.size > MAX_COMMIT_BYTES {
+        out.bytes += f.sig.size;
+        if f.sig.size > MAX_COMMIT_BYTES {
             out.skipped.push(Skipped { path: f.path.clone(), why: "too large for the history" });
         }
         let top = f.path.split_once('/').map(|(t, _)| t.to_string()).unwrap_or_default();
         let title = matches!(ext_of(&f.path).as_str(), "md" | "markdown").then(|| peek_title(&mem, &f.path)).flatten();
-        by.entry(top).or_default().push(File { name: name_of(&f.path), kind: kind_of(&f.path), size: f.size, mtime_ms: f.mtime_ms, title, path: f.path });
+        by.entry(top).or_default().push(File { name: name_of(&f.path), kind: kind_of(&f.path), size: f.sig.size, mtime_ms: f.sig.mtime_ms, title, path: f.path });
     }
     let rank = |n: &str| ["", "notes", "topics", FILES].iter().position(|x| *x == n).unwrap_or(9);
     for (name, mut files) in by {
@@ -751,6 +790,7 @@ pub fn index_at(root: &Path, id: &str) -> Result<Option<Index>, String> {
             path: d.path,
             content: d.content,
             mtime_ms: d.mtime_ms,
+            rev: d.rev,
             size: d.size,
             budget: INDEX_BUDGET,
             over_budget: d.size > INDEX_BUDGET,
@@ -795,7 +835,16 @@ pub fn read_at(root: &Path, id: &str, path: &str) -> Result<Doc, String> {
     let f = existing(&mem, path)?;
     let (md, bytes) = open_read(&f, path, MAX_TEXT_BYTES + 1)?;
     let content = as_text(path, md.len(), bytes)?;
-    Ok(Doc { path: path.into(), file: name_of(path), title: title_for(path, &content), mtime_ms: mtime_ms(&md), size: md.len(), content })
+    Ok(Doc { path: path.into(), file: name_of(path), title: title_for(path, &content), mtime_ms: mtime_ms(&md), rev: rev_of(content.as_bytes()), size: md.len(), content })
+}
+
+/// What is at `path` now, for whoever is told it moved: its mtime, its size,
+/// and [`Doc::rev`] for a file small enough to open here.
+pub fn seen_at(root: &Path, id: &str, path: &str) -> Result<(u64, u64, Option<String>), String> {
+    let f = existing(&dir_at(root, id)?, path)?;
+    let (md, bytes) = open_read(&f, path, MAX_TEXT_BYTES + 1)?;
+    let rev = (bytes.len() as u64 <= MAX_TEXT_BYTES).then(|| rev_of(&bytes));
+    Ok((mtime_ms(&md), md.len(), rev))
 }
 
 /// `path` as it was in `commit`: what a restore puts back, and what an older
@@ -806,7 +855,7 @@ pub fn read_commit_at(root: &Path, id: &str, path: &str, commit: &str) -> Result
     let commit = known(&repo, commit)?;
     let (size, bytes) = blob(&repo, &commit, path, MAX_TEXT_BYTES)?.ok_or_else(|| format!("{ERR_GONE}: {path} in that change"))?;
     let content = as_text(path, size, bytes)?;
-    Ok(Doc { path: path.into(), file: name_of(path), title: title_for(path, &content), mtime_ms: 0, size, content })
+    Ok(Doc { path: path.into(), file: name_of(path), title: title_for(path, &content), mtime_ms: 0, rev: rev_of(content.as_bytes()), size, content })
 }
 
 /// An image of this memory, under the chat images' rules
@@ -819,13 +868,12 @@ pub fn image_at(root: &Path, id: &str, path: &str, etag: Option<&str>) -> Result
 
 // ── write ───────────────────────────────────────────────────────────────────
 
-/// The person's save. `expected_mtime` is the file's mtime when it was read,
-/// and the save is refused when that is no longer it; `None` MAKES the file
-/// and is refused when there is one. `keep_history`: commit what is on disk at
+/// The person's save, over the file `base` says they read: refused when that
+/// is no longer it. `keep_history`: commit what is on disk at
 /// `path` first, for a text written knowingly over one that came from
 /// elsewhere. That one file and no other, so it takes nothing more of a fold
 /// that is being written than what is about to be overwritten.
-pub fn write_at(root: &Path, id: &str, path: &str, content: &str, expected_mtime: Option<u64>, keep_history: bool) -> Result<Saved, String> {
+pub fn write_at(root: &Path, id: &str, path: &str, content: &str, base: &Base, keep_history: bool) -> Result<Saved, String> {
     wsfolder::refuse_real(root)?;
     rel_ok(path)?;
     if content.len() as u64 > MAX_TEXT_BYTES {
@@ -840,20 +888,25 @@ pub fn write_at(root: &Path, id: &str, path: &str, content: &str, expected_mtime
         return Err("this workspace has no memory yet".into());
     }
     let _held = hold(&folder)?;
-    let dst = match expected_mtime {
-        Some(want) => {
+    let dst = match base {
+        Base::Rev(_) | Base::Mtime(_) => {
             let f = existing(&mem, path)?;
-            // Equal to what is there: nothing is written, the mtime stands.
             let (md, bytes) = open_read(&f, path, MAX_TEXT_BYTES + 1)?;
-            if mtime_ms(&md) != want {
-                return Err(format!("{ERR_STALE}: {path}"));
-            }
+            // Equal to what is there: nothing is written, and nothing is lost.
             if bytes == content.as_bytes() {
                 return Ok(saved(path, content, &md));
             }
+            let same = match base {
+                Base::Rev(r) => *r == rev_of(&bytes),
+                Base::Mtime(m) => *m == mtime_ms(&md),
+                Base::None => false,
+            };
+            if !same {
+                return Err(format!("{ERR_STALE}: {path}"));
+            }
             f
         }
-        None => {
+        Base::None => {
             let dir = parent_of(&mem, path)?;
             let f = dir.join(name_of(path));
             if fs::symlink_metadata(&f).is_ok() {
@@ -874,7 +927,7 @@ pub fn write_at(root: &Path, id: &str, path: &str, content: &str, expected_mtime
 }
 
 fn saved(path: &str, content: &str, md: &fs::Metadata) -> Saved {
-    Saved { path: path.into(), file: name_of(path), title: title_for(path, content), mtime_ms: mtime_ms(md), size: md.len() }
+    Saved { path: path.into(), file: name_of(path), title: title_for(path, content), mtime_ms: mtime_ms(md), rev: rev_of(content.as_bytes()), size: md.len() }
 }
 
 /// Put a file under `files/`, under its own name or the next free one
@@ -912,7 +965,7 @@ pub fn put_file_at(root: &Path, id: &str, name: &str, bytes: &[u8]) -> Result<Sa
     let dst = dir.join(&free);
     fsx::write_atomic(&dst, bytes, None).map_err(|e| format!("{free}: {e}"))?;
     let md = fs::symlink_metadata(&dst).map_err(|e| format!("{free}: {e}"))?;
-    Ok(Saved { path: format!("{FILES}/{free}"), file: free.clone(), title: free, mtime_ms: mtime_ms(&md), size: md.len() })
+    Ok(Saved { path: format!("{FILES}/{free}"), file: free.clone(), title: free, mtime_ms: mtime_ms(&md), rev: rev_of(bytes), size: md.len() })
 }
 
 // ── commit ──────────────────────────────────────────────────────────────────
@@ -1310,7 +1363,7 @@ mod tests {
             read_at(&self.root, &self.id, path)
         }
         fn write(&self, path: &str, text: &str, m: Option<u64>) -> Result<Saved, String> {
-            write_at(&self.root, &self.id, path, text, m, false)
+            write_at(&self.root, &self.id, path, text, &m.map_or(Base::None, Base::Mtime), false)
         }
         fn revert(&self, c: &Change) -> Result<Reverted, String> {
             revert_at(&self.root, &self.id, &c.commit)
@@ -1609,7 +1662,7 @@ mod tests {
         // Keep mine: what is on disk is in the history before it goes.
         fs::write(s.mem().join(INDEX), "# Theirs\n").unwrap();
         let m = s.read(INDEX).unwrap().mtime_ms;
-        write_at(&s.root, &s.id, INDEX, "# Mine\n", Some(m), true).unwrap();
+        write_at(&s.root, &s.id, INDEX, "# Mine\n", &Base::Mtime(m), true).unwrap();
         let top = &s.log()[0];
         assert_eq!(top.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), vec![INDEX], "that file and no other");
         assert!(status_at(&s.root, &s.id).unwrap().dirty.contains(&"topics/deep/new.md".to_string()));
@@ -1850,7 +1903,7 @@ mod tests {
         let c = at();
         let (ch, rm) = changed_since(&b, &c);
         assert_eq!((ch.len(), ch[0].0.as_str(), rm), (1, "topics/t.md", vec![INDEX.to_string()]));
-        assert_eq!(ch[0].1, s.read("topics/t.md").unwrap().mtime_ms, "the mtime a read answers with");
+        assert_eq!(ch[0].1.mtime_ms, s.read("topics/t.md").unwrap().mtime_ms, "the mtime a read answers with");
         assert_eq!(ids_at(&s.root), vec![s.id.clone()]);
         fs::create_dir_all(s.root.join(".removed").join(crate::ulid::new()).join(DIR).join(".git")).unwrap();
         fs::create_dir_all(s.root.join("by-hand").join(DIR).join(".git")).unwrap();
@@ -1862,6 +1915,50 @@ mod tests {
         fn commit_nothing(&self) {
             self.git(&["commit", "--quiet", "--allow-empty", "--message=x"]);
         }
+    }
+
+    /// The file at `path` with `text` in it and the mtime it already had.
+    fn same_mtime(s: &Scratch, path: &str, text: &str) {
+        let p = s.mem().join(path);
+        let t = fs::metadata(&p).unwrap().modified().unwrap();
+        fs::write(&p, text).unwrap();
+        fs::File::options().write(true).open(&p).unwrap().set_modified(t).unwrap();
+        assert_eq!(fs::metadata(&p).unwrap().modified().unwrap(), t, "the fixture keeps the mtime");
+    }
+
+    /// Two writers inside one mtime: a save over a base named by its bytes is
+    /// refused, whatever the clock and the size say, and the watch sees both.
+    #[test]
+    fn an_equal_mtime_is_not_an_equal_text() {
+        let s = Scratch::made("rev");
+        for other in ["# Thxirs\n", "# Theirs, and longer\n"] {
+            s.put(INDEX, "# Theirs\n");
+            let d = s.read(INDEX).unwrap();
+            let (m, size, rev) = seen_at(&s.root, &s.id, INDEX).unwrap();
+            assert_eq!((m, size, rev.as_ref()), (d.mtime_ms, d.size, Some(&d.rev)));
+            let before = stamp_at(&s.root, &s.id).unwrap();
+            same_mtime(&s, INDEX, other);
+            let now = stamp_at(&s.root, &s.id).unwrap();
+            assert_eq!(changed_since(&before, &now).0.iter().map(|c| c.0.as_str()).collect::<Vec<_>>(), vec![INDEX], "{other:?}");
+            assert_ne!(seen_at(&s.root, &s.id, INDEX).unwrap().2, Some(d.rev.clone()));
+            let e = write_at(&s.root, &s.id, INDEX, "# Mine\n", &Base::Rev(d.rev), false).unwrap_err();
+            assert!(e.starts_with(ERR_STALE), "{e}");
+            assert_eq!(s.text(INDEX), other);
+        }
+        // The other way round: the bytes are the ones read, so a touch is no
+        // conflict, and a save answers with the rev the next one names.
+        let d = s.read(INDEX).unwrap();
+        assert_eq!(index_at(&s.root, &s.id).unwrap().unwrap().rev, d.rev);
+        fs::File::options().write(true).open(s.mem().join(INDEX)).unwrap().set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(9)).unwrap();
+        let w = write_at(&s.root, &s.id, INDEX, "# Mine\n", &Base::Rev(d.rev.clone()), false).unwrap();
+        assert_eq!(w.rev, s.read(INDEX).unwrap().rev);
+        assert_eq!(write_at(&s.root, &s.id, INDEX, "# Mine\n", &Base::Rev(d.rev), false).unwrap().rev, w.rev, "what is already there is nothing lost");
+        assert_eq!(write_at(&s.root, &s.id, INDEX, "# 2\n", &Base::Rev(w.rev), false).unwrap().size, 4);
+        assert!(write_at(&s.root, &s.id, "topics/gone.md", "x", &Base::Rev("0".into()), false).unwrap_err().starts_with(ERR_GONE));
+        // Too large to open is too large to name.
+        s.put("big.md", &"x".repeat(MAX_TEXT_BYTES as usize + 1));
+        assert_eq!(seen_at(&s.root, &s.id, "big.md").unwrap().2, None);
+        assert!(write_at(&s.root, &s.id, "big.md", "x", &Base::Rev(rev_of(b"x")), false).is_err());
     }
 
     /// The poll's cost, measured: `cargo test -p worktrees-core --release

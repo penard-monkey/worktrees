@@ -5,13 +5,14 @@
 //! `workspaces.json` (`workspace(id)`), and at most a path in that workspace's
 //! memory. The folder is the engine's (`Ctx::workspaces_dir`). Console only.
 //!
-//! **`workspaces:memory`** is `{id, changed: [{path, mtime_ms}], removed:
-//! [path]}`, one event a workspace, from the 3 s poll: the shape a document's
-//! session takes for ideas (`app/src/doc/ideasave.ts`, `Changed`, with a path
-//! for the id). It is sent for the app's OWN saves too, a tick later, and a
-//! client tells them apart by mtime: `workspace_memory_write` answers with the
-//! file's, and a `changed` entry carrying it is that save. Its first sight of
-//! a memory is a baseline and sends nothing.
+//! **`workspaces:memory`** is `{id, changed: [{path, mtime_ms, size, rev}],
+//! removed: [path]}`, one event a workspace, from the 3 s poll: the shape a
+//! document's session takes for ideas (`app/src/doc/ideasave.ts`, `Changed`,
+//! with a path for the id). It is sent for the app's OWN saves too, a tick
+//! later, and a client tells them apart by `rev`, which names the bytes: a
+//! read and a save answer with theirs, and a `changed` entry carrying it is
+//! that text. `rev` is `null` for a file too large to open here. Its first
+//! sight of a memory is a baseline and sends nothing.
 //!
 //! **What a tick costs:** one `readdir` a folder and one `lstat` an entry, for
 //! every workspace that has a memory, and no git. 20 workspaces of 200 files
@@ -31,7 +32,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use worktrees_core::memory::{self as store, Change, Doc, FileChange, Index, Listing, Log, Reverted, Saved, Stamp};
+use worktrees_core::memory::{self as store, Base, Change, Doc, FileChange, Index, Listing, Log, Reverted, Saved, Sig, Stamp};
 use worktrees_core::{attach, registry, workspacechats, workspaces};
 
 use crate::files::{b64_encode, PlaceImage};
@@ -149,11 +150,17 @@ pub fn workspace_memory_image(ctx: &Ctx, id: String, path: String, etag: Option<
     Ok(PlaceImage { b64: b64_encode(&read.bytes), size, truncated: read.truncated, mtime: read.mtime_ms, mime: read.mime, etag, unchanged })
 }
 
-/// The person's save. `expected_mtime` absent makes the file, and is refused
-/// when there is one; `keep_history` commits what is on disk at `path` first,
+/// The person's save. `expected_rev` is the `rev` the file was read with, or
+/// `expected_mtime` from a client that knows none (both: the rev decides).
+/// Neither makes the file, and is refused when there is one; `keep_history` commits what is on disk at `path` first,
 /// a fold in progress or not: that text is nowhere else.
-pub fn workspace_memory_write(ctx: &Ctx, id: String, path: String, content: String, expected_mtime: Option<u64>, keep_history: Option<bool>) -> Result<Saved, String> {
-    store::write_at(root(ctx), &id, &path, &content, expected_mtime, keep_history == Some(true))
+pub fn workspace_memory_write(ctx: &Ctx, id: String, path: String, content: String, expected_mtime: Option<u64>, expected_rev: Option<String>, keep_history: Option<bool>) -> Result<Saved, String> {
+    let base = match (expected_rev, expected_mtime) {
+        (Some(r), _) => Base::Rev(r),
+        (None, Some(m)) => Base::Mtime(m),
+        (None, None) => Base::None,
+    };
+    store::write_at(root(ctx), &id, &path, &content, &base, keep_history == Some(true))
 }
 
 /// Put a file under `files/`: `name` is a plain file name, `data` its bytes as
@@ -292,6 +299,9 @@ impl MemoryWatch {
 pub struct Moved {
     pub path: String,
     pub mtime_ms: u64,
+    pub size: u64,
+    /// The bytes' own name (`Doc::rev`); `None` for a file too large to open.
+    pub rev: Option<String>,
 }
 
 #[derive(Serialize, Debug, PartialEq, Eq)]
@@ -311,6 +321,7 @@ fn tick_in(
     now: Instant,
     held: &dyn Fn(&str) -> bool,
     stamp: &dyn Fn(&str) -> Result<Stamp, String>,
+    rev: &dyn Fn(&str, &str, Sig) -> Moved,
 ) -> (Vec<MemoryChanged>, Vec<String>) {
     let (mut events, mut quiet) = (Vec::new(), Vec::new());
     w.seen.retain(|id, _| ids.contains(id));
@@ -334,7 +345,7 @@ fn tick_in(
             }
             Some(s) if s.stamp != at => {
                 let (changed, removed) = store::changed_since(&s.stamp, &at);
-                let changed = changed.into_iter().map(|(path, mtime_ms)| Moved { path, mtime_ms }).collect();
+                let changed = changed.into_iter().map(|(path, sig)| rev(id, &path, sig)).collect();
                 events.push(MemoryChanged { id: id.clone(), changed, removed });
                 s.stamp = at;
                 s.moved = Some(now);
@@ -354,6 +365,13 @@ fn tick_in(
     (events, quiet)
 }
 
+/// A file that moved, as it is now: what was stamped may have moved again
+/// since, and what is told is the bytes a read would answer with.
+fn moved(root: &Path, id: &str, path: &str, sig: Sig) -> Moved {
+    let (mtime_ms, size, rev) = store::seen_at(root, id, path).unwrap_or((sig.mtime_ms, sig.size, None));
+    Moved { path: path.into(), mtime_ms, size, rev }
+}
+
 /// The poll's beat.
 ///
 /// `live` is which chats are live in this same beat: a quiet-minute commit
@@ -367,7 +385,7 @@ pub fn tick(ctx: &Ctx, w: &mut MemoryWatch, live: Live) {
     // The default stands for "no tick yet", and no clock reads 0.
     w.before = (was.0 != 0).then_some(was);
     let ids = store::ids_at(r);
-    let (events, quiet) = tick_in(&ids, w, Instant::now(), &|id| ctx.memory.is_held(id), &|id| store::stamp_at(r, id));
+    let (events, quiet) = tick_in(&ids, w, Instant::now(), &|id| ctx.memory.is_held(id), &|id| store::stamp_at(r, id), &|id, path, sig| moved(r, id, path, sig));
     for ev in events {
         ctx.emit("workspaces:memory", serde_json::to_value(ev).unwrap_or(serde_json::Value::Null));
     }
@@ -433,8 +451,12 @@ mod tests {
         }
     }
 
+    fn plain(_: &str, path: &str, s: Sig) -> Moved {
+        Moved { path: path.into(), mtime_ms: s.mtime_ms, size: s.size, rev: None }
+    }
+
     fn stamp(files: &[(&str, u64)]) -> Stamp {
-        files.iter().map(|(p, m)| (p.to_string(), (*m, 1))).collect()
+        files.iter().map(|(p, m)| (p.to_string(), Sig { mtime_ms: *m, size: 1, ..Sig::default() })).collect()
     }
 
     /// The rows over one memory, as a client reads them.
@@ -457,9 +479,15 @@ mod tests {
         assert!(again.unchanged && again.b64.is_empty());
         assert!(workspace_memory_put(c, id(), "x.bin".into(), "!".into()).unwrap_err().contains("base64"));
         assert!(workspace_memory_put(c, id(), "x.bin".into(), "!!!!".repeat(2_000_000)).unwrap_err().contains("4 MB"), "its size, before it is decoded");
-        let w = workspace_memory_write(c, id(), "topics/t.md".into(), "# T\n".into(), None, None).unwrap();
+        let w = workspace_memory_write(c, id(), "topics/t.md".into(), "# T\n".into(), None, None, None).unwrap();
         let d = workspace_memory_file(c, id(), "topics/t.md".into(), None).unwrap();
         assert_eq!((d.content.as_str(), d.mtime_ms, d.title.as_str()), ("# T\n", w.mtime_ms, "T"));
+        // A base named by its bytes decides, whatever the mtime beside it says.
+        let write = |m: u64, r: &str| workspace_memory_write(c, id(), "topics/t.md".into(), "# U\n".into(), Some(m), Some(r.into()), None);
+        assert!(write(d.mtime_ms, "0").unwrap_err().starts_with(store::ERR_STALE));
+        assert_eq!((d.rev.as_str(), write(1, &d.rev).unwrap().size), (w.rev.as_str(), 4));
+        let back = workspace_memory_write(c, id(), "topics/t.md".into(), "# T\n".into(), None, Some(store::rev_of(b"# U\n")), None).unwrap();
+        assert_eq!(back.rev, d.rev);
         let done = memory_commit_if_dirty(c, &s.id, Some("fold: X")).unwrap().unwrap();
         assert_eq!(memory_commit_if_dirty(c, &s.id, Some("fold: X")).unwrap(), None);
         let v = serde_json::to_value(workspace_memory_diff(c, id(), done.commit.clone(), Some("files/rack.png".into())).unwrap()).unwrap();
@@ -474,7 +502,7 @@ mod tests {
         s.put("topics/t.md", "# Theirs\n");
         s.put("notes/half.md", "half\n");
         let m = workspace_memory_file(c, id(), "topics/t.md".into(), None).unwrap().mtime_ms;
-        workspace_memory_write(c, id(), "topics/t.md".into(), "# Mine\n".into(), Some(m), Some(true)).unwrap();
+        workspace_memory_write(c, id(), "topics/t.md".into(), "# Mine\n".into(), Some(m), None, Some(true)).unwrap();
         let top = workspace_memory_log(c, id(), None, None, Some(1)).unwrap().changes.remove(0);
         assert_eq!(top.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), vec!["topics/t.md"]);
         assert_eq!(workspace_memory_file(c, id(), "topics/t.md".into(), Some(top.commit)).unwrap().content, "# Theirs\n");
@@ -551,13 +579,13 @@ mod tests {
         let mut w = MemoryWatch::default();
         tick(&s.ctx, &mut w, Live::new());
         assert!(s.rec.events.lock().unwrap().is_empty(), "the baseline");
-        let saved = workspace_memory_write(&s.ctx, s.id.clone(), "topics/t.md".into(), "# T\n".into(), None, None).unwrap();
+        let saved = workspace_memory_write(&s.ctx, s.id.clone(), "topics/t.md".into(), "# T\n".into(), None, None, None).unwrap();
         tick(&s.ctx, &mut w, Live::new());
         tick(&s.ctx, &mut w, Live::new());
         let ev = std::mem::take(&mut *s.rec.events.lock().unwrap());
         assert_eq!(ev, vec![(
             "workspaces:memory".to_string(),
-            serde_json::json!({"id": s.id, "changed": [{"path": "topics/t.md", "mtime_ms": saved.mtime_ms}], "removed": []}),
+            serde_json::json!({"id": s.id, "changed": [{"path": "topics/t.md", "mtime_ms": saved.mtime_ms, "size": 4, "rev": saved.rev}], "removed": []}),
         )]);
         memory_commit_if_dirty(&s.ctx, &s.id, None).unwrap().unwrap();
         tick(&s.ctx, &mut w, Live::new());
@@ -579,7 +607,7 @@ mod tests {
         let t0 = Instant::now();
         let at = |s: u64| t0 + Duration::from_secs(s);
         let mut w = MemoryWatch::default();
-        let mut go = |sec: u64, st: &Stamp| tick_in(&ids, &mut w, at(sec), &|_| false, &|_| Ok(st.clone()));
+        let mut go = |sec: u64, st: &Stamp| tick_in(&ids, &mut w, at(sec), &|_| false, &|_| Ok(st.clone()), &plain);
         let (a, b) = (stamp(&[("x.md", 1)]), stamp(&[("x.md", 2)]));
         assert_eq!(go(0, &a), (vec![], vec![]));
         assert_eq!(go(59, &a).1, Vec::<String>::new());
@@ -596,7 +624,7 @@ mod tests {
         let ids = vec!["A".to_string()];
         let t0 = Instant::now();
         let mut w = MemoryWatch::default();
-        let mut go = |sec: u64, held: bool| tick_in(&ids, &mut w, t0 + Duration::from_secs(sec), &|_| held, &|_| Ok(stamp(&[("x.md", 1)]))).1;
+        let mut go = |sec: u64, held: bool| tick_in(&ids, &mut w, t0 + Duration::from_secs(sec), &|_| held, &|_| Ok(stamp(&[("x.md", 1)])), &plain).1;
         go(0, false);
         assert!(go(70, true).is_empty(), "a fold is thinking");
         assert!(go(300, true).is_empty());
@@ -611,9 +639,9 @@ mod tests {
         let ids = vec!["A".to_string()];
         let t = Instant::now();
         let mut w = MemoryWatch::default();
-        tick_in(&ids, &mut w, t, &|_| false, &|_| Ok(stamp(&[("x.md", 1)])));
-        tick_in(&[], &mut w, t, &|_| false, &|_| Ok(Stamp::new()));
-        assert_eq!(tick_in(&ids, &mut w, t, &|_| false, &|_| Ok(stamp(&[("x.md", 9)]))), (vec![], vec![]));
+        tick_in(&ids, &mut w, t, &|_| false, &|_| Ok(stamp(&[("x.md", 1)])), &plain);
+        tick_in(&[], &mut w, t, &|_| false, &|_| Ok(Stamp::new()), &plain);
+        assert_eq!(tick_in(&ids, &mut w, t, &|_| false, &|_| Ok(stamp(&[("x.md", 9)])), &plain), (vec![], vec![]));
     }
 
     #[test]
@@ -622,11 +650,11 @@ mod tests {
         let t = Instant::now();
         let mut w = MemoryWatch::default();
         let a = stamp(&[("x.md", 1), ("y.md", 1)]);
-        tick_in(&ids, &mut w, t, &|_| false, &|_| Ok(a.clone()));
-        assert_eq!(tick_in(&ids, &mut w, t, &|_| false, &|_| Err("denied".into())), (vec![], vec![]));
+        tick_in(&ids, &mut w, t, &|_| false, &|_| Ok(a.clone()), &plain);
+        assert_eq!(tick_in(&ids, &mut w, t, &|_| false, &|_| Err("denied".into()), &plain), (vec![], vec![]));
         let b = stamp(&[("x.md", 1), ("y.md", 2)]);
-        let (ev, _) = tick_in(&ids, &mut w, t, &|_| false, &|_| Ok(b.clone()));
-        assert_eq!(ev, vec![MemoryChanged { id: "A".into(), changed: vec![Moved { path: "y.md".into(), mtime_ms: 2 }], removed: vec![] }]);
+        let (ev, _) = tick_in(&ids, &mut w, t, &|_| false, &|_| Ok(b.clone()), &plain);
+        assert_eq!(ev, vec![MemoryChanged { id: "A".into(), changed: vec![plain("A", "y.md", Sig { mtime_ms: 2, size: 1, ..Sig::default() })], removed: vec![] }]);
     }
 
     /// Who a quiet commit names: live at both ends of the tick it moved in,
@@ -641,7 +669,7 @@ mod tests {
         let mut beat = |wall: i64, chats: &[&str], m: u64| {
             let was = std::mem::replace(&mut w.here, (wall, live(chats)));
             w.before = (was.0 != 0).then_some(was);
-            tick_in(&ids, &mut w, t, &|_| false, &|_| Ok(stamp(&[("x.md", m)])));
+            tick_in(&ids, &mut w, t, &|_| false, &|_| Ok(stamp(&[("x.md", m)])), &plain);
             w.seen["A"].live.iter().map(|(c, at)| (c.clone(), *at)).collect::<Vec<_>>()
         };
         assert!(beat(100, &["one"], 1).is_empty(), "a first sight knows nobody");
@@ -687,7 +715,7 @@ mod tests {
         let id = ulid::new();
         for e in [
             store::init_at(&real, &id, "x").unwrap_err(),
-            store::write_at(&real, &id, "a.md", "x", None, false).unwrap_err(),
+            store::write_at(&real, &id, "a.md", "x", &Base::None, false).unwrap_err(),
             store::put_file_at(&real, &id, "a.png", b"x").unwrap_err(),
             store::commit_if_dirty_at(&real, &id, None).unwrap_err(),
             store::revert_at(&real, &id, &"0".repeat(40)).unwrap_err(),
