@@ -35,7 +35,7 @@ async function boot(page, betas = ["beta_workspace_chats"], query = "") {
   await page.addInitScript((s) => {
     if (!sessionStorage.getItem("wt-mock-ui-state")) sessionStorage.setItem("wt-mock-ui-state", JSON.stringify(s));
   }, { places_side: "left", dock_side: "right", settings_rev: 5, nav_pinned: true, nav_view: "workspaces", ...Object.fromEntries(betas.map((b) => [b, true])) });
-  await page.goto(`${BASE}/?ideas=seed&workspaces=1&memtick=150${query}`);
+  await page.goto(`${BASE}/?ideas=seed&workspaces=1&folding=0&memtick=150${query}`);
   await page.waitForSelector("[data-testid=ws-doc-memory]");
   return (await call(page, "workspaces_list", {})).workspaces.find((w) => w.name === "Everything").id;
 }

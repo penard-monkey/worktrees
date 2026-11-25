@@ -13,7 +13,7 @@ import { useArmed } from "./useArmed";
 import { useEscape } from "./useEscape";
 import {
   changeFiles, changedBy, changedUnderWords, changeWords, conflictWords, fileGroups, fileName, filesWords, lineDiff, linkText, mayEdit, newFilePath, putName,
-  revertOf, sizeWords, STATUS_WORDS, titleOf, tooBig,
+  revertOf, sizeWords, STATUS_WORDS, titleOf, tooBig, whileLive,
 } from "./wsmemory";
 import { whenWords } from "./wschats";
 import "./WorkspaceMemory.css";
@@ -260,6 +260,8 @@ export function MemoryHistory(props: {
   tick: number;
   open(path: string): void;
   close(): void;
+  /** A chat's title, by id; null: it was deleted. */
+  chat(id: string): string | null;
 }) {
   const { ws, path } = props;
   const src = memoryDocs(ws);
@@ -330,7 +332,7 @@ export function MemoryHistory(props: {
       {cur ? (
         <div className="wsm-change" data-testid="memory-change" data-commit={cur.commit}>
           <div className={`wsm-change-h ${changeWords(cur).by}`}>
-            <span className="wsm-change-w"><b>{changedBy(cur)}</b><span className="wsm-change-d">{whenWords(new Date(cur.at * 1000).toISOString())} · {filesWords(cur.files.length)} <Lines added={cur.added} removed={cur.removed} />{cur.reverted_by ? " · undone since" : ""}</span></span>
+            <span className="wsm-change-w"><b>{changedBy(cur, props.chat)}</b><span className="wsm-change-d">{whenWords(new Date(cur.at * 1000).toISOString())} · {filesWords(cur.files.length)} <Lines added={cur.added} removed={cur.removed} />{cur.reverted_by ? " · undone since" : ""}</span></span>
             <RevertButton c={cur} rv={rv} what="this change" />
           </div>
           {rv.said && <p className="wsm-err" role="alert" data-testid="memory-conflict">{rv.said.text}</p>}
@@ -355,7 +357,7 @@ export function MemoryHistory(props: {
           {list.map((c) => (
             <button key={c.commit} className={`wsm-row ${changeWords(c).by}${c.reverted_by ? " undone" : ""}`} data-testid="memory-log-row" data-commit={c.commit} data-kind={c.kind} onClick={() => pick(c)}>
               <span className="wsm-file-in">
-                <span className="wsm-row-n">{c.subject}</span>
+                <span className="wsm-row-n">{c.subject}{c.live?.length ? <span className="wsm-row-l"> · {whileLive(c.live, props.chat)}</span> : null}</span>
                 {c.reverted_by && <span className="wsm-row-u">undone</span>}
                 <Lines added={c.added} removed={c.removed} />
                 <span className="wsm-row-d">{whenWords(new Date(c.at * 1000).toISOString())}</span>
@@ -379,6 +381,7 @@ export function MemoryCard(props: {
   diff(commit: string): void;
   follow(href: string): void;
   changed(): void;
+  chat(id: string): string | null;
 }) {
   const { view } = props;
   const last = view.last && view.last.kind !== "made" ? view.last : null;
@@ -398,7 +401,7 @@ export function MemoryCard(props: {
     <>
       {last && (
         <div className="wsm-last" data-testid="memory-last">
-          <span className="wsm-last-w">{changedBy(last)} {props.ago(last.at)}{props.ago(last.at) === "now" ? "" : " ago"} <span className="wsm-change-d">{filesWords(last.files.length)} <Lines added={last.added} removed={last.removed} /></span></span>
+          <span className="wsm-last-w">{changedBy(last, props.chat)} {props.ago(last.at)}{props.ago(last.at) === "now" ? "" : " ago"} <span className="wsm-change-d">{filesWords(last.files.length)} <Lines added={last.added} removed={last.removed} /></span></span>
           <button className="ctrl sm" data-testid="memory-last-diff" onClick={() => props.diff(last.commit)}>Diff ▸</button>
           <RevertButton c={last} rv={rv} what="it" />
         </div>

@@ -46,7 +46,7 @@ const r = (state, fold) => ({ chat: chat("x", fold ? { fold } : {}), state, live
 eq("the age gains a word when it needs somebody", ["waiting", "fold-failed", "folding", "busy", "ended"].map((s) => W.ageWords(r(s), "12m").text), ["waiting 12m", "fold failed", "folding…", "12m", "12m"]);
 eq("…and reads strong then", ["waiting", "busy"].map((s) => W.ageWords(r(s), "1m").strong), [true, false]);
 eq("closed, by its fold", [undefined, { state: "done", commit: "a", reverted: false }, { state: "done", reverted: false }, { state: "done", commit: "a", reverted: true }, { state: "failed", reverted: false }, { state: "???", reverted: false }].map((f) => W.stateWords(r("ended", f))),
-  ["closed", "closed · folded into memory", "closed · no memory changes", "closed · its fold was undone", "closed", "closed"]);
+  ["closed, not folded", "closed · folded into memory", "closed · no memory changes", "closed · its fold was undone", "closed, not folded", "closed, not folded"]);
 const p = (reads, why) => ({ root: "/r", name: "r", registered: true, private: false, reads, ...(why ? { why } : {}) });
 eq("what it reads", [W.readsWords([p("yes"), p("yes"), p("no", "private")]), W.readsWords([])], ["reads 2 of 3", "reads no project"]);
 eq("the first line", [W.introWords([p("yes"), p("no")]), W.introWords([p("yes")]), W.introWords([])], [
@@ -54,6 +54,19 @@ eq("the first line", [W.introWords([p("yes"), p("no")]), W.introWords([p("yes")]
   "It reads the memory index first, and it can read its project. It never writes in a project.",
   "It reads the memory index first, and the workspace has no projects to read. It never writes in a project."]);
 eq("a read the engine does not call `yes` is not one", W.readsCount([p("partly")]).read, 0);
+
+// ── the fold ──
+const fc = (fold, fold_now) => chat("x", { ...(fold ? { fold } : {}), ...(fold_now !== undefined ? { fold_now } : {}) });
+const evFold = ev({ live: ["s~x"], fold: { "s~x": { state: "folding" } } });
+eq("the list's live word is drawn from first, the push's when it has none", [W.foldOf(fc(null, { state: "waiting", why: null }), evFold)?.state, W.foldOf(fc(null, null), evFold), W.foldOf(fc(), evFold)?.state], ["waiting", null, "folding"]);
+eq("what runs", ["folding", "waiting", "checking", "failed"].map((s) => W.foldRuns({ state: s, why: null })).concat(W.foldRuns(null)), [true, true, true, false, false]);
+eq("a checking one is said so", [W.rowOf(fc(null, { state: "checking", why: null }), ev({ live: ["s~x"] }), null).state, W.ageWords(r("checking"), "1m").text], ["checking", "checking…"]);
+const end = (fold, gone = false) => { const e = W.endedLine(fc(fold), gone); return [e.text, e.foldNow, e.resume]; };
+eq("an ended chat's line, Fold now and Resume", [end(null), end({ state: "done", commit: "a", reverted: false }), end({ state: "done", reverted: false }), end({ state: "done", commit: "a", reverted: true }), end({ state: "none", reverted: false }), end({ state: "failed", reverted: false }), end({ state: "done", commit: "a", reverted: false }, true)], [
+  ["Closed, not folded.", true, true], ["Closed and folded into memory.", false, true], ["Closed. No memory changes.", false, true], ["Closed. Its fold was undone.", true, true],
+  ["Closed, not folded.", true, true], ["Closed, not folded.", true, true], ["Closed. Its transcript is gone.", false, false]]);
+eq("a failed fold is the engine's words, and no more", [W.failedWords({ state: "failed", why: "it wrote no note in five minutes. Memory is unchanged." }), W.failedWords({ state: "failed", why: "its Claude exited" })], ["The fold did not finish: it wrote no note in five minutes. Memory is unchanged.", "The fold did not finish: its Claude exited."]);
+eq("a transcript that is gone, in the engine's words", [W.transcriptGone("this conversation's transcript is no longer on disk"), W.transcriptGone("this conversation has written no transcript yet"), W.transcriptGone(undefined)], [true, false, false]);
 
 // ── its name ──
 eq("the engine's own names", ["Chat 3", "Chat three", "Chat 3b", "Release order"].map(W.isDefaultTitle), [true, false, false, false]);

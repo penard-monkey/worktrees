@@ -2191,7 +2191,7 @@ const chatWs = (c: MockChat) => [...mockChats].find(([, cs]) => cs.includes(c))?
 const mockChatRecord = (c: MockChat) => ({
   id: c.id, harness: c.harness, session_id: c.session_id, title: c.title, started: c.started, last_activity: c.last_activity, note: c.note,
   // A fold's numbers are its commit's, in the memory (./memory.ts).
-  ...(c.fold ? { fold: { ...c.fold, ...(c.fold.state === "done" ? mockMemory.fold(chatWs(c), c.title, c.fold.commit) : null) } } : {}),
+  ...(c.fold ? { fold: { ...c.fold, ...(c.fold.state === "done" && c.fold.commit ? mockMemory.fold(chatWs(c), c.title, c.fold.commit) : null) } } : {}),
 });
 const mockChatRow = (c: MockChat) => ({
   ...mockChatRecord(c), session: chatSession(c), state: !c.live ? "ended" : c.state === "idle" ? "running" : c.state, note_exists: mockMemory.has(chatWs(c), c.note),

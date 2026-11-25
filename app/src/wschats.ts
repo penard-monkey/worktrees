@@ -5,34 +5,44 @@
 import { stateOf, type ConvState, type DeskEv, type Expect } from "./desk";
 
 /** `workspacechats::Fold`. */
-export type ChatFold = { asked?: string; state: string; commit?: string; files?: number; lines?: { added: number; removed: number }; reverted: boolean; why?: string };
+export type ChatFold = { asked?: string; asked_ms?: number; left?: number; state: string; commit?: string; files?: number; lines?: { added: number; removed: number }; reverted: boolean; why?: string };
+/** A fold that runs, or failed: the live word (`watch::FoldOf`). */
+export type FoldNow = { state: string; why: string | null; left?: number | null };
 /** `workspace_chats`' row. */
 export type WsChat = {
   id: string; harness: string; session_id: string; title: string; started: string; last_activity: string; note: string;
-  fold?: ChatFold; session: string; state: ConvState; note_exists: boolean;
+  fold?: ChatFold; fold_now?: FoldNow | null; session: string; state: ConvState; note_exists: boolean;
 };
 /** What a chat reads of one project, and why not. */
 export type ProjectRead = { root: string; name: string | null; registered: boolean; private: boolean; reads: string; why?: string };
-export type WsChats = { id: string; name: string; folder: string; chats: WsChat[]; projects: ProjectRead[] };
+/** The workspace's plan and linked ideas, and whether a chat reads each. */
+export type DocRead = { kind: "plan" | "idea"; id: string; live: string | null; title: string | null; path: string | null; reads: string; why?: string };
+export type WsChats = { id: string; name: string; folder: string; chats: WsChat[]; projects: ProjectRead[]; documents?: DocRead[] };
 /** `workspaces:sessions`. */
 export type WsSessionsEv = DeskEv & {
   chat_of: Record<string, { workspace: string; chat: string }>;
-  fold: Record<string, { workspace: string; chat: string; state: string; why: string | null }>;
+  fold: Record<string, { workspace: string; chat: string } & FoldNow>;
 };
 
 /** What a row shows: a chat's own state, or its fold's while there is one to say. */
-export type RowState = ConvState | "folding" | "fold-failed";
+export type RowState = ConvState | "folding" | "checking" | "fold-failed";
 export type ChatRow = { chat: WsChat; state: RowState; live: boolean };
+
+/** How a chat's fold stands: the list's own word first (it is read again on every
+ *  push and after every act here), else the push's, which is up to a tick behind. */
+export const foldOf = (c: WsChat, ev: WsSessionsEv | null): FoldNow | null => (c.fold_now !== undefined ? c.fold_now : ev?.fold?.[c.session] ?? null);
+/** A fold that has not ended: nothing is sent to its chat meanwhile. */
+export const foldRuns = (f: FoldNow | null): boolean => !!f && (f.state === "folding" || f.state === "waiting" || f.state === "checking");
 
 export function rowOf(c: WsChat, ev: WsSessionsEv | null, expect: Expect): ChatRow {
   const s = stateOf(c, ev, expect);
-  const f = ev?.fold?.[c.session]?.state;
+  const f = foldOf(c, ev)?.state;
   // Waiting on the person comes before anything a fold says.
-  const state: RowState = s === "waiting" || f === "waiting" ? "waiting" : f === "failed" ? "fold-failed" : f === "folding" ? "folding" : s;
+  const state: RowState = s === "waiting" || f === "waiting" ? "waiting" : f === "failed" ? "fold-failed" : f === "folding" ? "folding" : f === "checking" ? "checking" : s;
   return { chat: c, state, live: s !== "ended" };
 }
 
-const RANK: Record<RowState, number> = { waiting: 0, "fold-failed": 1, busy: 2, folding: 3, running: 4, ended: 5 };
+const RANK: Record<RowState, number> = { waiting: 0, "fold-failed": 1, busy: 2, folding: 3, checking: 3, running: 4, ended: 5 };
 const at = (iso: string) => { const t = Date.parse(iso); return Number.isNaN(t) ? 0 : t; };
 /** When a chat last did something, as epoch seconds. */
 export const activeAt = (c: WsChat): number => Math.floor(Math.max(at(c.last_activity), at(c.started)) / 1000);
@@ -61,6 +71,7 @@ export function ageWords(r: ChatRow, age: string): { text: string; strong: boole
     case "waiting": return { text: `waiting ${age}`.trim(), strong: true };
     case "fold-failed": return { text: "fold failed", strong: true };
     case "folding": return { text: "folding…", strong: true };
+    case "checking": return { text: "checking…", strong: true };
     default: return { text: age, strong: false };
   }
 }
@@ -72,15 +83,28 @@ export function stateWords(r: ChatRow): string {
     case "busy": return "working";
     case "running": return "open";
     case "folding": return "folding";
+    case "checking": return "checking its fold";
     case "fold-failed": return "the fold failed";
     default: {
       const f = r.chat.fold;
-      if (!f || f.state !== "done") return "closed";
+      if (!f || f.state !== "done") return "closed, not folded";
       if (f.reverted) return "closed · its fold was undone";
       return f.commit ? "closed · folded into memory" : "closed · no memory changes";
     }
   }
 }
+
+/** An ended chat's line, and whether it offers to fold now. */
+export function endedLine(c: WsChat, transcriptGone: boolean): { text: string; foldNow: boolean; resume: boolean } {
+  if (transcriptGone) return { text: "Closed. Its transcript is gone.", foldNow: false, resume: false };
+  const f = c.fold;
+  if (!f || f.state !== "done") return { text: "Closed, not folded.", foldNow: true, resume: true };
+  if (f.reverted) return { text: "Closed. Its fold was undone.", foldNow: true, resume: true };
+  return { text: f.commit ? "Closed and folded into memory." : "Closed. No memory changes.", foldNow: false, resume: true };
+}
+export const transcriptGone = (reason: string | undefined): boolean => !!reason && /no longer on disk/.test(reason);
+/** A fold that failed, in the engine's own words. It never says more than they do. */
+export const failedWords = (f: FoldNow): string => `The fold did not finish: ${f.why ?? "no reason was given"}`.replace(/([^.!?])$/, "$1.");
 
 /** How many of its projects a chat reads: "2 of 3", or null with none. */
 export function readsCount(projects: readonly ProjectRead[]): { read: number; of: number } {

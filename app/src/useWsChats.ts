@@ -22,7 +22,11 @@ export type WsChatsLive = {
   start(id: string): Promise<{ conv: string } | { refused: string }>;
   /** Each throws in words. */
   resume(id: string, conv: string): Promise<void>;
-  close(id: string, conv: string): Promise<void>;
+  /** End it with no fold; a running one is stopped. The commit, if it left changes. */
+  close(id: string, conv: string): Promise<{ commit: string | null }>;
+  /** Close it as a fold. Answers once it has started; `reattach`: an attached
+   *  terminal ended with the session that was replaced. */
+  fold(id: string, conv: string): Promise<{ reattach: boolean }>;
   remove(id: string, conv: string): Promise<void>;
   rename(id: string, conv: string, title: string): Promise<void>;
 };
@@ -75,10 +79,11 @@ export function useWsChats(on: boolean, ids: readonly string[]): WsChatsLive {
     return out;
   }, [lists, sessions, expect]);
 
-  const act = useCallback(async (id: string, conv: string, cmd: string, live: boolean | null, more: Record<string, unknown> = {}) => {
+  const act = useCallback(async <T,>(id: string, conv: string, cmd: string, live: boolean | null, more: Record<string, unknown> = {}): Promise<T> => {
     try {
-      await invoke(cmd, { id, conv, ...more });
+      const r = await invoke<T>(cmd, { id, conv, ...more });
       if (live !== null) setExpect((x) => ({ ...x, [conv]: { conv, live } }));
+      return r;
     } catch (e) { throw errText(e); }
     finally { await refresh(id); }
   }, [refresh]);
@@ -102,7 +107,8 @@ export function useWsChats(on: boolean, ids: readonly string[]): WsChatsLive {
       } finally { setStarting(null); }
     },
     resume: (id, conv) => act(id, conv, "workspace_chat_resume", true),
-    close: (id, conv) => act(id, conv, "workspace_chat_close", false),
+    close: async (id, conv) => ({ commit: (await act<{ commit?: string | null }>(id, conv, "workspace_chat_close", false)).commit ?? null }),
+    fold: async (id, conv) => ({ reattach: (await act<{ reattach?: boolean }>(id, conv, "workspace_chat_fold", true)).reattach === true }),
     remove: (id, conv) => act(id, conv, "workspace_chat_remove", null),
     rename: (id, conv, title) => act(id, conv, "workspace_chat_rename", null, { title }),
   };

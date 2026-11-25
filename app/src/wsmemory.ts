@@ -68,15 +68,20 @@ export function changeWords(c: MemoryChange): { by: string; name: string } {
   }
 }
 /** "Changed … by the fold of X". */
-export function changedBy(c: MemoryChange): string {
+export function changedBy(c: MemoryChange, title: (chat: string) => string | null = () => null): string {
   const { by, name } = changeWords(c);
   switch (by) {
     case "made": return "Made";
     case "fold": return `Changed by the fold of “${name}”`;
     case "undo": return `“${name}” was undone`;
     case "redo": return `“${name}” was put back`;
-    default: return /^Chat closed: |^Fold stopped: |^Before /.test(name) ? `Changed: ${name}` : "Edited by hand";
+    default: return /^Chat closed: |^Fold stopped: |^Before /.test(name) ? `Changed: ${name}` : c.live?.length ? `Edited ${whileLive(c.live, title)}` : "Edited by hand";
   }
+}
+/** Who was live while a change was made: never who made it. */
+export function whileLive(live: readonly string[], title: (chat: string) => string | null): string {
+  const names = live.map((id) => { const t = title(id); return t ? `“${t}”` : "a chat that was deleted"; });
+  return `while ${names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`} ${names.length === 1 ? "was" : "were"} live`;
 }
 /** What a change's Undo reverts: itself, or, undone already, what undid it. */
 export const revertOf = (c: MemoryChange): { commit: string; redo: boolean } | null =>

@@ -34,7 +34,7 @@ async function boot(page, betas = ["beta_workspace_chats"], extra = {}, query = 
   await page.addInitScript((s) => {
     if (!sessionStorage.getItem("wt-mock-ui-state")) sessionStorage.setItem("wt-mock-ui-state", JSON.stringify(s));
   }, { places_side: "left", dock_side: "right", settings_rev: 5, nav_pinned: true, nav_view: "workspaces", chat_view: true, ...Object.fromEntries(betas.map((b) => [b, true])), ...extra });
-  await page.goto(`${BASE}/?ideas=seed&workspaces=1${query}`);
+  await page.goto(`${BASE}/?ideas=seed&workspaces=1&folding=0${query}`);
   await page.waitForSelector("[data-testid=ws-group]");
   if (betas.includes("beta_workspace_chats")) await page.waitForSelector("[data-testid=ws-chat-row]");
   return (await call(page, "workspaces_list", {})).workspaces.find((w) => w.name === "Everything").id;
@@ -169,14 +169,12 @@ async function chat(page, tag, name) {
   await page.keyboard.press("Enter");
   ok(await colOf(page, "Order of release") && await until(page, () => [...document.querySelectorAll("[data-testid=ws-chat-row] .wsc-title")].some((e) => e.textContent === "Order of release")), `${tag} Rename renames it, here and in the card`);
 
-  // ── Close, ended, Resume ──
-  ok((await page.locator("[data-testid=ws-chat-close]").innerText()) === "Close" && !/fold/i.test(await page.locator(".wsc-head").innerText()), `${tag} its button is Close, and promises no fold`);
-  ok(await page.locator("[data-testid=ws-chat-close]").evaluate((e) => getComputedStyle(e).backgroundColor !== getComputedStyle(document.querySelector("[data-testid=ws-frame-new-chat]")).backgroundColor), `${tag} …and is not a filled button`);
+  // ── Close without folding, ended, Resume ── (Close, the fold: workspace-fold-browser.mjs)
+  ok(await page.locator("[data-testid=ws-chat-close]").evaluate((e) => getComputedStyle(e).backgroundColor !== getComputedStyle(document.querySelector("[data-testid=ws-frame-new-chat]")).backgroundColor), `${tag} its Close is not a filled button`);
   await page.click("[data-testid=ws-chat-close-menu]");
-  ok(await page.locator(".ctxmenu .pop-item").evaluateAll((b) => b.map((x) => x.textContent).join()) === "Close,Delete", `${tag} its menu: Close, Delete (and the terminal app, when there is one)`);
-  await page.keyboard.press("Escape");
-  await page.click("[data-testid=ws-chat-close]");
-  ok(await until(page, () => /Closed\. Started /.test(document.querySelector("[data-testid=ws-chat-ended]")?.textContent ?? "")) && !(await page.$("[data-testid=ws-chat-view-terminal]")) && await page.locator("[data-testid=ws-chat-col] textarea").count() === 0, `${tag} closed, it reads, with no composer and no terminal`);
+  ok(await page.locator(".ctxmenu .pop-item").evaluateAll((b) => b.map((x) => x.textContent).join()) === "Close without folding,Delete", `${tag} its menu: Close without folding, Delete (and the terminal app, when there is one)`);
+  await page.click("[data-testid=ws-chat-close-item]");
+  ok(await until(page, () => /Closed, not folded\. Started /.test(document.querySelector("[data-testid=ws-chat-ended]")?.textContent ?? "")) && !(await page.$("[data-testid=ws-chat-view-terminal]")) && await page.locator("[data-testid=ws-chat-col] textarea").count() === 0, `${tag} closed, it reads, with no composer and no terminal`);
   ok(await until(page, () => !!document.querySelector("[data-testid=chat-list] li")), `${tag} …its transcript still there`);
   await page.click("[data-testid=ws-chat-resume]");
   ok(await until(page, () => !document.querySelector("[data-testid=ws-chat-ended]") && !!document.querySelector("[data-testid=ws-chat-view-terminal]")), `${tag} Resume brings it back`);
@@ -184,8 +182,10 @@ async function chat(page, tag, name) {
   await draft(page).fill("Something long");
   await draft(page).press("Enter");
   await until(page, () => document.querySelector("[data-testid=ws-chat-col]")?.dataset.state === "busy");
-  await page.click("[data-testid=ws-chat-close]");
-  ok(/It is working\. Close\?/.test(await page.locator("[data-testid=ws-chat-close]").innerText().catch(() => "")), `${tag} closing one that is working asks first`);
+  await page.click("[data-testid=ws-chat-close-menu]");
+  await page.click("[data-testid=ws-chat-close-item]");
+  ok(/It is working\. Close\?/.test(await page.locator("[data-testid=ws-chat-close-item]").innerText().catch(() => "")), `${tag} closing one that is working, with no fold, asks first`);
+  await page.keyboard.press("Escape");
   await until(page, () => document.querySelector("[data-testid=ws-chat-col]")?.dataset.state === "running", null, 10000);
   // ── Delete ──
   await page.click("[data-testid=ws-chat-close-menu]");
@@ -233,12 +233,12 @@ async function start(page, tag) {
   await tab(page, "chats");
   ok(await page.locator("[data-testid=ws-chats-row]").count() === 7, `${tag} the Chats tab has every chat`);
   const words = await page.locator("[data-testid=ws-chats-row]").evaluateAll((r) => r.map((x) => x.querySelector(".ws-ov-detail").textContent));
-  ok(words.includes("waiting on you") && words.includes("closed · folded into memory") && words.includes("closed · its fold was undone") && words.includes("closed"), `${tag} …their state in words (${words.join("; ")})`);
+  ok(words.includes("waiting on you") && words.includes("closed · folded into memory") && words.includes("closed · its fold was undone") && words.includes("closed, not folded"), `${tag} …their state in words (${words.join("; ")})`);
   ok(/started \w+ \d+, 20\d\d/.test(await page.locator("[data-testid=ws-chats-row] .wsc-when").first().innerText()), `${tag} …and dates`);
   await page.fill("[data-testid=ws-chats-filter]", "naming");
   ok(await page.locator("[data-testid=ws-chats-row]").count() === 1, `${tag} …and a filter`);
   await page.locator("[data-testid=ws-chats-row] button").click();
-  ok(await colOf(page, "Naming") && /Closed · its fold was undone/.test(await page.locator("[data-testid=ws-chat-ended]").innerText()), `${tag} a row opens the chat, ended`);
+  ok(await colOf(page, "Naming") && /Closed\. Its fold was undone\./.test(await page.locator("[data-testid=ws-chat-ended]").innerText()), `${tag} a row opens the chat, ended`);
   // A workspace with none.
   const other = await page.evaluate(() => [...document.querySelectorAll("[data-testid=ws-name]")].map((e) => e.textContent).find((n) => !n.startsWith("Everything")));
   await page.locator("[data-testid=ws-name]", { hasText: other }).first().click();

@@ -112,6 +112,8 @@ export type ChatPaneProps = {
   /** A message that is not the person's (what the engine starts a chat with):
    *  the quiet line to draw for it. */
   quiet?: (text: string) => string | null;
+  /** Put among the turns, after the last one before its time. */
+  insert?: { at: number; node: ReactNode } | null;
   /** What to say above a prompt, when there is something. */
   promptNote?: (lines: readonly string[]) => ReactNode;
   /** The folder a reply's relative paths are under, when it is not `path`
@@ -221,6 +223,11 @@ export function ChatPane(props: ChatPaneProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per prompt
   }, [fp]);
 
+  const draw = (it: Item) => it.k === "user" && props.quiet?.(it.text) ? <li key={it.key} className="chat-note" data-testid="chat-quiet">{props.quiet(it.text)}</li> : <ChatItem key={it.key} it={it} agent={agent} target={target} root={root} reveal={reveal} fullOff={v.fullOff} full={v.full} onLink={onLink} pathLinks={pathLinks} />;
+  // Where the inserted one goes: after the last turn before its time.
+  const after = props.insert ? items.findIndex((it) => "at" in it && typeof it.at === "number" && it.k !== "sep" && it.at > props.insert!.at) : -1;
+  const cut = !props.insert || after < 0 ? items.length : after;
+
   let body: React.ReactNode;
   if (!data) {
     if (turnsUnsupported(v.turns.error)) {
@@ -248,7 +255,7 @@ export function ChatPane(props: ChatPaneProps) {
       );
     } else body = <p className="chat-note" role="status">Reading the conversation…</p>;
   } else if (data.reason) {
-    body = <p className="chat-note" data-testid="chat-no-agent">No agent is running in this place.</p>;
+    body = <p className="chat-note" data-testid="chat-no-agent">{props.ws ? `${data.reason.replace(/^./, (x) => x.toUpperCase())}.` : "No agent is running in this place."}</p>;
   } else {
     body = (
       <>
@@ -259,7 +266,9 @@ export function ChatPane(props: ChatPaneProps) {
         </p>
         {items.length === 0 && !prompt && <p className="chat-note" data-testid="chat-empty">No messages in this session yet.</p>}
         <ol className="chat-list" data-testid="chat-list">
-          {items.map((it) => it.k === "user" && props.quiet?.(it.text) ? <li key={it.key} className="chat-note" data-testid="chat-quiet">{props.quiet(it.text)}</li> : <ChatItem key={it.key} it={it} agent={agent} target={target} root={root} reveal={reveal} fullOff={v.fullOff} full={v.full} onLink={onLink} pathLinks={pathLinks} />)}
+          {items.slice(0, cut).map(draw)}
+          {props.insert && <li key="insert" className="chat-insert">{props.insert.node}</li>}
+          {items.slice(cut).map(draw)}
         </ol>
       </>
     );

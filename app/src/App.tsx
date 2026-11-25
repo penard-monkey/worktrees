@@ -9222,6 +9222,13 @@ function App() {
           terminalCmd={settings.terminal_cmd} uiRem={settings.ui_rem} gen={engineGen}
           open={(conv) => openChat(wsShown.id, conv)}
           away={() => void showWs(wsShown.id, wsTabNow, { chat: null })}
+          // Its diff beside it, unless the person is editing there: then the chip's
+          // dot says it.
+          landed={(commit) => { if (!mainDocApi.current?.editing()) void showChange(wsShown.id, commit).then(() => setWsSide("chat")); }}
+          showChange={(commit) => void showChange(wsShown.id, commit)}
+          openMemory={(path) => openMemory(wsShown.id, path)}
+          memoryTick={wsMem.tick(wsShown.id)}
+          memoryChanged={() => void wsMem.refresh(wsShown.id)}
           openTerminalApp={(session) => { invoke("open_terminal", { cmd: settings.terminal_cmd, session }).catch((e) => fail(e)); }}
           onError={fail} />
       ) : null;
@@ -9812,7 +9819,7 @@ function App() {
           const chats = wsChatsOn ? wsChats.rows(w.id) : [];
           const rollup = rollupOf([
             ...places.map((p) => ({ a: activityOf(p) as string, done: doneOf(p) === 1 })),
-            ...chats.map((r) => ({ a: r.state === "waiting" || r.state === "fold-failed" ? "waiting" : r.state === "busy" || r.state === "folding" ? "busy" : "", done: false })),
+            ...chats.map((r) => ({ a: r.state === "waiting" || r.state === "fold-failed" ? "waiting" : r.state === "busy" || r.state === "folding" || r.state === "checking" ? "busy" : "", done: false })),
           ], (x) => x.a, (x) => x.done);
           const dropOn = (drag?.target?.kind === "ws-add" || drag?.target?.kind === "ws-plan" || drag?.target?.kind === "ws-idea") && drag.target.id === w.id;
           const dragged = drag?.item.kind === "workspace" && drag.item.id === w.id;
@@ -10781,7 +10788,7 @@ function App() {
                       : !memView ? <p className="ws-ov-none">Reading…</p>
                       : !memView.made ? <NoMemory make={() => void makeMemory(wsShown.id)} busy={memBusy} />
                       : (
-                        <MemoryCard ws={wsShown.id} view={memView} ago={ago} open={(path) => openMemory(wsShown.id, path)} diff={(commit) => void showChange(wsShown.id, commit)}
+                        <MemoryCard ws={wsShown.id} chat={(c) => chatNavName(wsShown.id, c)} view={memView} ago={ago} open={(path) => openMemory(wsShown.id, path)} diff={(commit) => void showChange(wsShown.id, commit)}
                           follow={(href) => { const to = memoryDocs(wsShown.id).target("MEMORY.md", href); if (to) followDoc(to); }}
                           changed={() => void wsMem.refresh(wsShown.id)} />
                       )}
@@ -10855,7 +10862,7 @@ function App() {
                       linkNote: memLinkNote,
                       historyAsk: memAt?.ws === mainDoc.ws ? memAt.n : 0,
                       history: (close: () => void) => (
-                        <MemoryHistory key={`${mainDoc.ws}|${mainDoc.name}|${memAt?.ws === mainDoc.ws ? memAt.n : 0}`} ws={mainDoc.ws} path={mainDoc.name} at={memAt?.ws === mainDoc.ws ? memAt.commit : null} tick={wsMem.tick(mainDoc.ws)}
+                        <MemoryHistory chat={(c) => chatNavName(mainDoc.ws, c)} key={`${mainDoc.ws}|${mainDoc.name}|${memAt?.ws === mainDoc.ws ? memAt.n : 0}`} ws={mainDoc.ws} path={mainDoc.name} at={memAt?.ws === mainDoc.ws ? memAt.commit : null} tick={wsMem.tick(mainDoc.ws)}
                           open={(path) => { close(); setMemAt(null); openMemory(mainDoc.ws, path); }} close={() => { close(); setMemAt(null); }} />
                       ),
                       strips: (mode: "edit" | "read") => (

@@ -19,6 +19,8 @@ export type MainDocApi = {
   leave(): Promise<boolean>;
   /** Show the open one in Edit. */
   edit(): void;
+  /** A person is editing it: on screen, in Edit. */
+  editing(): boolean;
 };
 
 export function MainDocument(props: {
@@ -80,6 +82,8 @@ export function MainDocument(props: {
     return ok;
   }, [leaveDoc]);
   openRef.current = open;
+  const modeRef = useRef(doc.mode);
+  modeRef.current = doc.mode;
   const had = useRef(false);
 
   // Open what is asked for, and tell the window when it is another: a merged id
@@ -108,7 +112,7 @@ export function MainDocument(props: {
 
   useEffect(() => {
     const api = props.api;
-    api.current = { leave: () => leave("before you leave it"), edit: () => switchMode("edit", false) };
+    api.current = { leave: () => leave("before you leave it"), edit: () => switchMode("edit", false), editing: () => at.current.shown && !!openRef.current && modeRef.current === "edit" };
     return () => { api.current = null; };
   }, [props.api, leave, switchMode]);
 
