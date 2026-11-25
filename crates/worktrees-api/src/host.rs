@@ -270,7 +270,6 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
             }
         }
         crate::ideas::tick(&pollctx, &mut ideas_watch);
-        crate::memory::tick(&pollctx, &mut memory_watch);
         crate::keepawake::tick(&pollctx);
         attach_ticks += 1;
         if attach_ticks >= 1200 {
@@ -348,6 +347,9 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
                 f(&note);
             }
         }
+        // After the chats, so who is live is read in the same beat.
+        let live = last_chats.as_ref().map(crate::watch::WorkspaceSessions::by_workspace).unwrap_or_default();
+        crate::memory::tick(&pollctx, &mut memory_watch, live);
         // Every harness without a probe file, read once each (`harness_feed`:
         // codex's rollouts, pi's session files).
         let lanes: Vec<(&'static str, LaneTick)> = provider::PROVIDERS
