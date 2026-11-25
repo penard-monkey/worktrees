@@ -226,6 +226,68 @@ function rig(initial = "---\nid: 01JC\n---\n\n# A\n", { holdWrites = false } = {
   check(r.last() === "clean" && r.disk.content === r.editor, "both edits are on disk");
 }
 
+// ── leaving: the text typed while leave's own write is out ──────────────────
+{
+  const r = rig(undefined, { holdWrites: true });
+  r.type(r.editor + "1");
+  let left = null;
+  const l = r.s.drain().then((x) => { left = x; });
+  await settle();
+  check(r.writes().length === 1, "leaving saves at once");
+  for (const c of ["2", "3"]) {
+    r.type(r.editor + c);
+    await r.release();
+    check(left === null, `typed (${c}) during that write: it has not left`);
+  }
+  await r.release();
+  await within(l, "leaving");
+  check(left === true && r.disk.content === r.editor && r.editor.endsWith("123"), "it leaves with all of it on disk");
+  r.s.close();
+  check(r.c.pending() === 0 && !r.s.dirty(), "and nothing is left for a timer that closing drops");
+}
+{
+  const r = rig(undefined, { holdWrites: true });
+  r.type(r.editor + "1");
+  const l = r.s.drain();
+  await settle();
+  r.type(r.editor + "2");
+  r.disk.content = "theirs"; r.disk.mtime = 9000;
+  await r.release();
+  check(await Promise.race([l, settle().then(() => "pending")]) === false && r.last() === "conflict" && r.editor.endsWith("12"), "a refusal is said: it has not left, and the text is there");
+}
+{
+  const r = rig(undefined, { holdWrites: true });
+  r.type(r.editor + "1");
+  let left = null;
+  const l = r.s.drain().then((x) => { left = x; });
+  await settle();
+  for (let i = 0; i < 60 && left === null; i++) { r.type(r.editor + "x"); await r.release(); }
+  await within(l, "leaving while it is typed in");
+  check(left === false && r.s.dirty(), "one that is typed in without a pause is not left, rather than waited for for ever");
+  check(r.c.pending() === 1, "and its autosave is still there");
+}
+{
+  const r = rig();
+  check(await r.s.drain() === true && r.writes().length === 0, "leaving a clean one writes nothing");
+}
+
+// ── a change by an act of the window's own (rename, restore), typed into ────
+{
+  const r = rig();
+  r.disk.content = "---\nid: 01JC\n---\n\n# Renamed\n"; r.disk.mtime = 2000;
+  r.type(r.editor + "typed during it");
+  r.s.adopt(r.disk.content, 2000);
+  check(r.editor.endsWith("typed during it") && r.last() === "conflict", "what was typed during a rename is not replaced by its answer: it asks");
+  await r.s.keepMine();
+  check(r.disk.content === r.editor && r.last() === "clean", "and Keep mine saves it");
+}
+{
+  const r = rig();
+  r.disk.content = "---\nid: 01JC\n---\n\n# Renamed\n"; r.disk.mtime = 2000;
+  r.s.adopt(r.disk.content, 2000);
+  check(r.editor === r.disk.content && r.last() === "clean", "with nothing typed its answer is taken");
+}
+
 // ── a refused save ──────────────────────────────────────────────────────────
 {
   const r = rig();

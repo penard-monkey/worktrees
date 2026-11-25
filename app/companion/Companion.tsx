@@ -331,9 +331,11 @@ export function Companion() {
     try {
       const d = await invoke<Doc>("idea_create", { title: null });
       trace(gen, `created ${d.id}`);
+      void refresh();
+      // Typed into the one before while it was made.
+      if (!(await leave())) return;
       setMode("edit");
       begin(d, true);
-      void refresh();
     } catch (e) { setNotice(`Could not make a new idea: ${errText(e)}`); }
   }, [leave, begin, setMode, refresh, gen]);
 
@@ -342,15 +344,16 @@ export function Companion() {
     try {
       const d = await invoke<Doc>("idea_adopt", { file: i.file, expectedMtime: i.mtime_ms });
       trace(gen, `adopted ${i.file} as ${d.id}`);
-      begin(d);
       void refresh();
+      if (!(await leave())) return;
+      begin(d);
     } catch (e) { setNotice(`Could not adopt ${i.file}: ${errText(e)}`); void refresh(); }
   }, [leave, begin, refresh, gen]);
 
   const remove = useCallback(() => arm.confirm("remove", async () => {
     const s = session.current;
     if (!s || !open) return;
-    await s.flush();
+    if (!(await s.drain())) { setNotice("Save or reload the open idea first: its text is not saved."); return; }
     setBusy(true);
     try {
       await invoke("idea_remove", { id: open.id, expectedMtime: s.lastMtime });
@@ -370,8 +373,7 @@ export function Companion() {
   const act = useCallback(async <T,>(call: Call, label: string): Promise<T | null> => {
     const s = session.current;
     if (s) {
-      await s.flush();
-      if (s.held() || s.current.kind === "error") { setNotice("Save or reload the open idea first: its text is not saved."); return null; }
+      if (!(await s.drain()) || s.held() || s.current.kind === "error") { setNotice("Save or reload the open idea first: its text is not saved."); return null; }
     }
     setBusy(true);
     try {
@@ -434,6 +436,7 @@ export function Companion() {
     setNotice(`Merged “${tf}” into “${ti}”.`);
     setUndo({ label: "Undo merge", run: undoBy([from, into], []) });
     if (open?.id === into || open?.id === from) {
+      if (open.id !== d.id && !(await leave())) return;
       begin(d);
       if (open?.id === from) setNotice(`Merged “${tf}” into “${ti}”: this is “${ti}” now.`);
     }
@@ -452,7 +455,7 @@ export function Companion() {
   const doSplit = useCallback(async (sel: { start: number; end: number }, extract: boolean, title?: string) => {
     if (!open || !session.current) return;
     setSplitAsk(null);
-    await session.current.flush();
+    await session.current.drain();
     const id = open.id;
     const out = await act<{ new: Doc; source: Doc }>(splitCall(id, sel.start, sel.end, extract, session.current.lastMtime, title), `${extract ? "extract" : "split"} from ${id}`);
     if (!out) return;
@@ -482,7 +485,7 @@ export function Companion() {
   }, [act, titleOf, leave, begin]);
 
   const doAddIdeas = useCallback(async (plan: string, ids: string[]) => {
-    await session.current?.flush();
+    await session.current?.drain();
     const d = await act<Doc>(addIdeasCall(plan, ids, mtimeOf(plan)), `add ${ids.join(",")} to plan ${plan}`);
     if (!d) return;
     setNotice(`Added ${ids.length === 1 ? `“${titleOf(ids[0])}”` : `${ids.length} ideas`} to “${d.title}”.`);
@@ -491,7 +494,7 @@ export function Companion() {
   }, [act, titleOf, afterPlanEdit]);
 
   const doRemoveIdea = useCallback(async (plan: string, idea: string) => {
-    await session.current?.flush();
+    await session.current?.drain();
     const d = await act<Doc>(removeIdeaCall(plan, idea, mtimeOf(plan)), `take ${idea} out of plan ${plan}`);
     if (!d) return;
     setNotice(`Took it out of “${d.title}”. The idea stays; the plan's last version is in History.`);
@@ -500,7 +503,7 @@ export function Companion() {
   }, [act, afterPlanEdit]);
 
   const doAddProject = useCallback(async (plan: string, root: string) => {
-    await session.current?.flush();
+    await session.current?.drain();
     const d = await act<Doc>(addProjectCall(plan, root, mtimeOf(plan)), `add project ${root} to plan ${plan}`);
     if (!d) return;
     setNotice(`Added the project to “${d.title}”'s Projects.`);
@@ -596,12 +599,12 @@ export function Companion() {
     invoke("raise_window").catch(() => {});
   }, []);
   const bringProject = useCallback(async (plan: string, name: string) => {
-    await session.current?.flush();
+    await session.current?.drain();
     trace(gen, `asked the main window for ${name} of plan ${plan}`);
     askMain({ act: "project", plan, name });
   }, [askMain, gen]);
   const doLinkPlace = useCallback(async (plan: string, item: ItemRef, root: string, slug: string) => {
-    await session.current?.flush();
+    await session.current?.drain();
     const d = await act<Doc>(linkPlaceCall(plan, item, root, slug, mtimeOf(plan)), `link ${slug} to “${item.title}”`);
     if (!d) return;
     setNotice(`“${item.title}” has the place ${slug} now.`);
@@ -613,8 +616,7 @@ export function Companion() {
   const doStart = useCallback(async (plan: string, item: WorkItem, root: string, brief: string): Promise<StartDone> => {
     const s = session.current;
     if (s) {
-      await s.flush();
-      if (s.held() || s.current.kind === "error") throw "Save or reload the plan first: its text is not saved.";
+      if (!(await s.drain()) || s.held() || s.current.kind === "error") throw "Save or reload the plan first: its text is not saved.";
     }
     const c = startCall(plan, item, root, brief, agentFor(item, agentPrefs), mtimeOf(plan));
     const out = await invoke<StartDone>(c.cmd, c.args);

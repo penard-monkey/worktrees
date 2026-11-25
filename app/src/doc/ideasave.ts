@@ -11,7 +11,8 @@
 //   `flush()` (the editor's blur, switching ideas, the window hiding or
 //   closing). A text equal to `base` writes NOTHING: no `idea_write` is sent.
 //   One write at a time; an edit made while one is in flight is saved by
-//   the next.
+//   the next. **Leaving drains** (`drain()`): it saves until the file has the
+//   editor's text, or says it cannot.
 // - **A refused save** (the file changed on disk since `mtime`) never
 //   discards the person's text: the session goes to `conflict` and stops
 //   saving until they choose `reload()` (take the file's) or `keepMine()`
@@ -39,6 +40,8 @@
 //   idea (the window's act, not this module's).
 
 export const SAVE_PAUSE_MS = 800;
+/** How many saves leaving waits for, when each meets new typing. */
+export const DRAIN_ROUNDS = 20;
 
 /** The refusal `idea_write` gives when `expected_mtime` no longer matches. */
 export const isStale = (e: string) => /changed on disk/.test(e);
@@ -150,6 +153,20 @@ export class Session {
     return this.save();
   }
 
+  /** Save until the file has the editor's text, which is what leaving it needs:
+   *  one flush is not that, an edit made during its write is not in it. `false`:
+   *  it cannot be saved (the state says why), or it is typed in without a pause.
+   *  True holds for the code that runs next with no await but this one's. */
+  async drain(): Promise<boolean> {
+    for (let n = 0; n < DRAIN_ROUNDS; n++) {
+      await this.flush();
+      if (this.held() || this.state.kind === "error") return !this.dirty();
+      if (!this.dirty() && !this.inflight) return true;
+    }
+    if (this.timer === null) this.edited();
+    return false;
+  }
+
   private save(keepHistory = false): Promise<void> {
     if (this.closed || this.held()) return Promise.resolve();
     if (this.inflight) { this.again = true; return this.inflight; }
@@ -259,10 +276,17 @@ export class Session {
     await this.save(true);
   }
 
-  /** The file was changed by one of the window's own acts (a rename): its
-   *  new text and mtime, which are ours. */
+  /** The file was changed by one of the window's own acts (a rename, a restore):
+   *  its new text and mtime, which are ours. Typed into while that act was out,
+   *  the editor keeps the person's text and asks. */
   adopt(content: string, mtime: number): void {
     this.own.add(mtime);
+    if (this.held()) return;
+    if (this.dirty() && this.deps.text() !== content) {
+      if (this.timer !== null) { this.deps.clock.clearTimeout(this.timer); this.timer = null; }
+      this.set({ kind: "conflict", why: "elsewhere" });
+      return;
+    }
     this.take({ content, mtime_ms: mtime });
   }
 
