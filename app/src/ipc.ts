@@ -539,6 +539,9 @@ export const CONSOLE_ROWS: readonly string[] = [
   // and what a plan does (phase 5)
   "plan_set_project", "plan_start", "plan_link_place",
   "workspace_from_plan", "workspace_set_plan", "workspace_link_idea", "workspace_unlink_idea", "workspace_overview",
+  // A workspace's memory: the host's own folder, the console's.
+  "workspace_memory", "workspace_memory_make", "workspace_memory_file", "workspace_memory_image", "workspace_memory_write",
+  "workspace_memory_put", "workspace_memory_log", "workspace_memory_diff", "workspace_memory_revert",
 ];
 
 /** The device's capabilities on the host this window drives, from the remote

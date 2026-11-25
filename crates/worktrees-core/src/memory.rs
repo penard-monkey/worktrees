@@ -1558,6 +1558,10 @@ mod tests {
         s.put(INDEX, &"x".repeat(INDEX_BUDGET as usize + 1));
         let i = index_at(&s.root, &s.id).unwrap().unwrap();
         assert!(i.over_budget && i.content.len() as u64 == i.size, "said, never cut");
+        // A save in flight and Finder's file are never in a commit.
+        s.put(".MEMORY.md.0123456789abcdef.tmp", "x");
+        s.put("topics/.DS_Store", "x");
+        assert!(status_at(&s.root, &s.id).unwrap().dirty.iter().all(|p| !p.contains("/.") && !p.starts_with('.')));
         // A clone inside, and a huge file: named, and left out of the history.
         fs::create_dir_all(s.mem().join("topics/clone/.git")).unwrap();
         s.put("topics/clone/in.md", "x\n");
