@@ -78,3 +78,11 @@
 .wsc-item.on { box-shadow: inset 3px 0 0 var(--ws-hue); }
 .wsc-item-b { flex: 1 1 16rem; min-width: 0; width: auto; }
 .wsc-when { flex: none; padding: 2px var(--s3); color: var(--txt); font-size: var(--fs-meta); }
+
+/* ── a live chat whose rules are not what a launch now would get ── */
+.wsc-stale-b { flex: 0 1 auto; min-width: 0; border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line)); border-radius: var(--r-sm); background: color-mix(in srgb, var(--warn) 12%, var(--bg-panel)); color: var(--txt-hi); font: inherit; font-size: var(--fs-meta); padding: 1px var(--s2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wsc-stale { max-width: 22rem; padding: var(--s2) var(--s3); border-bottom: 1px solid var(--line); color: var(--txt-hi); font-size: var(--fs-meta); }
+.wsc-stale p { margin: 0; }
+.wsc-stale ul { margin: var(--s1) 0; padding-left: var(--s4); }
+p.wsc-stale { margin: 0; }
+.wsc-limits { max-width: 22rem; margin: 0; padding: var(--s2) var(--s3); border-top: 1px solid var(--line); color: var(--txt); font-size: var(--fs-meta); }

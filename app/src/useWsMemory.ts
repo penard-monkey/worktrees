@@ -1,5 +1,6 @@
 /** The workspaces' memories as the main window holds them: what each folder has
- *  (`workspace_memory`), read again when `workspaces:memory` names it, and what
+ *  (`workspace_memory`), read again when `workspaces:memory` (a file) or
+ *  `workspaces:history` (a commit) names it, and what
  *  was last looked at here (this machine's own: browser storage, which may be
  *  empty). Workspace chats' beta. */
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -55,8 +56,8 @@ export function useWsMemory(on: boolean, ids: readonly string[]): WsMemoryLive {
   }, [on, key, refresh]);
   useEffect(() => {
     if (!on) return;
-    const un = listen<{ id?: string }>("workspaces:memory", (e) => { if (e.payload?.id) void refresh(e.payload.id); });
-    return () => { un.then((f) => f()).catch(() => {}); };
+    const uns = ["workspaces:memory", "workspaces:history"].map((ev) => listen<{ id?: string }>(ev, (e) => { if (e.payload?.id) void refresh(e.payload.id); }));
+    return () => { for (const un of uns) un.then((f) => f()).catch(() => {}); };
   }, [on, refresh]);
 
   return {

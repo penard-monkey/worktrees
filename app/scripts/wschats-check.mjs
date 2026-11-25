@@ -50,9 +50,9 @@ eq("closed, by its fold", [undefined, { state: "done", commit: "a", reverted: fa
 const p = (reads, why) => ({ root: "/r", name: "r", registered: true, private: false, reads, ...(why ? { why } : {}) });
 eq("what it reads", [W.readsWords([p("yes"), p("yes"), p("no", "private")]), W.readsWords([])], ["reads 2 of 3", "reads no project"]);
 eq("the first line", [W.introWords([p("yes"), p("no")]), W.introWords([p("yes")]), W.introWords([])], [
-  "It reads the memory index first, and it can read 1 of 2 projects. It never writes in a project.",
-  "It reads the memory index first, and it can read its project. It never writes in a project.",
-  "It reads the memory index first, and the workspace has no projects to read. It never writes in a project."]);
+  "It reads the memory index first, and it can read 1 of 2 projects. It is told not to write in a project. Claude's file tools are blocked there; programs it runs are not.",
+  "It reads the memory index first, and it can read its project. It is told not to write in a project. Claude's file tools are blocked there; programs it runs are not.",
+  "It reads the memory index first, and the workspace has no projects to read. It is told not to write in a project. Claude's file tools are blocked there; programs it runs are not."]);
 eq("a read the engine does not call `yes` is not one", W.readsCount([p("partly")]).read, 0);
 
 // ── the fold ──
@@ -92,6 +92,17 @@ const dispatch = read("../../crates/worktrees-cli/src/serve/dispatch.rs");
 for (const [, row] of kind("ws")) eq(`${row} is a row, console only, on the chat`, new RegExp(`^\\s+${row}: HostConsole \\[console, workspace_chat\\(conv, id\\)\\]`, "m").test(dispatch), true);
 eq("no other idea_* or workspace_* chat row is invoked from chat.ts", (chatTs.replace(table, "").match(/"(idea|workspace)_[a-z_]+"/g) ?? []), []);
 eq("a desk chat sends no file and no command", [(chatTs.match(/if \(isDesk\(t\)\) return/g) ?? []).length], [3]);
+
+// ── its rules ──
+eq("the intro's limits are the engine's words", W.introWords([], "The rules are set when the chat starts."), "It reads the memory index first, and the workspace has no projects to read. It is told not to write in a project. The rules are set when the chat starts.");
+const chg = (kind, change, name = "valleos", path = "/w/valleos") => W.accessWords({ kind, name, path, change });
+eq("what changed since it started", ["private", "removed", "unregistered", "unreadable", "readable", "added"].map((c) => chg("project", c)), ["valleos is private now", "valleos was taken out of the workspace", "valleos is not registered any more", "valleos cannot be read any more", "valleos can be read now", "valleos was added"]);
+eq("…a document, the rules, and what this build does not know", [...["unlinked", "gone", "moved", "linked"].map((c) => chg("document", c, "Plan")), chg("rules", "other", "", ""), chg("project", "frozen"), chg("project", "added", "")], ["“Plan” is not linked any more", "“Plan” is gone", "“Plan” was moved", "“Plan” was linked", "its other rules changed", "valleos: frozen", "valleos was added"]);
+{
+  const c = { id: "C", session: "s", title: "t", started: "", last_activity: "", state: "running", note: "n", note_exists: true, fold_now: null };
+  const done = { state: "done", commit: "abc", reverted: false };
+  eq("a fold that landed and is ending its session is drawn as landed", [W.rowOf({ ...c, fold: { ...done, closing: true } }, null, null), W.rowOf({ ...c, fold: done }, null, null), W.rowOf({ ...c, fold: { ...done, closing: true }, fold_now: { state: "folding", why: null } }, null, null)].map((r) => [r.state, r.live]), [["ended", false], ["running", true], ["folding", true]]);
+}
 
 if (failed) { console.log(`\nwschats-check: ${failed} failed`); process.exit(1); }
 console.log("wschats-check: all ok");

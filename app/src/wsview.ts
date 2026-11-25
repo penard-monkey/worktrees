@@ -16,6 +16,12 @@ export const wsFrameOn = (b: WsBetas): boolean => b.ideas || b.chats;
 export function wsTabs(b: WsBetas): WsTab[] {
   return ["overview", ...(b.chats ? ["memory" as const] : []), ...(b.ideas ? ["plan" as const, "ideas" as const] : []), ...(b.chats ? ["chats" as const] : [])];
 }
+/** The tabs of workspace `id`'s view: those of the betas, and the tab of a document of
+ *  it whose text can be saved nowhere, whatever the betas say. */
+export function tabsWith(base: readonly WsTab[], id: string, stuck: { ws: string; tab: WsTab } | null): readonly WsTab[] {
+  if (!stuck || stuck.ws !== id || base.includes(stuck.tab)) return base;
+  return wsTabs({ ideas: true, chats: true }).filter((t) => t === stuck.tab || base.includes(t));
+}
 /** The tab to show when `t` is asked for: itself, or Overview when it is not drawn. */
 export const tabOr = (t: WsTab, tabs: readonly WsTab[]): WsTab => (tabs.includes(t) ? t : "overview");
 
@@ -90,6 +96,18 @@ export function placeWsSet(cur: Record<string, string>, key: string, ws: string 
   if (!ws) return rest;
   return Object.fromEntries([...Object.entries(rest), [key, ws] as const].slice(-PLACE_WS_MAX));
 }
+
+/** The documents' share of the room beside a chat, between both floors. */
+export const DOCS_FLOOR = 340, CHAT_FLOOR = 420;
+export function splitBounds(width: number): { min: number; max: number } {
+  if (!(width > 0)) return { min: 0.2, max: 0.8 };
+  const min = DOCS_FLOOR / width, max = 1 - CHAT_FLOOR / width;
+  return min <= max ? { min, max } : { min: 0.5, max: 0.5 };
+}
+export const splitClamp = (share: number, width: number): number => {
+  const b = splitBounds(width);
+  return Math.min(b.max, Math.max(b.min, share));
+};
 
 /** The counts beside a workspace's name. */
 export const wsCounts = (projects: number, liveChats = 0): string =>

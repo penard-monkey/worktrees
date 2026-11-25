@@ -11,10 +11,11 @@
  *
  *  Drawn with Ideas OR workspace chats on (beta.ts); what each part needs is
  *  said by `tabs` and the two flags, which come from the parts' own helpers. */
-import { useState, type ReactNode } from "react";
+import { useLayoutEffect, useState, type ReactNode } from "react";
 import * as Icons from "./icons";
 import { WS_TAB_LABEL, type WsTab } from "./navHistory";
 import { LinkIdea, NoChats, NoPlan, PlanProblems, PlanProjects, WorkList, type WsParts } from "./WorkspaceOverview";
+import { splitBounds, splitClamp } from "./wsview";
 import { useTier } from "./doc/useTier";
 
 /** From this much room the Ideas tab has its list beside the document, and from
@@ -167,16 +168,28 @@ export function WorkspaceFrame(props: {
   const both = useTier(body, BOTH) === 1;
   const one = props.middle && !both ? props.side : undefined;
   // The documents' share of the room beside a chat, this machine's own.
-  const [share, setShare] = useState(splitNow);
+  const [wanted, setShare] = useState(splitNow);
+  const [width, setWidth] = useState(0);
+  useLayoutEffect(() => {
+    if (!body) return;
+    const look = () => { const w = body.getBoundingClientRect().width; if (w > 0) setWidth(w); };
+    look();
+    const ro = new ResizeObserver(look);
+    ro.observe(body);
+    return () => ro.disconnect();
+  }, [body]);
+  // What is drawn, said and kept: never past a floor, whoever moved it.
+  const share = splitClamp(wanted, width), bounds = splitBounds(width);
   const drag = (x: number) => {
     const r = body?.getBoundingClientRect();
     if (!r?.width) return;
     const w = props.dockLeft ? x - r.left : r.right - x;
-    setShare(Math.min(1 - 420 / r.width, Math.max(340 / r.width, w / r.width)));
+    setShare(splitClamp(w / r.width, r.width));
   };
   const dropped = () => { try { window.localStorage.setItem(SPLIT_KEY, String(share)); } catch { /* it starts at its default */ } };
   const room = useTier(docs, ROOM);
   const beside = room === 2 || (room === 1 && tab !== "plan");
+  const panel = (t: WsTab) => ({ role: "tabpanel", id: `wsf-panel-${t}`, "aria-labelledby": `wsf-tab-${t}` });
   const [sideOpen, setSideOpen] = useState(false);
   const pane = tab === "plan" || tab === "ideas" || tab === "memory";
   const side = !ws ? null
@@ -209,7 +222,7 @@ export function WorkspaceFrame(props: {
         {props.middle && <div className="wsf-mid" data-testid="ws-mid">{props.middle}</div>}
         {props.middle && !one && (
           <div className="wsf-split-bar" role="separator" aria-orientation="vertical" aria-label="Documents width" tabIndex={0} data-testid="ws-split"
-            aria-valuenow={Math.round(share * 100)} aria-valuemin={20} aria-valuemax={80}
+            aria-valuenow={Math.round(share * 100)} aria-valuemin={Math.floor(bounds.min * 100)} aria-valuemax={Math.ceil(bounds.max * 100)}
             onPointerDown={(e) => { e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); }}
             onPointerMove={(e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) drag(e.clientX); }}
             onPointerUp={dropped}
@@ -217,22 +230,29 @@ export function WorkspaceFrame(props: {
               const by = (e.key === "ArrowLeft" ? 0.02 : e.key === "ArrowRight" ? -0.02 : 0) * (props.dockLeft ? -1 : 1);
               if (!by) return;
               e.preventDefault();
-              setShare((x) => Math.min(0.8, Math.max(0.2, x + by)));
+              setShare(splitClamp(share + by, width));
             }} onKeyUp={dropped} />
         )}
         <div className="wsf-docs" ref={setDocs} style={props.middle && !one ? { flex: `0 0 ${share * 100}%` } : undefined} data-room={room === 2 ? "wide" : "narrow"}>
           {ws && (
-            <div className="wsf-tabs" role="tablist" aria-label="The workspace's documents">
+            <div className="wsf-tabs" role="tablist" aria-label="The workspace's documents" onKeyDown={(e) => {
+              const all = [...e.currentTarget.querySelectorAll<HTMLElement>("[role=tab]")], at = all.indexOf(document.activeElement as HTMLElement);
+              const to = e.key === "ArrowRight" ? at + 1 : e.key === "ArrowLeft" ? at - 1 : e.key === "Home" ? 0 : e.key === "End" ? all.length - 1 : null;
+              if (to === null || at < 0 || e.metaKey || e.ctrlKey || e.altKey) return;
+              e.preventDefault();
+              // The focus alone: opening a tab leaves a document, so Enter does that.
+              all[(to + all.length) % all.length].focus();
+            }}>
               {props.tabs.map((t) => (
-                <button key={t} role="tab" className={"wsf-tab" + (t === tab ? " on" : "")} aria-selected={t === tab} data-testid="ws-tab" data-tab={t} onClick={() => props.showTab(t)}>
+                <button key={t} role="tab" id={`wsf-tab-${t}`} aria-controls={t === tab ? `wsf-panel-${t}` : undefined} tabIndex={t === tab ? 0 : -1} className={"wsf-tab" + (t === tab ? " on" : "")} aria-selected={t === tab} data-testid="ws-tab" data-tab={t} onClick={() => props.showTab(t)}>
                   {WS_TAB_LABEL[t]}{props.counts[t] ? <span className="wsf-tab-n">{props.counts[t]}</span> : null}
                 </button>
               ))}
             </div>
           )}
-          {ws && tab === "overview" && <div className="wsf-scroll">{props.overview}</div>}
-          {ws && tab === "chats" && <div className="wsf-scroll">{props.counts.chats ? props.chatsTab : <NoChats newChat={props.firstChat} />}</div>}
-          <div className="wsf-split" hidden={!pane} data-beside={beside || undefined}>
+          {ws && tab === "overview" && <div className="wsf-scroll" {...panel("overview")}>{props.overview}</div>}
+          {ws && tab === "chats" && <div className="wsf-scroll" {...panel("chats")}>{props.counts.chats ? props.chatsTab : <NoChats newChat={props.firstChat} />}</div>}
+          <div className="wsf-split" {...(ws && pane ? panel(tab) : {})} hidden={!pane} data-beside={beside || undefined}>
             {side && !beside && (
               <button className="wsf-side-line" data-testid="ws-side-toggle" aria-expanded={sideOpen} onClick={() => setSideOpen((o) => !o)}>
                 {sideOpen ? <Icons.ChevronDown size={11} /> : <Icons.ChevronRight size={11} />} {sideLine}

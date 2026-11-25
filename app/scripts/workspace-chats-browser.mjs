@@ -107,11 +107,26 @@ async function chat(page, tag, name) {
   const g = await page.evaluate(() => { const m = document.querySelector("[data-testid=ws-mid]").getBoundingClientRect(), d = document.querySelector(".wsf-docs").getBoundingClientRect(), b = document.querySelector(".wsf-body").getBoundingClientRect(); return { left: m.left <= b.left + 1, right: d.left >= m.right - 1, share: d.width / b.width, mid: m.width, docs: d.width }; });
   ok(g.left && g.right && Math.abs(g.share - 0.46) < 0.01 && g.mid >= 420 && g.docs >= 340, `${tag} chat left, documents on the dock's side, at 46 percent (${JSON.stringify(g)})`);
   ok(await row(page, "Release order").evaluate((e) => e.classList.contains("on")) && !(await page.evaluate(() => document.querySelector(".home-item").classList.contains("on"))), `${tag} its row is marked, Home is not lit`);
-  ok(/A chat of Everything\. It reads the memory index first, and it can read \d of 3 projects\. It never writes in a project\./.test(await page.locator("[data-testid=chat-intro]").innerText()), `${tag} its first line says what it is`);
+  ok(/A chat of Everything\. It reads the memory index first, and it can read \d of 3 projects\. It is told not to write in a project\. The rules are set when the chat starts\. They stop Claude's file tools, not every program it runs\./.test(await page.locator("[data-testid=chat-intro]").innerText()), `${tag} its first line says what it is`);
   const reads = await page.locator("[data-testid=ws-chat-readsb]").innerText();
   ok(/^reads \d of 3/.test(reads), `${tag} the header counts what it reads (${reads})`);
   await page.click("[data-testid=ws-chat-readsb]");
   ok(/not read: not registered/.test(await page.locator("[data-testid=ws-chat-reads]").innerText()), `${tag} …and names which, and why not`);
+  ok(/They stop Claude's file tools, not every program it runs\./.test(await page.locator("[data-testid=ws-chat-limits]").innerText()) && !(await page.$("[data-testid=ws-chat-stale]")) && !(await page.$("[data-testid=ws-chat-stale-chip]")), `${tag} …with what its rules stop, in the engine's words`);
+  // ── its rules are not what a launch now would get ──
+  await page.keyboard.press("Escape");
+  const stale = await page.evaluate(() => { const c = document.querySelector("[data-testid=ws-chat-col]").dataset.chat, w = document.querySelector("[data-testid=ws-frame]").dataset.ws; window.__mock.wsStale(w, c, [{ kind: "project", name: "valleos", path: "/w/valleos", change: "private" }, { kind: "document", name: "Plan", path: "/i/p.md", change: "unlinked" }]); return [w, c]; });
+  ok(await until(page, () => !!document.querySelector("[data-testid=ws-chat-stale-chip]")) && await page.evaluate(() => { const b = document.querySelector("[data-testid=ws-chat-stale-chip]").getBoundingClientRect(); const h = document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2); return !!h.closest("[data-testid=ws-chat-stale-chip]"); }), `${tag} a chat whose rules changed says so in its header`);
+  await page.click("[data-testid=ws-chat-stale-chip]");
+  ok(/valleos is private now\s+“Plan” is not linked any more[\s\S]*Close and start a new chat to apply/.test(await page.locator("[data-testid=ws-chat-stale]").innerText()), `${tag} …and what, and what to do about it`);
+  await page.waitForTimeout(300);
+  ok(await page.evaluate(() => { const b = document.querySelector("[data-testid=ws-chat-stale]")?.getBoundingClientRect(); return !!b && b.width > 0 && !!document.elementFromPoint(b.x + 20, b.y + 10)?.closest("[data-testid=ws-chat-stale]"); }), `${tag} …and it stays open to be read`);
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/wsc-stale-${name}.png` });
+  await page.keyboard.press("Escape");
+  ok(!!(await page.$("[data-testid=ws-chat-col] textarea")), `${tag} nothing is ended: it goes on`);
+  await page.evaluate(([w, c]) => window.__mock.wsStale(w, c, null), stale);
+  ok(await until(page, () => !document.querySelector("[data-testid=ws-chat-stale-chip]")), `${tag} and when they are the same again, it is gone`);
+  await page.click("[data-testid=ws-chat-readsb]");
   await page.keyboard.press("Escape");
   ok(await until(page, () => /Which ships first\?/.test(document.querySelector("[data-testid=chat-list]")?.textContent ?? "")), `${tag} its transcript`);
   ok(!(await page.$("[data-testid=ws-chat-col] .chat-attach")) && !/for a command|\/ for/.test(await page.locator("[data-testid=ws-chat-col]").innerText()) && (await draft(page).getAttribute("placeholder")) === "Message this chat", `${tag} no attachments and no slash commands in the composer`);
@@ -122,6 +137,7 @@ async function chat(page, tag, name) {
   await row(page, "Who can see what").click(); await row(page, "Release order").click();
   ok(await page.evaluate(() => { const r = document.querySelector("[data-testid=ws-chat-readsb]"); return r.scrollWidth <= r.clientWidth + 1; }), `${tag} "reads n of m" stays whole beside a long name`);
   await call(page, "workspace_chat_rename", { id: ws, conv: await row(page, "Release order").getAttribute("data-chat"), title: "Release order" });
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
 
   // ── a draft in each ──
   await draft(page).fill("half a thought");

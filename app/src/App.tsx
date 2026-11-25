@@ -87,7 +87,7 @@ import { fileOf, longIndex, memoryPicks, nameAt, sizeWords, trailStart, trailSte
 import { memoryDocs, type MemoryView } from "./doc/memory";
 import { linkTo, memoryLink } from "./doc/memorypath";
 import { navRows, type ChatRow } from "./wschats";
-import { attentionOf, docChips, LAST_VIEW_KEY, lastView, placeWorkspace, placeWorkspaces, PLACE_WS_KEY, placeWsRead, placeWsSet, rollupOf, tabOr, wsCounts, wsFrameOn, wsTabs, type LastView, type Rollup } from "./wsview";
+import { attentionOf, docChips, LAST_VIEW_KEY, lastView, placeWorkspace, placeWorkspaces, PLACE_WS_KEY, placeWsRead, placeWsSet, rollupOf, tabsWith, tabOr, wsCounts, wsFrameOn, wsTabs, type LastView, type Rollup } from "./wsview";
 import { answer, ask, DOCK, FLOAT, take, windowEnv, type Ask, type HandDoc } from "./doc/handoff";
 import { MainDocument, type MainDocApi } from "./doc/MainDocument";
 import { ideaDocs as ideaSource, ideaHand, sameDoc, type DocTarget } from "./doc/source";
@@ -4433,6 +4433,8 @@ function App() {
   // replaced). A red banner for a question is what this whole path exists to
   // stop, so it does not share the error register.
   const [notice, setNotice] = useState("");
+  /** Where a removed workspace's folder went. */
+  const [wsMoved, setWsMoved] = useState<string | null>(null);
   const [codexInstallPrompt, setCodexInstallPrompt] = useState(false);
   const [agentSwitch, setAgentSwitch] = useState<AgentSwitch | null>(null);
   const [launchRefused, setLaunchRefused] = useState<LaunchRefused | null>(null);
@@ -6699,7 +6701,7 @@ function App() {
     invoke<WsList>(cmd, args).then((l) => { setWsList(l); return l; }).catch((e) => { fail(e); return null; });
   const wsById = (id: string) => wsList?.workspaces.find((w) => w.id === id) ?? null;
   // The workspaces' chats (workspace chats' beta), for the nav, ⌘K and the view.
-  const wsChats = useWsChats(wsChatsOn && !!wsList, useMemo(() => (wsList?.workspaces ?? []).map((w) => w.id), [wsList]));
+  const wsChats = useWsChats(wsChatsOn && !!wsList, useMemo(() => (wsList?.workspaces ?? []).map((w) => w.id), [wsList]), wsList);
   const wsMem = useWsMemory(wsChatsOn && !!wsList, useMemo(() => (wsList?.workspaces ?? []).map((w) => w.id), [wsList]));
   const chatWaits = (wsList?.workspaces ?? []).some((w) => wsChats.rows(w.id).some((x) => x.state === "waiting"));
   // Re-read whenever the registry's roots change: "not registered" is the
@@ -6816,7 +6818,7 @@ function App() {
       const l = await wsRun("workspace_remove", { id });
       if (!l) return;
       const moved = (l as WsList & { moved_to?: string | null }).moved_to;
-      if (moved) setNotice(`Its memory and its chats were kept, in ${moved}.`);
+      if (moved) setWsMoved(moved);
       commitHist((h) => pruneNav(h, (x) => x.ws?.id === id));
       setWsOpen((cur) => (cur === id ? null : cur));
     })();
@@ -6852,9 +6854,14 @@ function App() {
   // none. A share open as a guest covers the main area, so it closes, as it does
   // for a place.
   const tabsOn = wsTabs({ ideas: ideasOn, chats: wsChatsOn });
-  const wsTabNow = tabOr(wsTab, tabsOn);
+  // A text that can be saved nowhere keeps its workspace's view and its own tab,
+  // whatever the betas say, until it is.
+  const docRescue = docStuck !== null && mainDoc ? { ws: mainDoc.ws, tab: mainDoc.tab } : null;
+  const viewOn = frameOn || docRescue !== null;
+  const tabsOf = (id: string | null) => (id ? tabsWith(tabsOn, id, docRescue) : tabsOn);
+  const wsTabNow = tabOr(wsTab, tabsOf(wsOpen));
   /** The workspace on screen. `selected`, not `sel`: what the main area draws. */
-  const wsShown = frameOn && !(selected && sel) && wsOpen ? wsById(wsOpen) : null;
+  const wsShown = viewOn && !(selected && sel) && wsOpen ? wsById(wsOpen) : null;
   const mainDocRef = useRef(mainDoc);
   mainDocRef.current = mainDoc;
   /** The document a tab of a workspace shows: its plan, or the idea picked (the
@@ -6891,9 +6898,9 @@ function App() {
   const wsOpenRef = useRef(wsOpen);
   wsOpenRef.current = wsOpen;
   const showWs = async (id: string, tab: WsTab, o: { doc?: string; startIn?: "edit"; here?: boolean; chat?: string | null } = {}): Promise<boolean> => {
-    if (!frameOn || id === EVERYTHING_ELSE_ID) return false;
+    if (!viewOn || id === EVERYTHING_ELSE_ID) return false;
     const n = ++wsGoSeq.current;
-    const to = tabOr(tab, tabsOn);
+    const to = tabOr(tab, tabsOf(id));
     const want = tabDoc(id, to, o.doc);
     const cur = mainDocRef.current;
     const stays = cur && cur.ws === id && cur.tab === to && (want ? sameDoc(cur, want) : to !== "memory");
@@ -6943,9 +6950,27 @@ function App() {
   const openWsOverview = (id: string) => { void showWsRef.current(id, "overview", { chat: null }); };
   /** A chat, in the middle. The documents keep their tab. */
   const openChat = (id: string, conv: string) => void showWs(id, wsShown?.id === id ? wsTabNow : "memory", { chat: conv });
+  /** Before an act of workspace `id`'s chats or of its memory's history: the
+   *  document of it that is open here is in its file. `false`: it cannot be, the act
+   *  does not start, and the text is shown with why. */
+  const docSaved = async (id: string): Promise<boolean> => {
+    const cur = mainDocRef.current;
+    if (!cur || cur.ws !== id || !mainDocApi.current || await mainDocApi.current.leave()) return true;
+    const now = mainDocRef.current;
+    if (now) void showWsRef.current(now.ws, now.tab);
+    setWsSide("docs");
+    setNotice("Not done: a document of this workspace has text that is not saved. Keep yours or reload it first.");
+    return false;
+  };
+  const startingChat = useRef(false);
   const startChat = async (id: string) => {
-    if (wsStart && wsStart.why === null) return;
-    if (!(await showWs(id, wsShown?.id === id ? wsTabNow : "memory", { chat: null }))) return;
+    if ((wsStart && wsStart.why === null) || startingChat.current) return;
+    // One press at a time: what follows may wait for a save.
+    startingChat.current = true;
+    try {
+      if (!(await docSaved(id))) return;
+      if (!(await showWs(id, wsShown?.id === id ? wsTabNow : "memory", { chat: null }))) return;
+    } finally { startingChat.current = false; }
     setWsSide("chat");
     setWsStart({ ws: id, why: null });
     const got = await wsChats.start(id);
@@ -6956,7 +6981,7 @@ function App() {
     setWsChat((c) => ({ ...c, [id]: got.conv }));
   };
   useEffect(() => { if (sel) setWsOpen(null); }, [sel]);
-  useEffect(() => { if (!frameOn) setWsOpen(null); }, [frameOn]);
+  useEffect(() => { if (!viewOn) setWsOpen(null); }, [viewOn]);
   // A workspace's plan, or its first idea, arrives or goes while its tab is up.
   const planHere = wsShown?.plan ?? null;
   const anyIdea = (wsShown?.ideas ?? []).length > 0;
@@ -6987,7 +7012,7 @@ function App() {
   // Ideas' documents are Ideas' beta, a memory's files workspace chats'.
   const docBeta = !mainDoc || (mainDoc.source === ideaSource ? ideasOn : wsChatsOn);
   const docWs = !mainDoc || !wsList || !!wsById(mainDoc.ws);
-  useEffect(() => { if (!docBeta || !docWs) void leaveMainDoc(); }, [docBeta, docWs]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (!docBeta || !docWs) void leaveMainDoc(); }, [docBeta, docWs, docStuck]); // eslint-disable-line react-hooks/exhaustive-deps
   /** The workspace whose plan and ideas are on screen: in its view, or in a
    *  place's dock. */
   const wsFor = wsOpen ?? (dockShown && shownTab === "workspace" ? placeWs?.id ?? null : null);
@@ -9297,7 +9322,7 @@ function App() {
           // dot says it.
           landed={(commit) => { if (!mainDocApi.current?.editing()) void showChange(wsShown.id, commit).then(() => setWsSide("chat")); }}
           showChange={(commit) => void showChange(wsShown.id, commit)}
-          openMemory={(path) => openMemory(wsShown.id, path)} nameOf={(p) => nameAt(memView, p)}
+          openMemory={(path) => openMemory(wsShown.id, path)} nameOf={(p) => nameAt(memView, p)} ready={() => docSaved(wsShown.id)}
           memoryTick={wsMem.tick(wsShown.id)}
           memoryChanged={() => void wsMem.refresh(wsShown.id)}
           openTerminalApp={(session) => { invoke("open_terminal", { cmd: settings.terminal_cmd, session }).catch((e) => fail(e)); }}
@@ -9951,7 +9976,8 @@ function App() {
                   naming={wsNaming === w.id}
                   rollup={rollup}
                   active={!guestOpen && wsShown?.id === w.id}
-                  onOpen={frameOn ? () => openWsOverview(w.id) : undefined}
+                  // Its text that is not saved, when there is nothing else to open.
+                  onOpen={frameOn ? () => openWsOverview(w.id) : docRescue?.ws === w.id ? () => void showWs(w.id, docRescue.tab, { doc: mainDoc?.name }) : undefined}
                   onToggle={() => toggleWs(w.id)}
                   onMenu={(e) => wsMenu(e, w.id)}
                   onArm={(e) => arm(e, { kind: "workspace", id: w.id })}
@@ -10879,7 +10905,7 @@ function App() {
               <WorkspaceFrame
                 shown={wsShown !== null}
                 ws={wsShown && { id: wsShown.id, name: wsShown.name, color: wsColorOf(wsShown), counts: wsCounts(wsShown.projects.length, wsChatsOn ? wsChats.rows(wsShown.id).filter((x) => x.live).length : 0) }}
-                tabs={tabsOn}
+                tabs={tabsOf(wsShown?.id ?? null)}
                 tab={wsTabNow}
                 counts={{ ideas: wsShown?.ideas?.length ?? 0, chats: wsShown && wsChatsOn ? wsChats.of(wsShown.id)?.chats.length ?? 0 : 0 }}
                 newChat={wsShown && wsChatsOn && (wsChats.of(wsShown.id)?.chats.length ?? 0) > 0 ? { busy: wsStart?.ws === wsShown.id && wsStart.why === null, run: () => void startChat(wsShown.id) } : null}
@@ -10913,7 +10939,7 @@ function App() {
                       : !memView ? <p className="ws-ov-none">Reading…</p>
                       : !memView.made ? <NoMemory make={() => void makeMemory(wsShown.id)} busy={memBusy} />
                       : (
-                        <MemoryCard ws={wsShown.id} chat={(c) => chatNavName(wsShown.id, c)} view={memView} ago={ago} open={(path) => openMemory(wsShown.id, path)} diff={(commit) => void showChange(wsShown.id, commit)}
+                        <MemoryCard ready={() => docSaved(wsShown.id)} ws={wsShown.id} chat={(c) => chatNavName(wsShown.id, c)} view={memView} ago={ago} open={(path) => openMemory(wsShown.id, path)} diff={(commit) => void showChange(wsShown.id, commit)}
                           follow={(href) => { const to = memoryDocs(wsShown.id).target("MEMORY.md", href); if (to) followDoc(to); }}
                           changed={() => void wsMem.refresh(wsShown.id)} />
                       )}
@@ -10989,11 +11015,11 @@ function App() {
                       linkNote: memLinkNote,
                       historyAsk: memAt?.ws === mainDoc.ws ? memAt.n : 0,
                       history: (close: () => void) => (
-                        <MemoryHistory view={memView} chat={(c) => chatNavName(mainDoc.ws, c)} key={`${mainDoc.ws}|${mainDoc.name}|${memAt?.ws === mainDoc.ws ? memAt.n : 0}`} ws={mainDoc.ws} path={mainDoc.name} at={memAt?.ws === mainDoc.ws ? memAt.commit : null} tick={wsMem.tick(mainDoc.ws)}
+                        <MemoryHistory ready={() => docSaved(mainDoc.ws)} view={memView} chat={(c) => chatNavName(mainDoc.ws, c)} key={`${mainDoc.ws}|${mainDoc.name}|${memAt?.ws === mainDoc.ws ? memAt.n : 0}`} ws={mainDoc.ws} path={mainDoc.name} at={memAt?.ws === mainDoc.ws ? memAt.commit : null} tick={wsMem.tick(mainDoc.ws)}
                           open={(path) => { close(); setMemAt(null); openMemory(mainDoc.ws, path); }} close={() => { close(); setMemAt(null); }} />
                       ),
                       strips: (mode: "edit" | "read") => (
-                        <MemoryStrips mode={mode} long={mainDoc.name === "MEMORY.md" && memView ? longIndex(memView) : null}
+                        <MemoryStrips failing={memView?.commit_error ?? null} mode={mode} long={mainDoc.name === "MEMORY.md" && memView ? longIndex(memView) : null}
                           live={wsChats.rows(mainDoc.ws).filter((x) => x.live).map((x) => x.chat.title)}
                           heard={memHeard.has(`${mainDoc.ws}|${mainDoc.name}`)} hear={() => setMemHeard((h) => new Set([...h, `${mainDoc.ws}|${mainDoc.name}`]))}
                           under={memUnder?.ws === mainDoc.ws && memUnder.name === mainDoc.name ? memUnder : null} seen={() => setMemUnder(null)} />
@@ -11418,8 +11444,17 @@ function App() {
       {groupChatOn && <GuestToasts />}
       {groupChatOn && <ShareDialogHost />}
       {groupChatOn && joining && <JoinDialog groupChat={groupChatOn} onClose={() => setJoining(false)} />}
-      {(err || notice || undo || planHint) && (
+      {(err || notice || undo || planHint || wsMoved) && (
         <div className="float-stack">
+          {/* A removed workspace's folder: the only word of where it is, so it
+              stays until it is dismissed. */}
+          {wsMoved && (
+            <div className="err err-float notice" data-testid="ws-moved" role="status">
+              <span className="float-text">Its memory and its chats were kept, in {wsMoved}</span>
+              <button className="ctrl sm" data-testid="ws-moved-reveal" onClick={() => { revealOnHost(wsMoved).catch((e) => fail(e)); }}>Show in Finder</button>
+              <button className="ctrl sm" data-testid="ws-moved-dismiss" onClick={() => setWsMoved(null)}>Dismiss</button>
+            </div>
+          )}
           {/* One click back from a slip of the wrist — a drag rewrites declared
               state, and the row it moves can land in a collapsed group or a
               hidden tier, i.e. out of sight of the gesture that moved it. */}

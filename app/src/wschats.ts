@@ -5,19 +5,27 @@
 import { stateOf, type ConvState, type DeskEv, type Expect } from "./desk";
 
 /** `workspacechats::Fold`. */
-export type ChatFold = { asked?: string; asked_ms?: number; left?: number; state: string; commit?: string; files?: number; lines?: { added: number; removed: number }; reverted: boolean; why?: string };
+export type ChatFold = { asked?: string; asked_ms?: number; left?: number; state: string; commit?: string; files?: number; lines?: { added: number; removed: number }; reverted: boolean; why?: string; attempt?: string; before?: string;
+  /** Its receipt is written and its session is still being ended. */
+  closing?: boolean };
 /** A fold that runs, or failed: the live word (`watch::FoldOf`). */
 export type FoldNow = { state: string; why: string | null; left?: number | null };
 /** `workspace_chats`' row. */
 export type WsChat = {
   id: string; harness: string; session_id: string; title: string; started: string; last_activity: string; note: string;
   fold?: ChatFold; fold_now?: FoldNow | null; session: string; state: ConvState; note_exists: boolean;
+  /** Whether a live chat still has what a launch now would give it. */
+  access?: "current" | "stale" | "unknown" | null; access_changes?: AccessChange[];
 };
+/** One thing a launch now would do otherwise (`workspacechats::AccessChange`). */
+export type AccessChange = { kind: string; name: string; path: string; change: string };
 /** What a chat reads of one project, and why not. */
 export type ProjectRead = { root: string; name: string | null; registered: boolean; private: boolean; reads: string; why?: string };
 /** The workspace's plan and linked ideas, and whether a chat reads each. */
 export type DocRead = { kind: "plan" | "idea"; id: string; live: string | null; title: string | null; path: string | null; reads: string; why?: string };
-export type WsChats = { id: string; name: string; folder: string; chats: WsChat[]; projects: ProjectRead[]; documents?: DocRead[] };
+export type WsChats = { id: string; name: string; folder: string; chats: WsChat[]; projects: ProjectRead[]; documents?: DocRead[];
+  /** What its rules stop and what they do not. */
+  limits?: string };
 /** `workspaces:sessions`. */
 export type WsSessionsEv = DeskEv & {
   chat_of: Record<string, { workspace: string; chat: string }>;
@@ -35,8 +43,9 @@ export const foldOf = (c: WsChat, ev: WsSessionsEv | null): FoldNow | null => (c
 export const foldRuns = (f: FoldNow | null): boolean => !!f && (f.state === "folding" || f.state === "waiting" || f.state === "checking");
 
 export function rowOf(c: WsChat, ev: WsSessionsEv | null, expect: Expect): ChatRow {
-  const s = stateOf(c, ev, expect);
   const f = foldOf(c, ev)?.state;
+  // A fold that has landed ends its session a moment later: it is drawn as landed.
+  const s = c.fold?.closing && !f ? "ended" : stateOf(c, ev, expect);
   // Waiting on the person comes before anything a fold says.
   const state: RowState = s === "waiting" || f === "waiting" ? "waiting" : f === "failed" ? "fold-failed" : f === "folding" ? "folding" : f === "checking" ? "checking" : s;
   return { chat: c, state, live: s !== "ended" };
@@ -115,11 +124,20 @@ export function readsWords(projects: readonly ProjectRead[]): string {
   return of === 0 ? "reads no project" : `reads ${read} of ${of}`;
 }
 /** What a chat is, said once over its transcript. */
-export function introWords(projects: readonly ProjectRead[]): string {
+export function introWords(projects: readonly ProjectRead[], limits?: string): string {
   const { read, of } = readsCount(projects);
   const can = of === 0 ? "the workspace has no projects to read" : read === 0 ? "it can read none of its projects" : read === of ? `it can read its ${of === 1 ? "project" : `${of} projects`}` : `it can read ${read} of ${of} projects`;
-  return `It reads the memory index first, and ${can}. It never writes in a project.`;
+  return `It reads the memory index first, and ${can}. It is told not to write in a project. ${limits ?? "Claude's file tools are blocked there; programs it runs are not."}`;
 }
+
+const CHANGES: Record<string, (n: string) => string> = {
+  private: (n) => `${n} is private now`, removed: (n) => `${n} was taken out of the workspace`, unregistered: (n) => `${n} is not registered any more`,
+  unreadable: (n) => `${n} cannot be read any more`, readable: (n) => `${n} can be read now`, added: (n) => `${n} was added`,
+  unlinked: (n) => `“${n}” is not linked any more`, gone: (n) => `“${n}” is gone`, moved: (n) => `“${n}” was moved`, linked: (n) => `“${n}” was linked`,
+};
+/** What a launch now would do otherwise, in words. */
+export const accessWords = (c: AccessChange): string =>
+  c.kind === "rules" ? "its other rules changed" : (CHANGES[c.change] ?? ((n: string) => `${n}: ${c.change}`))(c.name || c.path.slice(c.path.lastIndexOf("/") + 1) || "something");
 
 /** The engine's own name for a chat nobody has named. */
 export const isDefaultTitle = (t: string): boolean => /^Chat \d+$/.test(t);

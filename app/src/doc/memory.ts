@@ -29,7 +29,10 @@ export type MemoryChange = {
 export type MemoryView = {
   made: boolean; dir: string; index: MemoryIndex | null; folders: MemoryFolder[]; count: number; bytes: number;
   skipped: { path: string; why: string }[]; truncated: boolean; last: MemoryChange | null;
+  /** Its commits keep failing. */
+  commit_error?: CommitError | null;
 };
+export type CommitError = { error: string; since: number; times: number };
 export type MemoryLog = { changes: MemoryChange[]; more: boolean };
 /** One side of a changed image. `refused` says why there are no pixels. */
 export type MemoryImageSide = { mime: string; size: number; b64: string; refused: string | null };
@@ -43,10 +46,10 @@ export type MemoryReverted = { change: MemoryChange | null; conflicts: string[] 
 /** An image as an `<img>` takes it, or why it is not shown. */
 export type MemoryImage = DocImage;
 
-type File = { path: string; file: string; title: string; content: string; mtime_ms: number; size: number };
-type Put = { path: string; file: string; title: string; mtime_ms: number; size: number };
+type File = { path: string; file: string; title: string; content: string; mtime_ms: number; size: number; rev?: string };
+type Put = { path: string; file: string; title: string; mtime_ms: number; size: number; rev?: string };
 type Image = { b64: string; size: number; truncated: boolean; mtime: number; mime: string; etag: string; unchanged: boolean };
-type Event = { id: string; changed: { path: string; mtime_ms: number }[]; removed: string[] };
+type Event = { id: string; changed: { path: string; mtime_ms: number; size?: number; rev?: string | null }[]; removed: string[] };
 
 export interface MemoryDocs extends DocSource {
   readonly workspace: string;
@@ -71,7 +74,7 @@ export interface MemoryDocs extends DocSource {
   image(from: string, src: string): Promise<MemoryImage>;
 }
 
-const doc = (f: File): Doc => ({ kind: "memory", id: f.path, title: f.title, file: f.file, mtime_ms: f.mtime_ms, content: f.content });
+const doc = (f: File): Doc => ({ kind: "memory", id: f.path, title: f.title, file: f.file, mtime_ms: f.mtime_ms, rev: f.rev, content: f.content });
 const errText = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : String(e));
 
 /** Bytes as the base64 the engine reads (`btoa`'s own spelling). In chunks:
@@ -87,15 +90,17 @@ const KEPT = 24;
 
 function make(id: string): MemoryDocs {
   const kept = new Map<string, { etag: string; src: string; size: number }>();
-  const write = (path: string, content: string, expectedMtime: number | null, keepHistory: boolean) =>
-    invoke<Put>("workspace_memory_write", { id, path, content, ...(expectedMtime === null ? {} : { expectedMtime }), ...(keepHistory ? { keepHistory: true } : {}) });
+  // The revision names the bytes it is written over; the mtime goes beside it for
+  // an engine that knows none.
+  const write = (path: string, content: string, expectedMtime: number | null, keepHistory: boolean, expectedRev?: string) =>
+    invoke<Put>("workspace_memory_write", { id, path, content, ...(expectedMtime === null ? {} : { expectedMtime }), ...(expectedRev ? { expectedRev } : {}), ...(keepHistory ? { keepHistory: true } : {}) });
   const read = async (path: string) => doc(await invoke<File>("workspace_memory_file", { id, path }));
   const at = async (commit: string, path: string) => doc(await invoke<File>("workspace_memory_file", { id, path, commit }));
   const log = (o: { path?: string; before?: string; n?: number } = {}) => invoke<MemoryLog>("workspace_memory_log", { id, ...o });
   const show = (commit: string, path?: string) => invoke<{ change: MemoryChange; file: MemoryFileDiff | null }>("workspace_memory_diff", { id, commit, ...(path === undefined ? {} : { path }) });
   const create = async (path: string, content: string): Promise<Doc> => {
     const w = await write(path, content, null, false);
-    return { kind: "memory", id: w.path, title: w.title, file: w.file, mtime_ms: w.mtime_ms, content };
+    return { kind: "memory", id: w.path, title: w.title, file: w.file, mtime_ms: w.mtime_ms, rev: w.rev, content };
   };
   const self: MemoryDocs = {
     workspace: id,
@@ -112,9 +117,9 @@ function make(id: string): MemoryDocs {
     },
     refusals: { stale: isMemoryStale, gone: isMemoryGone },
     read,
-    async write(path, content, expectedMtime, keepHistory): Promise<Saved> {
-      const w = await write(path, content, expectedMtime, keepHistory);
-      return { mtime_ms: w.mtime_ms, file: w.file, title: w.title };
+    async write(path, content, expectedMtime, keepHistory, expectedRev): Promise<Saved> {
+      const w = await write(path, content, expectedMtime, keepHistory, expectedRev);
+      return { mtime_ms: w.mtime_ms, file: w.file, title: w.title, rev: w.rev };
     },
     watch(on) {
       let off: (() => void) | null = null;
@@ -122,7 +127,7 @@ function make(id: string): MemoryDocs {
       listen<Event>("workspaces:memory", (ev) => {
         const p = ev.payload;
         if (!p || p.id !== id) return;
-        const c: Changed = { changed: (p.changed ?? []).map((x) => ({ id: x.path, mtime_ms: x.mtime_ms })), removed: p.removed ?? [] };
+        const c: Changed = { changed: (p.changed ?? []).map((x) => ({ id: x.path, mtime_ms: x.mtime_ms, rev: x.rev })), removed: p.removed ?? [] };
         on(c);
       }).then((u) => { if (gone) u(); else off = u; }).catch(() => {});
       return () => { gone = true; off?.(); };
@@ -135,15 +140,15 @@ function make(id: string): MemoryDocs {
         .filter((c) => c.files.some((f) => f.path === path && f.status !== "D"))
         .map((c) => ({ version: c.commit, at: new Date(c.at * 1000).toISOString(), title: c.subject }));
     },
-    async restore(path, version, expectedMtime): Promise<Doc> {
+    async restore(path, version, expectedMtime, expectedRev): Promise<Doc> {
       const old = await at(version, path);
       // What it replaces is committed first, so it is in the history too.
-      let mtime: number | null = expectedMtime ?? null;
+      let mtime: number | null = expectedMtime ?? null, rev = expectedRev;
       if (mtime === null) {
-        try { mtime = (await read(path)).mtime_ms; } catch (e) { if (!isMemoryGone(errText(e))) throw e; }
+        try { ({ mtime_ms: mtime, rev } = await read(path)); } catch (e) { if (!isMemoryGone(errText(e))) throw e; }
       }
-      const w = await write(path, old.content, mtime, mtime !== null);
-      return { ...old, mtime_ms: w.mtime_ms, title: w.title, file: w.file };
+      const w = await write(path, old.content, mtime, mtime !== null, rev);
+      return { ...old, mtime_ms: w.mtime_ms, rev: w.rev, title: w.title, file: w.file };
     },
     async keepAsNew(title, text): Promise<Doc> {
       for (let n = 1; ; n++) {

@@ -55,16 +55,16 @@ export type Clock = {
 };
 
 /** `idea_write`'s answer: the idea as saved, without its text. */
-export type Saved = { mtime_ms: number; file: string; title: string };
+export type Saved = { mtime_ms: number; file: string; title: string; rev?: string };
 
 /** The file as read: its name and title too, when the source gives them. */
-export type Read = { content: string; mtime_ms: number; file?: string; title?: string };
+export type Read = { content: string; mtime_ms: number; file?: string; title?: string; rev?: string };
 
 export type Rows = {
   /** `keepHistory`: copy the file's current bytes to `.history/` before the
    *  replace. Keep mine only — the text it overwrites came from elsewhere and
    *  exists nowhere else. Never an ordinary save. */
-  write(id: string, content: string, expectedMtime: number, keepHistory: boolean): Promise<Saved>;
+  write(id: string, content: string, expectedMtime: number, keepHistory: boolean, expectedRev?: string): Promise<Saved>;
   read(id: string): Promise<Read>;
 };
 
@@ -96,7 +96,7 @@ export type SessionDeps = {
 };
 
 /** What moved in the source since it last said: `ideas:changed`'s payload. */
-export type Changed = { changed: { id: string; mtime_ms: number }[]; removed: string[] };
+export type Changed = { changed: { id: string; mtime_ms: number; rev?: string | null }[]; removed: string[] };
 
 const errText = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : String(e));
 
@@ -104,6 +104,8 @@ export class Session {
   readonly id: string;
   private base: string;
   private mtime: number;
+  /** The name of `base`'s bytes, from a source whose rows give one. */
+  private rev: string | undefined;
   private timer: unknown = null;
   private inflight: Promise<void> | null = null;
   private again = false;
@@ -111,14 +113,16 @@ export class Session {
   private state: SaveState = { kind: "clean", savedAt: null };
   private closed = false;
 
-  constructor(id: string, content: string, mtime: number, private deps: SessionDeps) {
+  constructor(id: string, content: string, mtime: number, private deps: SessionDeps, rev?: string) {
     this.id = id;
+    this.rev = rev;
     this.base = content;
     this.mtime = mtime;
   }
 
   get current(): SaveState { return this.state; }
   get lastMtime(): number { return this.mtime; }
+  get lastRev(): string | undefined { return this.rev; }
   /** True when the editor holds text the file does not. */
   dirty(): boolean { return this.deps.text() !== this.base; }
   /** Saving is held: a conflict, a removal or an error needs the person. */
@@ -173,10 +177,11 @@ export class Session {
     this.set({ kind: "saving" });
     const run = (async () => {
       try {
-        const saved = await this.deps.rows.write(this.id, content, this.mtime, keepHistory);
+        const saved = await this.deps.rows.write(this.id, content, this.mtime, keepHistory, this.rev);
         const m = saved.mtime_ms;
         this.base = content;
         this.mtime = m;
+        this.rev = saved.rev;
         if (!this.closed) this.deps.onSaved?.(saved);
         this.set(this.dirty() ? { kind: "dirty" } : { kind: "clean", savedAt: this.deps.clock.now() });
       } catch (e) {
@@ -204,7 +209,10 @@ export class Session {
   async external(ev: Changed): Promise<void> {
     if (this.closed) return;
     if (this.inflight) { this.pending.push(ev); return; }
-    if (ev.changed.some((c) => c.id === this.id) || ev.removed.includes(this.id)) return this.look();
+    const ch = ev.changed.find((c) => c.id === this.id);
+    // The bytes are named, and they are ours.
+    if (ch?.rev && ch.rev === this.rev) { this.mtime = ch.mtime_ms; return; }
+    if (ch || ev.removed.includes(this.id)) return this.look();
   }
 
   /** Something moved: our own save, a tick late, or another's edit. Only the text
@@ -227,6 +235,7 @@ export class Session {
       if (d.content !== this.base) return this.elsewhere(d);
       // Touched, or ours: the next save is against the mtime it has.
       this.mtime = d.mtime_ms;
+      this.rev = d.rev;
       return;
     }
   }
@@ -244,6 +253,7 @@ export class Session {
   private take(d: Read) {
     this.base = d.content;
     this.mtime = d.mtime_ms;
+    this.rev = d.rev;
     if (this.deps.text() !== d.content) this.deps.replace(d.content);
     if (!this.closed) this.deps.onTaken?.(d);
     this.set({ kind: "clean", savedAt: null });
@@ -259,7 +269,7 @@ export class Session {
 
   /** Conflict: write the editor's text over the file's, knowingly. */
   async keepMine(): Promise<void> {
-    let d: { content: string; mtime_ms: number };
+    let d: Read;
     try { d = await this.deps.rows.read(this.id); } catch (e) {
       const msg = errText(e);
       this.set(this.gone(msg) ? { kind: "removed" } : { kind: "error", message: msg });
@@ -267,6 +277,7 @@ export class Session {
     }
     this.base = d.content;
     this.mtime = d.mtime_ms;
+    this.rev = d.rev;
     this.set(this.dirty() ? { kind: "dirty" } : { kind: "clean", savedAt: null });
     await this.save(true);
   }
@@ -274,14 +285,14 @@ export class Session {
   /** The file was changed by one of the window's own acts (a rename, a restore):
    *  its new text and mtime, which are ours. Typed into while that act was out,
    *  the editor keeps the person's text and asks. */
-  adopt(content: string, mtime: number): void {
+  adopt(content: string, mtime: number, rev?: string): void {
     if (this.held()) return;
     if (this.dirty() && this.deps.text() !== content) {
       if (this.timer !== null) { this.deps.clock.clearTimeout(this.timer); this.timer = null; }
       this.set({ kind: "conflict", why: "elsewhere" });
       return;
     }
-    this.take({ content, mtime_ms: mtime });
+    this.take({ content, mtime_ms: mtime, rev });
   }
 
   /** Stop: no timer fires and no state is reported after this. */

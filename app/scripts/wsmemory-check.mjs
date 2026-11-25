@@ -54,6 +54,8 @@ eq("back, and forward", [b.paths[b.at], M.trailStep(b, 1), M.trailStep(t, 1), M.
 eq("a new file after Back drops what was forward", M.trailTo(b, "x.md").paths, ["MEMORY.md", "topics/a.md", "x.md"]);
 eq("a chat's note, in the memory", M.notePath("memory/notes/2026-11-24-x.md"), "notes/2026-11-24-x.md");
 
+eq("commits that fail, in git's words; the files are not lost", M.failingWords({ error: "git commit failed: fatal: no space left on device.", since: 1, times: 4 }, "14:31"),
+  "Memory could not be saved to its history since 14:31: git commit failed: fatal: no space left on device. Its files are saved. 4 tries.");
 // ── what a note is called ──
 {
   const view = { folders: [folder("notes", f("notes/2026-11-24-release-order-000904.md", { title: "Release order: the role first" }), f("notes/2026-11-24-x.md"))] };

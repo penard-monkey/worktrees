@@ -3,7 +3,7 @@
  *  Overview's column. The texts themselves are the document pane's, on
  *  `memoryDocs` (doc/memory.ts). Module scope: it holds state. */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { memoryDocs, type MemoryChange, type MemoryFile, type MemoryFileDiff, type MemoryImage, type MemoryView } from "./doc/memory";
+import { memoryDocs, type CommitError, type MemoryChange, type MemoryFile, type MemoryFileDiff, type MemoryImage, type MemoryView } from "./doc/memory";
 import { isImagePath, linkTo, topicPath } from "./doc/memorypath";
 import { readableLinks } from "./doc/ideasrelate";
 import { parseUnifiedDiff } from "./diff";
@@ -12,12 +12,14 @@ import { Markdown } from "./markdown";
 import { useArmed } from "./useArmed";
 import { useEscape } from "./useEscape";
 import {
-  changeFiles, changedBy, changedUnderWords, changeWords, conflictWords, fileGroups, fileName, filesWords, lineDiff, linkText, mayEdit, nameAt, newFilePath, putName,
+  changeFiles, changedBy, changedUnderWords, changeWords, conflictWords, failingWords, fileGroups, fileName, filesWords, lineDiff, linkText, mayEdit, nameAt, newFilePath, putName,
   revertOf, sizeWords, STATUS_WORDS, titleOf, tooBig, whileLive,
 } from "./wsmemory";
 import { whenWords } from "./wschats";
 import "./WorkspaceMemory.css";
 
+/** Of what the list does not show, how many it names. */
+const SKIPPED_SHOWN = 6;
 const errText = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : String(e));
 
 /** The files: the index, then notes, topics, files; folded where there are many. */
@@ -61,9 +63,18 @@ export function MemoryFiles(props: { ws: string; view: MemoryView; on: string | 
       })}
       {props.made && <NewFile ws={props.ws} made={props.made} />}
       {(view.truncated || view.skipped.length > 0) && (
-        <p className="wsm-skipped" data-testid="memory-skipped" title={view.skipped.map((s) => `${s.path}: ${s.why}`).join("\n")}>
-          {view.truncated ? "Not every file is listed. " : ""}{view.skipped.length ? `${filesWords(view.skipped.length)} not shown: ${view.skipped[0].path} (${view.skipped[0].why})${view.skipped.length > 1 ? "…" : ""}` : ""}
-        </p>
+        <div className="wsm-skipped" data-testid="memory-skipped">
+          {view.truncated && <p>Not every file is listed.</p>}
+          {view.skipped.length > 0 && (
+            <>
+              <p>{filesWords(view.skipped.length)} not shown:</p>
+              <ul>
+                {view.skipped.slice(0, SKIPPED_SHOWN).map((s) => <li key={s.path}><b>{s.path}</b>: {s.why}</li>)}
+                {view.skipped.length > SKIPPED_SHOWN && <li title={view.skipped.slice(SKIPPED_SHOWN).map((s) => `${s.path}: ${s.why}`).join("\n")}>and {view.skipped.length - SKIPPED_SHOWN} more</li>}
+              </ul>
+            </>
+          )}
+        </div>
       )}
     </div>
   );
@@ -103,7 +114,11 @@ function NewFile({ ws, made }: { ws: string; made(path: string): void }) {
 
 /** Over a memory file: a long index, who else may write it, and what changed
  *  under the person with nothing of theirs unsaved. */
+export function MemoryFailing({ error }: { error: CommitError | null }) {
+  return error ? <div className="wsm-long" data-testid="memory-failing" role="alert"><span>{failingWords(error, whenWords(new Date(error.since * 1000).toISOString()))}</span></div> : null;
+}
 export function MemoryStrips(props: {
+  failing: CommitError | null;
   mode: "edit" | "read";
   long: string | null;
   /** The titles of the live chats. */
@@ -120,7 +135,8 @@ export function MemoryStrips(props: {
   const may = props.mode === "edit" && !props.heard ? mayEdit(props.live) : null;
   return (
     <>
-      {props.long && <div className="wsm-long" data-testid="memory-long" role="status"><span>{props.long}</span><button className="ctrl sm" disabled title="Not yet: it starts a chat that moves detail into topics">Tidy…</button></div>}
+      <MemoryFailing error={props.failing} />
+      {props.long && <div className="wsm-long" data-testid="memory-long" role="status"><span>{props.long}</span></div>}
       {may && (
         <div className="wsm-long" data-testid="memory-may-edit" role="status">
           <span>{may} <span className="wsm-change-d">If it does while you have unsaved text, you choose: keep yours, or reload its version.</span></span>
@@ -170,13 +186,16 @@ export async function keepFiles(ws: string, from: string, files: readonly File[]
 /** A file that is not a text: an image's preview, or its name and size. */
 export function MemoryPreview(props: { ws: string; file: MemoryFile; tick: number; reveal: (() => void) | null }) {
   const { file } = props;
-  const [img, setImg] = useState<MemoryImage | null>(null);
+  // By what it is of: the one before is never drawn under this one's name.
+  const of = `${props.ws}|${file.path}|${file.mtime_ms}`;
+  const [got, setGot] = useState<{ of: string; img: MemoryImage } | null>(null);
+  const img = got?.of === of ? got.img : null;
   useEffect(() => {
     if (file.kind !== "image") return;
     let gone = false;
-    memoryDocs(props.ws).image("", linkTo("", file.path)).then((i) => { if (!gone) setImg(i); });
+    memoryDocs(props.ws).image("", linkTo("", file.path)).then((i) => { if (!gone) setGot({ of, img: i }); });
     return () => { gone = true; };
-  }, [props.ws, file.path, file.kind, file.mtime_ms, props.tick]);
+  }, [props.ws, file.path, file.kind, of, props.tick]);
   return (
     <div className="wsm-preview" data-testid="memory-preview" data-path={file.path}>
       {file.kind === "image" && (img === null ? <p className="ws-ov-none">Reading…</p> : "src" in img ? <img src={img.src} alt={file.name} /> : <p className="ws-ov-none">{img.note}</p>)}
@@ -222,7 +241,7 @@ const Lines = ({ added, removed }: { added: number | null; removed: number | nul
 
 /** Undo a change, or Redo one that was undone: two presses, and a refusal names
  *  the files. Shared by History, the Overview's line and a chat's receipt. */
-export function useRevert(ws: string, done: (r: MemoryChange) => void, name: (path: string) => string) {
+export function useRevert(ws: string, done: (r: MemoryChange) => void, name: (path: string) => string, ready: () => Promise<boolean>) {
   const arm = useArmed<string>();
   const [busy, setBusy] = useState(false);
   const [said, setSaid] = useState<{ commit: string; text: string } | null>(null);
@@ -230,6 +249,7 @@ export function useRevert(ws: string, done: (r: MemoryChange) => void, name: (pa
     setBusy(true);
     setSaid(null);
     try {
+      if (!(await ready())) return;
       const r = await memoryDocs(ws).revert(c.revert);
       if (r.conflicts.length) setSaid({ commit: c.commit, text: conflictWords(r.conflicts.map(name)) });
       else if (r.change) done(r.change);
@@ -266,6 +286,8 @@ export function MemoryHistory(props: {
   close(): void;
   /** A chat's title, by id; null: it was deleted. */
   chat(id: string): string | null;
+  /** The open document is saved, before an Undo. */
+  ready(): Promise<boolean>;
 }) {
   const { ws, path } = props;
   const src = memoryDocs(ws);
@@ -277,7 +299,7 @@ export function MemoryHistory(props: {
   const [file, setFile] = useState<string | null>(null);
   const [diff, setDiff] = useState<MemoryFileDiff | null>(null);
   const named = (p: string) => nameAt(props.view, p);
-  const rv = useRevert(ws, (c) => { setCur(c); setFile(null); }, named);
+  const rv = useRevert(ws, (c) => { setCur(c); setFile(null); }, named, props.ready);
   const want = all ? undefined : path ?? undefined;
   const pick = useCallback((c: MemoryChange) => {
     setCur(c);
@@ -387,10 +409,12 @@ export function MemoryCard(props: {
   follow(href: string): void;
   changed(): void;
   chat(id: string): string | null;
+  /** The open document is saved, before an Undo. */
+  ready(): Promise<boolean>;
 }) {
   const { view } = props;
   const last = view.last && view.last.kind !== "made" ? view.last : null;
-  const rv = useRevert(props.ws, props.changed, (p) => nameAt(props.view, p));
+  const rv = useRevert(props.ws, props.changed, (p) => nameAt(props.view, p), props.ready);
   const [box, setBox] = useState<HTMLElement | null>(null);
   const [cut, setCut] = useState(false);
   useEffect(() => {
@@ -404,6 +428,7 @@ export function MemoryCard(props: {
   }, [box]);
   return (
     <>
+      <MemoryFailing error={view.commit_error ?? null} />
       {last && (
         <div className="wsm-last" data-testid="memory-last">
           <span className="wsm-last-w">{changedBy(last, props.chat)} {props.ago(last.at)}{props.ago(last.at) === "now" ? "" : " ago"} <span className="wsm-change-d">{filesWords(last.files.length)} <Lines added={last.added} removed={last.removed} /></span></span>

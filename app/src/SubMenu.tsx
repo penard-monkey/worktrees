@@ -29,6 +29,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "re
 import { createPortal } from "react-dom";
 import * as Icons from "./icons";
 import { useEscape } from "./useEscape";
+import { useMenuKeys } from "./useMenuKeys";
 
 export const OPEN_MS = 120;
 export const CLOSE_MS = 280;
@@ -100,7 +101,9 @@ export function SubMenu({ label, testId, track, disabled, children }: {
     listRef.current?.querySelector<HTMLButtonElement>(".pop-item:not(:disabled)")?.focus({ preventScroll: true });
   }, [open, pos]);
 
-  useEscape(() => { hold(); setOpen(false); rowRef.current?.focus({ preventScroll: true }); }, open);
+  const back = () => { hold(); setOpen(false); rowRef.current?.focus({ preventScroll: true }); };
+  useEscape(back, open);
+  useMenuKeys(listRef, back, { active: open, left: back });
 
   return (
     <>
@@ -123,6 +126,8 @@ export function SubMenu({ label, testId, track, disabled, children }: {
         <div
           ref={listRef}
           className="ctxmenu ctx-flyout"
+          role="menu"
+          tabIndex={-1}
           data-testid={testId ? `${testId}-list` : undefined}
           style={pos ?? { left: -9999, top: 0 }}
           onPointerEnter={hold}

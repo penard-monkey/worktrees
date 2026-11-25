@@ -582,6 +582,36 @@ function windows() {
   check(w.disk.content === w.main.editor, "and nothing is written over the other's while it waits for the person");
 }
 
+// ── a source that names its bytes (a memory's `rev`) ────────────────────────
+{
+  const c = clock();
+  const disk = { content: "a", mtime: 1, rev: "r-a" };
+  const calls = [];
+  let editor = "a", st = null;
+  const s = new Session("notes/a.md", "a", 1, {
+    rows: {
+      write: async (id, content, mtime, keep, rev) => { calls.push(["write", mtime, rev]); if (rev !== disk.rev) throw STALE; Object.assign(disk, { content, rev: `r-${content}` }); return { mtime_ms: disk.mtime, file: "a.md", title: "A", rev: disk.rev }; },
+      read: async () => { calls.push(["read"]); return { content: disk.content, mtime_ms: disk.mtime, rev: disk.rev }; },
+    },
+    clock: c, text: () => editor, replace: (t) => { editor = t; }, onState: (x) => { st = x; },
+  }, "r-a");
+  editor = "ab"; s.edited(); await s.flush();
+  editor = "abc"; s.edited(); await s.flush();
+  check(JSON.stringify(calls) === JSON.stringify([["write", 1, "r-a"], ["write", 1, "r-ab"]]) && st.kind === "clean", "each save is over the revision the one before it answered with");
+  await s.external({ changed: [{ id: "notes/a.md", mtime_ms: 1, rev: "r-abc" }], removed: [] });
+  check(calls.length === 2, "an event that names the bytes we have is ours, and reads nothing");
+  Object.assign(disk, { content: "xyz", rev: "r-xyz" }); // the same millisecond, the same size
+  editor = "abcd"; s.edited(); await s.flush();
+  check(st.kind === "conflict" && disk.content === "xyz", "a save over another's bytes of the same millisecond is refused");
+  await s.keepMine();
+  check(disk.content === "abcd" && st.kind === "clean", "and Keep mine is over the revision it read");
+  Object.assign(disk, { content: "xy", rev: "r-xy" });
+  await s.external({ changed: [{ id: "notes/a.md", mtime_ms: 1, rev: "r-xy" }], removed: [] });
+  check(editor === "xy" && s.lastRev === "r-xy", "an event that names others' is read, and taken with its revision");
+  await s.external({ changed: [{ id: "notes/a.md", mtime_ms: 1, rev: null }], removed: [] });
+  check(calls.at(-1)[0] === "read", "one that names none is read");
+}
+
 // ── a source with its own refusals ──────────────────────────────────────────
 {
   const c = clock();

@@ -110,7 +110,7 @@ export function useDoc(o: DocOptions) {
   const begin = useCallback((d: Doc, focus = false, over = false): boolean => {
     const was = session.current;
     if (was && !over && was.dirty()) {
-      if (was.id === d.id && openRef.current?.source === source) was.adopt(d.content, d.mtime_ms);
+      if (was.id === d.id && openRef.current?.source === source) was.adopt(d.content, d.mtime_ms, d.rev);
       else {
         void was.flush();
         cb.current.notice(`“${d.title || "Untitled"}” is not open: this ${openRef.current ? nounOf(openRef.current) : "document"} has text that is being saved.`);
@@ -126,7 +126,7 @@ export function useDoc(o: DocOptions) {
     let known = { file: d.file, title: d.title };
     const s = new Session(d.id, d.content, d.mtime_ms, {
       rows: {
-        write: (id, content, expectedMtime, keepHistory) => source.write(id, content, expectedMtime, keepHistory),
+        write: (id, content, expectedMtime, keepHistory, expectedRev) => source.write(id, content, expectedMtime, keepHistory, expectedRev),
         read: (id) => source.read(id),
       },
       clock,
@@ -161,7 +161,7 @@ export function useDoc(o: DocOptions) {
         known = { file, title };
         setOpen((cur) => (cur && cur.id === d.id ? { ...cur, file, title } : cur));
       },
-    });
+    }, d.rev);
     session.current = s;
     setSave({ kind: "clean", savedAt: null });
     setRenaming(null);
@@ -241,7 +241,7 @@ export function useDoc(o: DocOptions) {
     setBusy(true);
     try {
       const d = await cur.source.rename(cur.id, title.trim(), s.lastMtime);
-      s.adopt(d.content, d.mtime_ms);
+      s.adopt(d.content, d.mtime_ms, d.rev);
       setOpen((x) => (x && x.id === cur.id ? { ...x, title: d.title, file: d.file } : x));
       cb.current.trace(`renamed ${cur.id} → ${d.file}`);
       cb.current.listed();
@@ -280,7 +280,7 @@ export function useDoc(o: DocOptions) {
       if (s !== session.current) return;
     }
     try {
-      const d = await cur.source.restore(cur.id, v.version, s?.lastMtime);
+      const d = await cur.source.restore(cur.id, v.version, s?.lastMtime, s?.lastRev);
       cb.current.trace(`restored ${cur.id} ${v.version}`);
       if (session.current !== s) { cb.current.listed(); return; }
       if (!begin(d)) { cb.current.listed(); return; }

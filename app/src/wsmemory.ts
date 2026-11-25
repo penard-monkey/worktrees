@@ -1,6 +1,6 @@
 /** A workspace's memory on screen: the RULES, pure (workspace-view-design.md
  *  §4.4, §4.5). `scripts/wsmemory-check.mjs` loads this file alone. */
-import type { MemoryChange, MemoryFile, MemoryFileChange, MemoryFolder, MemoryView } from "./doc/memory";
+import type { CommitError, MemoryChange, MemoryFile, MemoryFileChange, MemoryFolder, MemoryView } from "./doc/memory";
 
 /** One part of the file list: the memory's own files, a folder, or a month of
  *  notes. `open`: how it starts. */
@@ -104,6 +104,10 @@ export const filesWords = (n: number): string => `${n} file${n === 1 ? "" : "s"}
 /** A revert that was refused. */
 export const conflictWords = (files: readonly string[]): string =>
   `It was not undone: ${files.length === 1 ? `${files[0]} has` : `${files.slice(0, -1).join(", ")} and ${files[files.length - 1]} have`} changed since. Nothing was touched.`;
+
+/** Commits of a memory that keep failing, in words. The files are saved. */
+export const failingWords = (e: CommitError, since: string): string =>
+  `Memory could not be saved to its history since ${since}: ${e.error.replace(/[.\s]+$/, "")}. Its files are saved. ${e.times} tries.`;
 
 /** A memory's dot: something changed since it was looked at here. A memory that
  *  was only made is nothing to look at. */
