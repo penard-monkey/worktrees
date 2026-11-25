@@ -157,19 +157,26 @@ for (const [b, frame, tabs, chips] of [
 ]) ok(V.wsFrameOn(b) === frame && V.wsTabs(b).join() === tabs && V.docChips(b).join() === chips, `Ideas ${b.ideas ? "on" : "off"}, chats ${b.chats ? "on" : "off"}: the view ${frame ? `has ${tabs}` : "is not drawn"}, the nav row ${chips || "nothing"}`);
 ok(/const tabsOn = wsTabs\(\{ ideas: ideasOn, chats: wsChatsOn \}\);\s*const wsTabNow = tabOr\(wsTab, tabsOn\);/.test(code) && /tabs=\{tabsOn\}\s*tab=\{wsTabNow\}/.test(code), "its tabs are those, and a tab that is not drawn is never the one shown");
 ok(/const wsShown = frameOn && !\(selected && sel\) && wsOpen \? wsById\(wsOpen\) : null;/.test(code) && /shown=\{wsShown !== null\}/.test(code), "the view is shown with either on, and with both off never");
-ok(/const showWs = async \([\s\S]{0,160}?\{\s*if \(!frameOn \|\| id === EVERYTHING_ELSE_ID\) return false;/.test(code) && /const openWsOverview = \(id: string\) => \{ void showWsRef\.current\(id, "overview"\); \};/.test(code), "showWs opens nothing with both off, nor for Everything Else, and the overview goes through it");
+ok(/const showWs = async \([\s\S]{0,160}?\{\s*if \(!frameOn \|\| id === EVERYTHING_ELSE_ID\) return false;/.test(code) && /const openWsOverview = \(id: string\) => \{ void showWsRef\.current\(id, "overview", \{ chat: null \}\); \};/.test(code), "showWs opens nothing with both off, nor for Everything Else, and the overview goes through it");
 ok(/onOpen=\{frameOn \? \(\) => openWsOverview\(w\.id\) : undefined\}/.test(code) && /onClick=\{onOpen \?\? onToggle\}/.test(code), "with both off a workspace's name folds its card, as before phase 4");
 ok(gatedFrame('data-testid="ws-overview-open"') && gatedFrame("<DocChips") && /chips=\{docChips\(\{ ideas: ideasOn, chats: wsChatsOn \}\)\.map/.test(code), "a workspace menu's Overview and its card's documents row render only with the view on, the row's chips by their own helpers");
 const overview = read("../src/WorkspaceOverview.tsx");
 ok(/const work = props\.ideasOn && <WorkCard/.test(overview) && /\{props\.ideasOn && <IdeasCard/.test(overview) && (overview.match(/<WorkCard|<IdeasCard/g) ?? []).length === 2, "the Overview's Work and Ideas are Ideas' alone");
 ok(/\{props\.chatsOn\s*\? <Card name="Memory"/.test(overview) && /\{props\.chatsOn && <Card name="Chats"/.test(overview) && (overview.match(/<Card name="(Memory|Chats)"/g) ?? []).length === 2, "…its Memory and Chats are workspace chats' alone");
 ok(/<WorkspaceOverview[\s\S]{0,200}?ideasOn=\{ideasOn\}\s*chatsOn=\{wsChatsOn\}/.test(code), "…and it is told each by its own");
+// Chats are workspace chats' alone, wherever they show.
+ok(/const wsChats = useWsChats\(wsChatsOn && !!wsList,/.test(code) && /if \(!on\) return;\s*for \(const id of key/.test(read("../src/useWsChats.ts")), "workspace_chats is asked for, and workspaces:sessions heard, only with workspace chats on");
+ok(/\{wsChatsOn && \(\s*<NavChats/.test(code) && (code.match(/<NavChats\b/g) ?? []).length === 1, "a card's Chats group is drawn only with it on");
+ok(/const wsMiddle = !wsShown \|\| !wsChatsOn \? null/.test(code) && (code.match(/<WorkspaceChatColumn\b/g) ?? []).length === 1 && /newChat=\{wsShown && wsChatsOn \?/.test(code), "…and so are the middle column and New chat");
+ok(/waits=\{wsChatsOn && chatWaits\}/.test(code) && /\.\.\.\(wsChatsOn \? wsChats\.rows\(w\.id\) : \[\]\)\.map/.test(code), "…and the switch's dot and ⌘K's chats");
 // A document opens in the view's tabs. The pane may stay mounted behind the
 // gate (a text that could not be saved waits in it), so what is held is that it
 // SHOWS and OPENS nothing.
 ok(/const openDocHere = \(id: string, startIn\?: "edit"\) => \{\s*if \(!ideasOn \|\| !wsOpen\) return;/.test(code), "openDocHere opens nothing with Ideas off");
-ok(/const docShown = wsShown !== null && mainDoc !== null && wsShown\.id === mainDoc\.ws && wsTabNow === mainDoc\.tab;/.test(code) && /<MainDocument\s[\s\S]{0,160}?shown=\{docShown\}/.test(code), "a document in the main area is shown only on its own tab, which its beta draws");
-ok(/const docBeta = !mainDoc \|\| ideasOn;/.test(code) && /if \(!docBeta \|\| !docWs\) void leaveMainDoc\(\);/.test(code), "…and is closed, once saved, when its beta goes off");
+ok(/const docShown = wsShown !== null && mainDoc !== null && wsShown\.id === mainDoc\.ws && wsTabNow === mainDoc\.tab && !\(memFile && memFile\.kind !== "text"\);/.test(code) && /<MainDocument\s[\s\S]{0,160}?shown=\{docShown\}/.test(code), "a document in the main area is shown only on its own tab, which its beta draws");
+ok(/const docBeta = !mainDoc \|\| \(mainDoc\.source === ideaSource \? ideasOn : wsChatsOn\);/.test(code) && /if \(!docBeta \|\| !docWs\) void leaveMainDoc\(\);/.test(code), "…and is closed, once saved, when ITS beta goes off (Ideas' documents, or a memory's files)");
+ok(/const wsMem = useWsMemory\(wsChatsOn && !!wsList,/.test(code) && /memory=\{!wsChatsOn \? null/.test(code), "workspace_memory is asked for, and the Overview's memory drawn, only with workspace chats on");
+ok(/if \(to\.source === ideaSource\) \{\s*if \(!ideasOn\)/.test(code), "an idea: link in a memory file opens nothing with Ideas off");
 ok((code.match(/<MainDocument\b/g) ?? []).length === 1 && (code.match(/setMainDoc\(\{/g) ?? []).length === 1, "…drawn in one place, and opened by showWs alone");
 ok((code.match(/<WorkspaceFrame\b/g) ?? []).length === 1 && (code.match(/<WorkspaceOverview\b/g) ?? []).length === 1, "the view is drawn in one place");
 // One parent for the document's life: the frame is mounted while a document is

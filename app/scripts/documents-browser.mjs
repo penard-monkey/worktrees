@@ -227,6 +227,9 @@ async function flow(page, tag, name) {
   ok(await shown(page) && (!mac || (nav0 === nav1 && heard.length === 0)), `${tag} ⌘[ and ⌃B in the editor reach no window chord (${nav0} → ${nav1}, heard ${JSON.stringify(heard)})`);
 
   // ── Float ──
+  ok(await page.evaluate(() => { const b = document.querySelector("[data-testid=main-doc-float]"); return !b.title && /move it to the Ideas window/.test(b.getAttribute("aria-label")); }), `${tag} Float has no native tooltip to leave behind, and is named`);
+  await page.hover("[data-testid=main-doc-float]");
+  ok(await page.evaluate(() => getComputedStyle(document.querySelector("[data-testid=main-doc-float]"), "::after").content.includes("Ideas window")), `${tag} …its own shows on hover`);
   await caretAfter(page, "Media library tidy");
   await page.keyboard.type(" floated");
   const [popup] = await Promise.all([page.context().waitForEvent("page"), page.click("[data-testid=main-doc-float]")]);

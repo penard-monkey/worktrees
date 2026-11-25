@@ -14,13 +14,19 @@
 import { useState, type ReactNode } from "react";
 import * as Icons from "./icons";
 import { WS_TAB_LABEL, type WsTab } from "./navHistory";
-import { LinkIdea, NoChats, NoMemory, NoPlan, PlanProblems, PlanProjects, WorkList, type WsParts } from "./WorkspaceOverview";
+import { LinkIdea, NoChats, NoPlan, PlanProblems, PlanProjects, WorkList, type WsParts } from "./WorkspaceOverview";
 import { useTier } from "./doc/useTier";
 
 /** From this much room the Ideas tab has its list beside the document, and from
  *  this much the Plan tab has its lists there and the Overview is two columns.
  *  Under it a list folds to a line above the document. */
 const ROOM = [720, 900] as const;
+/** Room for a chat (420) and the documents (340) both; under it, one of them. */
+const BOTH = [760] as const;
+const SPLIT_KEY = "wt.workspace.split";
+const splitNow = (): number => {
+  try { const v = Number(window.localStorage.getItem(SPLIT_KEY)); return v >= 0.2 && v <= 0.8 ? v : 0.46; } catch { return 0.46; }
+};
 
 /** A document that was floated: where it went, in its place. */
 export type Floated = { title: string; show(): void; here(): void };
@@ -33,7 +39,7 @@ const TAB_ICON: Record<WsTab, ReactNode> = {
  *  behind it and still opens its tab. At the narrowest nav the icons go
  *  (App.css, by the row's own width). */
 export function DocChips(props: {
-  chips: readonly { tab: "memory" | "plan" | "ideas"; has: boolean; count?: number; on: boolean; floated: boolean; waits: boolean }[];
+  chips: readonly { tab: "memory" | "plan" | "ideas"; has: boolean; count?: number; on: boolean; floated: boolean; waits: boolean; fresh?: boolean }[];
   open(tab: "memory" | "plan" | "ideas"): void;
 }) {
   return (
@@ -41,13 +47,14 @@ export function DocChips(props: {
       {props.chips.map((c) => {
         const title = c.floated ? `${WS_TAB_LABEL[c.tab]}: in the Ideas window`
           : c.waits ? `${WS_TAB_LABEL[c.tab]}: text that is not saved`
+          : c.fresh ? "Memory changed since you looked"
           : c.has ? `Open ${WS_TAB_LABEL[c.tab]}` : c.tab === "memory" ? "No memory yet" : c.tab === "plan" ? "No plan" : "No linked ideas";
         const inner = (
           <>
             <span className="wsf-chip-i" aria-hidden="true">{TAB_ICON[c.tab]}</span>
             {WS_TAB_LABEL[c.tab]}
             {c.count ? <span className="wsf-chip-n">{c.count}</span> : null}
-            {c.waits && <span className="wsf-chip-dot" aria-hidden="true" />}
+            {c.waits ? <span className="wsf-chip-dot" aria-hidden="true" /> : c.fresh ? <span className="wsf-chip-dot new" data-testid="memory-fresh" aria-hidden="true" /> : null}
             {c.floated && <span className="wsf-chip-f" aria-hidden="true"><Icons.ExternalLink size={10} /></span>}
           </>
         );
@@ -140,22 +147,43 @@ export function WorkspaceFrame(props: {
   /** Put the tab's document in the pane (it was closed there). */
   openTab(): void;
   doc: ReactNode;
-  /** The chat, when one is open (a later slice): the middle column. */
+  /** The Memory tab: its list, how many files it has, and what stands in the
+   *  document's place (no memory, one that cannot be read, an image). */
+  memory: { files: ReactNode; count: number; instead: ReactNode };
+  /** The chat, when one is open (or being started): the middle column. */
   middle?: ReactNode;
+  /** Which side is shown where there is room for one. */
+  side: "chat" | "docs";
+  setSide(side: "chat" | "docs"): void;
+  newChat: { busy: boolean; run(): void } | null;
+  chatsTab: ReactNode;
   dockLeft: boolean;
 }) {
   const { ws, tab, parts } = props;
   const [docs, setDocs] = useState<HTMLElement | null>(null);
+  const [body, setBody] = useState<HTMLElement | null>(null);
+  const both = useTier(body, BOTH) === 1;
+  const one = props.middle && !both ? props.side : undefined;
+  // The documents' share of the room beside a chat, this machine's own.
+  const [share, setShare] = useState(splitNow);
+  const drag = (x: number) => {
+    const r = body?.getBoundingClientRect();
+    if (!r?.width) return;
+    const w = props.dockLeft ? x - r.left : r.right - x;
+    setShare(Math.min(1 - 420 / r.width, Math.max(340 / r.width, w / r.width)));
+  };
+  const dropped = () => { try { window.localStorage.setItem(SPLIT_KEY, String(share)); } catch { /* it starts at its default */ } };
   const room = useTier(docs, ROOM);
-  const beside = room === 2 || (room === 1 && tab === "ideas");
+  const beside = room === 2 || (room === 1 && tab !== "plan");
   const [sideOpen, setSideOpen] = useState(false);
-  const pane = tab === "plan" || tab === "ideas";
+  const pane = tab === "plan" || tab === "ideas" || tab === "memory";
   const side = !ws ? null
     : tab === "plan" && props.has ? <PlanSide {...parts} />
+    : tab === "memory" ? props.memory.files
     : tab === "ideas" && (props.has || props.docShown) ? <IdeasSide {...parts} openId={props.openId} openTitle={props.openTitle} /> : null;
   const sideLine = tab === "plan"
     ? `${parts.ov?.projects?.length ?? 0} projects · ${parts.ov?.work?.length ?? 0} work items`
-    : `${parts.ov?.ideas.length ?? 0} ideas`;
+    : tab === "memory" ? `Files · ${props.memory.count}` : `${parts.ov?.ideas.length ?? 0} ideas`;
   return (
     <section className="wsf" data-testid="ws-frame" data-ws={ws?.id} data-ws-color={ws?.color ?? undefined} hidden={!props.shown}>
       {ws && (
@@ -164,13 +192,33 @@ export function WorkspaceFrame(props: {
           <span className="wsf-name" data-testid="ws-frame-name" title={ws.name}><Icons.Layers size={13} /><span className="wsf-name-t">{ws.name}</span></span>
           <span className="wsf-counts">{ws.counts}</span>
           <span className="controls">
+            {one && (
+              <span className="agent-view" role="group" aria-label="Side">
+                <button className={"agent-view-b" + (one === "chat" ? " on" : "")} aria-pressed={one === "chat"} data-testid="ws-side-chat" onClick={() => props.setSide("chat")}>Chat</button>
+                <button className={"agent-view-b" + (one === "docs" ? " on" : "")} aria-pressed={one === "docs"} data-testid="ws-side-docs" onClick={() => props.setSide("docs")}>Documents</button>
+              </span>
+            )}
+            {props.newChat && <button className="enter-btn sm" data-testid="ws-frame-new-chat" data-track="workspace.chat.new" disabled={props.newChat.busy} onClick={props.newChat.run}>New chat</button>}
             <button className="icon-btn" data-testid="ws-frame-menu" data-track="nav.workspace.menu" title="workspace menu" onClick={props.onMenu}><Icons.Ellipsis size={15} /></button>
           </span>
         </header>
       )}
-      <div className="wsf-body" data-mid={props.middle ? "" : undefined} data-dock={props.dockLeft ? "left" : "right"}>
-        {props.middle && <div className="wsf-mid">{props.middle}</div>}
-        <div className="wsf-docs" ref={setDocs} data-room={room === 2 ? "wide" : "narrow"}>
+      <div className="wsf-body" ref={setBody} data-mid={props.middle ? "" : undefined} data-one={one} data-dock={props.dockLeft ? "left" : "right"}>
+        {props.middle && <div className="wsf-mid" data-testid="ws-mid">{props.middle}</div>}
+        {props.middle && !one && (
+          <div className="wsf-split-bar" role="separator" aria-orientation="vertical" aria-label="Documents width" tabIndex={0} data-testid="ws-split"
+            aria-valuenow={Math.round(share * 100)} aria-valuemin={20} aria-valuemax={80}
+            onPointerDown={(e) => { e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); }}
+            onPointerMove={(e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) drag(e.clientX); }}
+            onPointerUp={dropped}
+            onKeyDown={(e) => {
+              const by = (e.key === "ArrowLeft" ? 0.02 : e.key === "ArrowRight" ? -0.02 : 0) * (props.dockLeft ? -1 : 1);
+              if (!by) return;
+              e.preventDefault();
+              setShare((x) => Math.min(0.8, Math.max(0.2, x + by)));
+            }} onKeyUp={dropped} />
+        )}
+        <div className="wsf-docs" ref={setDocs} style={props.middle && !one ? { flex: `0 0 ${share * 100}%` } : undefined} data-room={room === 2 ? "wide" : "narrow"}>
           {ws && (
             <div className="wsf-tabs" role="tablist" aria-label="The workspace's documents">
               {props.tabs.map((t) => (
@@ -181,8 +229,7 @@ export function WorkspaceFrame(props: {
             </div>
           )}
           {ws && tab === "overview" && <div className="wsf-scroll">{props.overview}</div>}
-          {ws && tab === "memory" && <div className="wsf-scroll"><NoMemory /></div>}
-          {ws && tab === "chats" && <div className="wsf-scroll"><NoChats /></div>}
+          {ws && tab === "chats" && <div className="wsf-scroll">{props.counts.chats ? props.chatsTab : <NoChats newChat={() => props.newChat?.run()} />}</div>}
           <div className="wsf-split" hidden={!pane} data-beside={beside || undefined}>
             {side && !beside && (
               <button className="wsf-side-line" data-testid="ws-side-toggle" aria-expanded={sideOpen} onClick={() => setSideOpen((o) => !o)}>
@@ -191,9 +238,10 @@ export function WorkspaceFrame(props: {
             )}
             {side && (beside || sideOpen) && <aside className={"wsf-side " + tab} data-testid="ws-side">{side}</aside>}
             <div className="wsf-slot">
-              {ws && pane && !props.docShown && (
+              {ws && pane && !props.docShown && (tab === "memory" && props.memory.instead ? props.memory.instead : (
                 <div className="wsf-nodoc" data-testid="ws-nodoc">
-                  {props.floated ? (
+                  {tab === "memory" ? <div className="wsf-empty"><p>{props.has ? "Pick a file to open it here." : "Reading…"}</p>{props.has && <button className="ctrl sm" data-testid="ws-open-tab" onClick={props.openTab}>Open the index</button>}</div>
+                  : props.floated ? (
                     <div className="wsf-floated" data-testid="ws-floated">
                       <p>{props.floated.title} is in the Ideas window.</p>
                       <div className="ws-ov-line">
@@ -211,7 +259,7 @@ export function WorkspaceFrame(props: {
                     ? <div className="wsf-empty"><p>Pick an idea to open it here.</p></div>
                     : <div className="wsf-empty" data-testid="ws-no-ideas"><div className="ws-ov-line"><span className="ws-ov-none">None linked.</span><LinkIdea {...parts} /></div></div>}
                 </div>
-              )}
+              ))}
               {props.doc}
             </div>
           </div>

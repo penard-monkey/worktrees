@@ -101,6 +101,7 @@ const V = (tab, doc, id = "w1") => ({ place: null, ws: { id, tab, ...(doc ? { do
 eq("a workspace is not Home", H.locKey(V("overview")) === H.locKey(HOME), false);
 eq("two tabs of it are two locations", H.locKey(V("plan")) === H.locKey(V("overview")), false);
 eq("…and two ideas on one tab", H.locKey(V("ideas", "a")) === H.locKey(V("ideas", "b")), false);
+eq("a file on the Memory tab is its own location", H.locKey(V("memory", "a.md")) === H.locKey(V("memory", "b.md")), false);
 eq("an idea means nothing off the Ideas tab", H.locKey(V("plan", "a")), H.locKey(V("plan")));
 eq("a place drops a workspace left beside it", H.normalize({ ...P("a"), ws: { id: "w1", tab: "plan" } }), P("a"));
 let v = H.record(H.empty(), HOME, 1000);
@@ -115,6 +116,11 @@ eq("where: a tab of the same workspace is the same where", H.whereKey(V("plan"))
 eq("…another workspace, Home and a place are not", new Set([V("plan"), V("plan", null, "w2"), HOME, P("a")].map(H.whereKey)).size, 4);
 eq("its label is the workspace's name and the tab", H.label(V("plan"), undefined, () => "Jellyfin"), "Jellyfin · Plan");
 eq("…and never Home", H.label(V("overview")), "A workspace · Overview");
+const C = (tab, chat) => ({ place: null, ws: { id: "w1", tab, chat } });
+eq("a chat beside a tab is another location", H.locKey(C("plan", "c1")) === H.locKey(V("plan")), false);
+eq("…and two chats are two", H.locKey(C("plan", "c1")) === H.locKey(C("plan", "c2")), false);
+eq("…in the same where", H.whereKey(C("plan", "c1")), H.whereKey(V("ideas", "a")));
+eq("its label names the chat", H.label(C("plan", "c1"), undefined, () => "Jellyfin", () => "Release order"), "Jellyfin · Release order · Plan");
 
 if (failed) { console.log(`\n${failed} failed`); process.exit(1); }
 console.log("navhistory-check: all ok");

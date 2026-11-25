@@ -18,8 +18,6 @@
 //     that a text which cannot be saved refuses;
 //   - the document's section is ONE element with ONE parent through tabs,
 //     places, Home and another workspace, and an unsaved text waits in it;
-//   - a chat's column, when there is one, is the middle, the documents on the
-//     dock's side;
 //   - layout and six themes.
 const { chromium, webkit } = await import(process.env.PLAYWRIGHT_MODULE ?? "playwright");
 const BASE = process.env.IDEAS_MOCK_URL ?? "http://localhost:1466";
@@ -109,10 +107,12 @@ async function gates(page, tag) {
   ok(await page.locator("[data-testid=ws-docs]").first().locator("button").evaluateAll((b) => b.map((x) => x.dataset.testid).join()) === "ws-doc-memory", `${tag} …one chip, Memory, and no Plan or Ideas`);
   ok(!(await page.$("[data-testid=ws-ov-card-work]")) && !(await page.$("[data-testid=ws-ov-card-ideas]")) && !!(await page.$("[data-testid=ws-ov-card-memory]")) && !!(await page.$("[data-testid=ws-ov-card-chats]")) && !!(await page.$("[data-testid=ws-ov-card-projects]")), `${tag} …and an Overview of Memory, Chats and Projects`);
   ok(await page.locator("[data-testid=ideas-rail]").count() === 0, `${tag} …without the lightbulb: Ideas is its own switch`);
-  for (const [t, words, buttons] of [["memory", "No memory yet. It starts with the first chat.", ["New chat", "Make memory"]], ["chats", "No chats yet.", ["New chat"]]]) {
+  const other = await page.evaluate(() => [...document.querySelectorAll("[data-testid=ws-name]")].map((e) => e.textContent).find((n) => !n.startsWith("Everything")));
+  await pickWs(page, other);
+  for (const [t, words, buttons] of [["chats", "No chats yet.", ["New chat"]]]) {
     await tab(page, t);
     const e = await page.evaluate((t) => { const el = document.querySelector(`[data-testid=ws-no-${t}]`); return el && { words: el.querySelector("p").textContent, b: [...el.querySelectorAll("button")].map((x) => [x.textContent, x.disabled, x.title]) }; }, t);
-    ok(e?.words === words && JSON.stringify(e.b.map((x) => x[0])) === JSON.stringify(buttons) && e.b.every((x) => x[1] && /Not yet/.test(x[2])), `${tag} ${t}'s empty state, its buttons off and saying why (${JSON.stringify(e)})`);
+    ok(e?.words === words && JSON.stringify(e.b.map((x) => x[0])) === JSON.stringify(buttons) && e.b.find((x) => x[0] === "New chat")[1] === false, `${tag} ${t}'s empty state, with New chat (${JSON.stringify(e)})`);
   }
   await page.keyboard.press("Meta+Comma");
   const box = page.locator("[data-testid=beta-workspace-chats]");
@@ -125,19 +125,19 @@ async function gates(page, tag) {
 async function frame(page, tag, name) {
   const { plan, ws } = await setup(page, ["beta_ideas", "beta_workspace_chats"]);
   ok(await tabs(page) === "overview,memory,plan,ideas,chats" && await isTab(page, "overview"), `${tag} a workspace opens on Overview, first of its five tabs`);
-  ok(await page.locator("[data-testid=ws-frame-name]").innerText() === "Everything" && /^3 projects$/.test(await page.locator(".wsf-counts").innerText()) && await page.locator("[data-testid=ws-frame] >> text=New chat").evaluateAll((b) => b.every((x) => x.closest("[data-testid=ws-no-memory], [data-testid=ws-no-chats]"))), `${tag} its bar: the name, its projects, and no New chat until there are chats`);
+  ok(await page.locator("[data-testid=ws-frame-name]").innerText() === "Everything" && /^3 projects · 2 chats live$/.test(await page.locator(".wsf-counts").innerText()) && await page.locator("[data-testid=ws-frame-new-chat]").count() === 1, `${tag} its bar: the name, its projects and live chats, New chat`);
   ok(!(await homeLit(page)), `${tag} Home is not lit while a workspace is shown`);
   ok(await group(page, "Everything").locator(".ws-icon").first().evaluate((e) => e.classList.contains("waiting")), `${tag} the card's dot is waiting, though lanes work in it too`);
   const chips = await page.evaluate(() => [...document.querySelectorAll("[data-testid=ws-docs]")[0].querySelectorAll("button")].map((b) => [b.dataset.testid, b.classList.contains("none"), b.querySelector(".wsf-chip-n")?.textContent ?? ""]));
-  ok(JSON.stringify(chips) === JSON.stringify([["ws-doc-memory", true, ""], ["ws-doc-plan", false, ""], ["ws-doc-ideas", false, "2"]]), `${tag} its chips: Memory dashed, Plan, Ideas 2 (${JSON.stringify(chips)})`);
+  ok(JSON.stringify(chips) === JSON.stringify([["ws-doc-memory", false, ""], ["ws-doc-plan", false, ""], ["ws-doc-ideas", false, "2"]]), `${tag} its chips: Memory, Plan, Ideas 2 (${JSON.stringify(chips)})`);
   ok(await page.evaluate(() => { const g = document.querySelector("[data-testid=ws-group]"); const c = g.querySelector("[data-testid=ws-docs]"), p = g.querySelector(".project"); return !!(c.compareDocumentPosition(p) & Node.DOCUMENT_POSITION_FOLLOWING); }), `${tag} …above its projects`);
   await page.click("[data-testid=ws-doc-memory]");
-  ok(await isTab(page, "memory"), `${tag} a dashed chip opens its tab`);
+  ok(await isTab(page, "memory"), `${tag} a chip opens its tab`);
   if (SHOTS) { await tab(page, "overview"); await page.screenshot({ path: `${SHOTS}/wsv-overview-${name}.png` }); }
 
   // ── the overview's acts ──
   await tab(page, "overview");
-  ok(!(await page.$("[data-testid=ws-attention]")), `${tag} nothing needs anybody: no attention line`);
+  ok(await page.locator("[data-testid=ws-attention]").evaluateAll((a) => a.map((x) => x.dataset.kind).join()) === "chat", `${tag} a chat waits, and nothing else needs anybody: one attention line`);
   ok(await page.locator("[data-testid=ws-ov-card-work] [data-testid=ws-ov-review]").count() === 2 && await page.locator("[data-testid=ws-ov-card-work] [data-testid=ws-ov-link-place]").count() === 2, `${tag} the plan's work has Review… and Link a place…`);
   await page.locator("[data-testid=ws-ov-review]").first().click();
   ok(await page.waitForSelector("[data-testid=start-review]").then(() => true, () => false), `${tag} Review… opens the review`);
@@ -179,7 +179,7 @@ async function frame(page, tag, name) {
   await page.evaluate((a) => window.__mock.ideaEditElsewhere(a.id, a.c), { id: plan, c: broken });
   await tab(page, "overview");
   ok(await until(page, () => /The plan has a problem/.test(document.querySelector("[data-testid=ws-attention][data-kind=plan]")?.textContent ?? "")), `${tag} a plan with a problem is the attention line`);
-  await page.click("[data-testid=ws-attention-go]");
+  await page.click("[data-testid=ws-attention][data-kind=plan] [data-testid=ws-attention-go]");
   ok(await isTab(page, "plan") && await isDoc(page, plan), `${tag} …which opens the plan`);
 
   // ── unlink, the empty states, Make a plan ──
@@ -286,7 +286,7 @@ async function life(page, tag) {
   ok(await isTab(page, "plan"), `${tag} its tab does not change`);
   await pickPlace(page);
   ok(await until(page, () => /is still open in its workspace/i.test(document.body.innerText)) && await same(), `${tag} a place is not refused: the text waits behind it, and the window says so`);
-  ok(await until(page, () => !!document.querySelector("[data-testid=ws-doc-plan] .wsf-chip-dot")), `${tag} its chip is marked`);
+  ok(await until(page, () => !!document.querySelector("[data-testid=ws-doc-plan] .wsf-chip-dot:not(.new)")), `${tag} its chip is marked`);
   await pickWs(page, other);
   ok(await until(page, () => /has text that is not saved/.test(document.querySelector("[data-testid=ws-attention][data-kind=unsaved]")?.textContent ?? "")) && /in Everything/.test(await page.locator("[data-testid=ws-attention][data-kind=unsaved]").innerText()), `${tag} another workspace's Overview says which document, and where`);
   await page.click("[data-testid=ws-attention-go]");
@@ -295,7 +295,7 @@ async function life(page, tag) {
   await pickWs(page);
   ok(await isDoc(page, plan) && await isTab(page, "plan") && !!(await page.$("[data-testid=ideas-conflict]")), `${tag} its workspace's name goes to it too`);
   await page.click("[data-testid=ideas-keep-mine]");
-  ok(await until(page, (id) => window.__mock.ideaFile(id).content.includes(" MINE"), plan) && await until(page, () => !document.querySelector(".wsf-chip-dot")), `${tag} Keep mine saves it, and the mark goes`);
+  ok(await until(page, (id) => window.__mock.ideaFile(id).content.includes(" MINE"), plan) && await until(page, () => !document.querySelector(".wsf-chip-dot:not(.new)")), `${tag} Keep mine saves it, and the mark goes`);
 
   // ── a slow save, and a newer click: the newer one wins ──
   await page.evaluate(() => window.__mock.ideaSlowWrites(1200));
@@ -360,22 +360,56 @@ async function orphan(page, tag) {
   ok(await until(page, (id) => window.__mock.ideaFile(id).content.includes(" HELD"), plan), `${tag} and is saved from there`);
 }
 
-async function chat(page, tag) {
-  await setup(page);
-  await page.setViewportSize({ width: 1440, height: 900 });
-  // Nothing passes a chat yet: the frame's own rules, with a column put in.
-  const m = await page.evaluate(() => {
-    const body = document.querySelector(".wsf-body"), docs = document.querySelector(".wsf-docs");
-    const whole = docs.getBoundingClientRect().width === body.getBoundingClientRect().width;
-    const mid = document.createElement("div"); mid.className = "wsf-mid"; body.prepend(mid); body.setAttribute("data-mid", "");
-    const r = (e) => e.getBoundingClientRect();
-    const right = r(docs).left >= r(mid).right - 1 && r(docs).right >= r(body).right - 1;
-    const share = r(docs).width / r(body).width;
-    body.dataset.dock = "left";
-    const left = r(docs).left <= r(body).left + 1 && r(mid).left >= r(docs).right - 1;
-    return { whole, right, left, share, mid: r(mid).width, docs: r(docs).width };
-  });
-  ok(m.whole && m.right && m.left && Math.abs(m.share - 0.46) < 0.02 && m.mid >= 420 && m.docs >= 340, `${tag} no chat: the documents are the whole room; with one they are on the dock's side (${JSON.stringify(m)})`);
+/** A workspace changed in the Ideas window (or by anybody else). */
+async function elsewhere(page, tag) {
+  await boot(page, ["beta_ideas"]);
+  await page.click("[data-testid=ws-doc-plan]");
+  ok(await until(page, () => /A plan is made from ideas: link one first\./.test(document.querySelector("[data-testid=ws-no-plan]")?.textContent ?? "")) && await page.locator("[data-testid=ws-ov-make-plan]").isDisabled(), `${tag} Make a plan with no idea linked says why, in words`);
+  const ws = (await call(page, "workspaces_list", {})).workspaces.find((w) => w.name === "Everything").id;
+  await pickWs(page);
+  await page.waitForSelector("[data-testid=ws-overview]");
+  await call(page, "workspace_link_idea", { id: ws, idea: JELLY });
+  ok(await page.evaluate(() => /None linked/.test(document.querySelector("[data-testid=ws-ov-card-ideas]").textContent)), `${tag} linked elsewhere: nothing here has heard`);
+  await page.evaluate(() => window.dispatchEvent(new StorageEvent("storage", { key: "wt.workspaces.changed", newValue: "1" })));
+  ok(await until(page, (id) => !!document.querySelector(`[data-testid=ws-ov-idea][data-idea='${id}']`) && !document.querySelector("[data-testid=ws-doc-ideas]").classList.contains("none"), JELLY), `${tag} the Ideas window's word brings it, on the Overview and the chip`);
+  await call(page, "workspace_unlink_idea", { id: ws, idea: JELLY });
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  ok(await until(page, () => /None linked/.test(document.querySelector("[data-testid=ws-ov-card-ideas]")?.textContent ?? "")), `${tag} and so does coming to the front`);
+  // The Ideas window says so: the real one, in a second page of this context.
+  const other = await page.context().newPage();
+  await other.addInitScript(() => { window.__said = 0; const set = Storage.prototype.setItem; Storage.prototype.setItem = function (k, v) { if (k === "wt.workspaces.changed") window.__said++; return set.call(this, k, v); }; });
+  await other.goto(`${BASE}/companion/index.html?ideas=seed&workspaces=1`);
+  await other.click(`[data-idea='${JELLY}'] button.ix-row-main`, { button: "right" });
+  await other.click("[data-testid=ideas-menu-link-ws]");
+  await other.locator(".ix-dialog button, [data-testid=ideas-ws-pick-row]").filter({ hasText: "Everything" }).first().click();
+  ok(await until(other, () => window.__said === 1), `${tag} Link to workspace… in the Ideas window says it`);
+  await other.close();
+}
+
+/** Quit on a workspace's tab, and opened again. */
+async function relaunch(page, tag) {
+  for (const [on, want] of [[true, "ideas"], [false, null]]) {
+    const p = await page.context().newPage();
+    await p.addInitScript(([s]) => { if (!sessionStorage.getItem("wt-mock-ui-state")) sessionStorage.setItem("wt-mock-ui-state", JSON.stringify(s)); },
+      [{ places_side: "left", dock_side: "right", settings_rev: 5, nav_pinned: true, nav_view: "workspaces", beta_ideas: true, beta_workspace_chats: true, restore_last: on }]);
+    await p.goto(`${BASE}/?ideas=seed&workspaces=1`);
+    await p.waitForSelector("[data-testid=ws-group]");
+    await p.waitForTimeout(800);
+    await p.locator("[data-testid=ws-chat-row]", { hasText: "Release order" }).first().click();
+    await p.click("[data-testid=ws-tab][data-tab=ideas]");
+    await p.waitForTimeout(300);
+    await p.reload();
+    await p.waitForSelector("[data-testid=ws-group]");
+    await p.waitForTimeout(800);
+    const got = await p.evaluate(() => [document.querySelector("[data-testid=ws-tab].on")?.dataset.tab ?? null, document.querySelector(".wsc-name-t")?.textContent ?? null, document.querySelector("[data-testid=nav-back]")?.disabled]);
+    ok(JSON.stringify(got.slice(0, 2)) === JSON.stringify(want ? ["ideas", "Release order"] : [null, null]), `${tag} restore last ${on ? "on: the workspace, its tab and its chat" : "off: Home, as for a place"} (${JSON.stringify(got)})`);
+    if (on) ok(got[2] === true, `${tag} …and launching is not a step to go back from`);
+    // Home is what is restored after Home.
+    await p.click(".home-item");
+    await p.waitForTimeout(200);
+    ok(await p.evaluate(() => localStorage.getItem("wt.last.view")) === null, `${tag} leaving it forgets it`);
+    await p.close();
+  }
 }
 
 async function layout(page, tag, name) {
@@ -447,7 +481,7 @@ async function themes(page, tag, name) {
 const only = process.env.ONLY?.split(",");
 for (const [engine, name] of [[chromium, "chromium"], [webkit, "webkit"]]) {
   const browser = await engine.launch();
-  for (const part of [gates, frame, history, life, removed, orphan, chat, layout, themes]) {
+  for (const part of [gates, frame, history, life, removed, orphan, elsewhere, relaunch, layout, themes]) {
     if (only && !only.includes(part.name)) continue;
     const page = await (await browser.newContext({ viewport: { width: 1440, height: 900 } })).newPage();
     const errors = [];

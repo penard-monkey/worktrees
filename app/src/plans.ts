@@ -312,6 +312,10 @@ export const SHOW_KEY = "wt.ideas.show";
 /** …and the other way: the workspace the main window shows, written before
  *  the companion raises it (`raise_window`). The same shape and age rule. */
 export const WS_SHOW_KEY = "wt.workspace.show";
+/** …and that the Ideas window changed a workspace (linked, set a plan, made
+ *  one): no event carries a change of the list, so the other window is told to
+ *  read it again. The value is only a time; the `storage` event is the word. */
+export const WS_CHANGED_KEY = "wt.workspaces.changed";
 /** …and an act the main window's own dialogs do (phase 5): clone or create
  *  the plan's project `name`, or show a place. The same shape and age rule;
  *  nothing is done from it but opening a dialog, filled in, or selecting. */

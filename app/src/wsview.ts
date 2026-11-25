@@ -34,24 +34,41 @@ export function rollupOf<T>(items: readonly T[], activity: (t: T) => string, jus
 
 /** One line of what needs a person, over a workspace's Overview. */
 export type Attention =
+  | { kind: "chat"; text: string; conv: string }
   | { kind: "unsaved"; text: string }
   | { kind: "plan"; text: string };
 
-/** Only what needs somebody: a document whose text is saved nowhere, then a
- *  plan whose reader found problems (or that cannot be read). Nothing: []. */
+/** Only what needs somebody: a chat that waits (or whose fold failed), then a
+ *  document whose text is saved nowhere, then a plan whose reader found problems (or that cannot be read). Nothing: []. */
 export function attentionOf(a: {
   /** A document in the main window that is not saved, and the workspace it
    *  waits in when that is another one. */
   unsaved: { title: string; elsewhere: string | null } | null;
   problems: readonly string[];
   planError: string | null;
+  chats?: readonly { conv: string; title: string; failed: boolean }[];
 }): Attention[] {
-  const out: Attention[] = [];
+  const out: Attention[] = (a.chats ?? []).map((c) => ({ kind: "chat", conv: c.conv, text: c.failed ? `The fold of “${c.title}” did not finish.` : `“${c.title}” is waiting for an answer.` }));
   if (a.unsaved) out.push({ kind: "unsaved", text: `“${a.unsaved.title}”${a.unsaved.elsewhere ? `, in ${a.unsaved.elsewhere},` : ""} has text that is not saved.` });
   if (a.planError) out.push({ kind: "plan", text: `The plan cannot be read: ${a.planError}.` });
   else if (a.problems.length) out.push({ kind: "plan", text: a.problems.length === 1 ? `The plan has a problem. ${a.problems[0]}` : `The plan has ${a.problems.length} problems. ${a.problems[0]}` });
   return out;
 }
 
+/** The workspace view as it was at the last quit, for the launch restore (the
+ *  same switch a place's is: Settings' "restore last"). Browser storage, read as
+ *  anything may be in it. */
+export const LAST_VIEW_KEY = "wt.last.view";
+export type LastView = { id: string; tab: WsTab; doc?: string; chat?: string };
+const TABS: readonly string[] = ["overview", "memory", "plan", "ideas", "chats"];
+export function lastView(raw: string | null): LastView | null {
+  try {
+    const v = JSON.parse(raw ?? "null") as Record<string, unknown> | null;
+    if (!v || typeof v.id !== "string" || !v.id || typeof v.tab !== "string" || !TABS.includes(v.tab)) return null;
+    return { id: v.id, tab: v.tab as WsTab, ...(typeof v.doc === "string" && v.doc ? { doc: v.doc } : {}), ...(typeof v.chat === "string" && v.chat ? { chat: v.chat } : {}) };
+  } catch { return null; }
+}
+
 /** The counts beside a workspace's name. */
-export const wsCounts = (projects: number): string => `${projects} project${projects === 1 ? "" : "s"}`;
+export const wsCounts = (projects: number, liveChats = 0): string =>
+  `${projects} project${projects === 1 ? "" : "s"}${liveChats ? ` · ${liveChats} chat${liveChats === 1 ? "" : "s"} live` : ""}`;

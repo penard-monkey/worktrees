@@ -32,7 +32,8 @@ import { DocNotice, DocumentPane } from "../src/doc/DocumentPane";
 import { ideaDocs, type Doc, type Version } from "../src/doc/source";
 import { errText, useDoc } from "../src/doc/useDoc";
 import { quoteOf, type Quote } from "./ideaquote";
-import { IdeaChat, ideaDots, type ConvState, type IdeaSessionsEv } from "./IdeaChat";
+import type { ConvState } from "../src/desk";
+import { IdeaChat, ideaDots, type IdeaSessionsEv } from "./IdeaChat";
 import { useNavDrag } from "../src/navdrag";
 import { CombineAsk, DropChooser, PickIdea, RelatedStrip, SplitAsk, type Relation } from "./IdeaRelate";
 import {
@@ -42,7 +43,7 @@ import {
 import { PickProject, PickWorkspace, PlanPanel, PlanStrip, type RegProject, type WsOption } from "./PlanPanel";
 import {
   addIdeasCall, addProjectCall, agentFor, fromPlanCall, ideaOntoPlan, itemPlace, launchCall, linkIdeaCall, linkPlaceCall, makePlanCall, MAIN_ASK_KEY, missingPlaces,
-  placeOntoItem, planSources, plansIn, projectOntoPlan, removeIdeaCall, setPlanCall, showRequest, SHOW_KEY, startCall, WS_SHOW_KEY,
+  placeOntoItem, planSources, plansIn, projectOntoPlan, removeIdeaCall, setPlanCall, showRequest, SHOW_KEY, startCall, WS_CHANGED_KEY, WS_SHOW_KEY,
   type Activity, type ItemRef, type MainAsk, type PlanView, type Snap, type StartDone, type WorkItem,
 } from "../src/plans";
 import { PickPlace, StartReview } from "../src/StartWork";
@@ -513,9 +514,12 @@ export function Companion() {
     invoke("raise_window").catch(() => {});
   }, []);
 
+  /** A workspace was changed here: the main window reads its list again. */
+  const wsChanged = () => { try { window.localStorage.setItem(WS_CHANGED_KEY, String(Date.now())); } catch { /* it reads on focus */ } };
   const doMakeWorkspace = useCallback(async (plan: string) => {
     const out = await act<{ id: string; created: boolean; workspaces: { id: string; name: string }[] }>(fromPlanCall(plan), `make workspace from ${plan}`);
     if (!out) return;
+    wsChanged();
     const name = out.workspaces.find((w) => w.id === out.id)?.name ?? "";
     setNotice(out.created ? `Made the workspace “${name}”. It is in the main window, under Workspaces.` : `This plan already has a workspace, “${name}”: showing it.`);
     bump();
@@ -536,6 +540,7 @@ export function Companion() {
     const call = p.mode === "set-plan" ? setPlanCall(ws, p.id) : linkIdeaCall(ws, p.id);
     const l = await act<{ workspaces: { id: string; name: string }[] }>(call, `${p.mode} ${p.id} → ${ws}`);
     if (!l) return;
+    wsChanged();
     const name = l.workspaces.find((w) => w.id === ws)?.name ?? "";
     setNotice(p.mode === "set-plan" ? `“${name}” is this plan's workspace now.` : `Linked “${titleOf(p.id)}” to “${name}”.`);
     bump();
