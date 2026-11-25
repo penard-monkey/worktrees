@@ -25,7 +25,7 @@
 //! whole of it and under its own message, and an agent that thinks for a
 //! minute would otherwise lose half of it to "Edited: …".
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -245,6 +245,18 @@ struct Seen {
     stamp: Stamp,
     /// When it last moved; `None` once that has been committed.
     moved: Option<Instant>,
+    /// The chats that were live through a tick it moved in, each with when its
+    /// last such tick began (seconds since the epoch).
+    live: BTreeMap<String, i64>,
+}
+
+impl Seen {
+    /// The chats to name on a commit made after the one at `last`: live through
+    /// a tick that began after it. A tick that began before it, or in its
+    /// second, may have moved what that commit already holds.
+    fn live_since(&self, last: i64) -> Vec<String> {
+        self.live.iter().filter(|(_, began)| **began > last).map(|(c, _)| c.clone()).collect()
+    }
 }
 
 /// What the poll last saw of each workspace's memory.
@@ -254,6 +266,26 @@ pub struct MemoryWatch {
     /// The last thing said about each, so a failure that repeats every tick is
     /// one line.
     said: HashMap<String, String>,
+    /// The tick before this one: when it was, and which chats were live in
+    /// each workspace. `None` before the first.
+    before: Option<(i64, Live)>,
+    /// This one's.
+    here: (i64, Live),
+}
+
+/// The live chats of each workspace.
+pub type Live = HashMap<String, HashSet<String>>;
+
+impl MemoryWatch {
+    /// The chats live at both ends of the tick that ends now, and when it
+    /// began: whoever was there for whatever moved in it. One that started or
+    /// ended in it is left out, because it may not have been; and a first tick
+    /// knows nobody.
+    fn through(&self, id: &str) -> Vec<(String, i64)> {
+        let Some((began, was)) = &self.before else { return Vec::new() };
+        let (Some(was), Some(is)) = (was.get(id), self.here.1.get(id)) else { return Vec::new() };
+        was.intersection(is).map(|c| (c.clone(), *began)).collect()
+    }
 }
 
 #[derive(Serialize, Debug, PartialEq, Eq)]
@@ -284,6 +316,7 @@ fn tick_in(
     w.seen.retain(|id, _| ids.contains(id));
     w.said.retain(|id, _| ids.contains(id));
     for id in ids {
+        let through = w.through(id);
         let at = match stamp(id) {
             Ok(s) => s,
             Err(e) => {
@@ -296,7 +329,7 @@ fn tick_in(
         };
         match w.seen.get_mut(id) {
             None => {
-                w.seen.insert(id.clone(), Seen { stamp: at, moved: Some(now) });
+                w.seen.insert(id.clone(), Seen { stamp: at, moved: Some(now), live: BTreeMap::new() });
                 continue;
             }
             Some(s) if s.stamp != at => {
@@ -305,6 +338,7 @@ fn tick_in(
                 events.push(MemoryChanged { id: id.clone(), changed, removed });
                 s.stamp = at;
                 s.moved = Some(now);
+                s.live.extend(through);
             }
             Some(s) => {
                 if held(id) {
@@ -321,15 +355,28 @@ fn tick_in(
 }
 
 /// The poll's beat.
-pub fn tick(ctx: &Ctx, w: &mut MemoryWatch) {
+///
+/// `live` is which chats are live in this same beat: a quiet-minute commit
+/// names, in its body, the ones that were live while it was changed. It costs
+/// no call (the poll has them) and claims no author: History says "while
+/// “<chat>” was live", which is true of a hand edit too.
+pub fn tick(ctx: &Ctx, w: &mut MemoryWatch, live: Live) {
     let r = root(ctx);
+    let wall = worktrees_core::sysclock::now_epoch();
+    let was = std::mem::replace(&mut w.here, (wall, live));
+    // The default stands for "no tick yet", and no clock reads 0.
+    w.before = (was.0 != 0).then_some(was);
     let ids = store::ids_at(r);
     let (events, quiet) = tick_in(&ids, w, Instant::now(), &|id| ctx.memory.is_held(id), &|id| store::stamp_at(r, id));
     for ev in events {
         ctx.emit("workspaces:memory", serde_json::to_value(ev).unwrap_or(serde_json::Value::Null));
     }
     for id in quiet {
-        match store::commit_if_dirty_at(r, &id, None) {
+        let done = store::commit_quiet_at(r, &id, |last| w.seen.get(&id).map(|s| s.live_since(last)).unwrap_or_default());
+        if let (Some(s), Ok(_)) = (w.seen.get_mut(&id), &done) {
+            s.live.clear();
+        }
+        match done {
             Ok(Some(c)) => {
                 w.said.remove(&id);
                 crate::log::info(&format!("memory: {id}: committed {} ({} file(s))", &c.commit[..7], c.files.len()));
@@ -502,25 +549,25 @@ mod tests {
     fn the_event_names_each_path_and_the_mtime_a_save_answered_with() {
         let s = Scratch::new("event");
         let mut w = MemoryWatch::default();
-        tick(&s.ctx, &mut w);
+        tick(&s.ctx, &mut w, Live::new());
         assert!(s.rec.events.lock().unwrap().is_empty(), "the baseline");
         let saved = workspace_memory_write(&s.ctx, s.id.clone(), "topics/t.md".into(), "# T\n".into(), None, None).unwrap();
-        tick(&s.ctx, &mut w);
-        tick(&s.ctx, &mut w);
+        tick(&s.ctx, &mut w, Live::new());
+        tick(&s.ctx, &mut w, Live::new());
         let ev = std::mem::take(&mut *s.rec.events.lock().unwrap());
         assert_eq!(ev, vec![(
             "workspaces:memory".to_string(),
             serde_json::json!({"id": s.id, "changed": [{"path": "topics/t.md", "mtime_ms": saved.mtime_ms}], "removed": []}),
         )]);
         memory_commit_if_dirty(&s.ctx, &s.id, None).unwrap().unwrap();
-        tick(&s.ctx, &mut w);
+        tick(&s.ctx, &mut w, Live::new());
         assert!(s.rec.events.lock().unwrap().is_empty(), "a commit is no change to a file");
         fs::remove_file(store::dir_at(s.ctx.workspaces_dir(), &s.id).unwrap().join("topics/t.md")).unwrap();
-        tick(&s.ctx, &mut w);
+        tick(&s.ctx, &mut w, Live::new());
         assert_eq!(s.rec.events.lock().unwrap()[0].1["removed"], serde_json::json!(["topics/t.md"]));
         s.rec.events.lock().unwrap().clear();
         fs::remove_dir_all(s.ctx.workspaces_dir()).unwrap();
-        tick(&s.ctx, &mut w);
+        tick(&s.ctx, &mut w, Live::new());
         assert!(s.rec.events.lock().unwrap().is_empty(), "a workspace that went is not its files removed one by one");
     }
 
@@ -580,6 +627,56 @@ mod tests {
         let b = stamp(&[("x.md", 1), ("y.md", 2)]);
         let (ev, _) = tick_in(&ids, &mut w, t, &|_| false, &|_| Ok(b.clone()));
         assert_eq!(ev, vec![MemoryChanged { id: "A".into(), changed: vec![Moved { path: "y.md".into(), mtime_ms: 2 }], removed: vec![] }]);
+    }
+
+    /// Who a quiet commit names: live at both ends of the tick it moved in,
+    /// and only for what no commit holds yet.
+    #[test]
+    fn a_quiet_commit_names_only_chats_that_were_live_throughout() {
+        let ids = vec!["A".to_string()];
+        let t = Instant::now();
+        let mut w = MemoryWatch::default();
+        let live = |chats: &[&str]| -> Live { HashMap::from([("A".to_string(), chats.iter().map(|c| c.to_string()).collect())]) };
+        // One beat: the clock, who is live, and the memory's stamp.
+        let mut beat = |wall: i64, chats: &[&str], m: u64| {
+            let was = std::mem::replace(&mut w.here, (wall, live(chats)));
+            w.before = (was.0 != 0).then_some(was);
+            tick_in(&ids, &mut w, t, &|_| false, &|_| Ok(stamp(&[("x.md", m)])));
+            w.seen["A"].live.iter().map(|(c, at)| (c.clone(), *at)).collect::<Vec<_>>()
+        };
+        assert!(beat(100, &["one"], 1).is_empty(), "a first sight knows nobody");
+        assert!(beat(103, &["one"], 1).is_empty(), "nothing moved");
+        assert_eq!(beat(106, &["one", "two"], 2), vec![("one".to_string(), 103)], "two started in it");
+        assert_eq!(beat(109, &["two"], 3), vec![("one".to_string(), 103), ("two".to_string(), 106)], "one ended in it");
+        assert_eq!(beat(112, &[], 4).len(), 2, "nobody was there throughout");
+        let s = &w.seen["A"];
+        assert_eq!(s.live_since(0), vec!["one", "two"]);
+        // A commit made at 104 may hold what moved between 103 and 106.
+        assert_eq!(s.live_since(104), vec!["two"]);
+        assert_eq!(s.live_since(106), Vec::<String>::new(), "in its very second");
+    }
+
+    /// The poll's own commit, end to end: the chat that was live is named, and
+    /// the next quiet minute starts again with nobody.
+    #[test]
+    fn the_polls_quiet_commit_carries_the_live_chats() {
+        let s = Scratch::new("quiet-live");
+        let chat = ulid::new();
+        let mut w = MemoryWatch::default();
+        let live = || -> Live { HashMap::from([(s.id.clone(), HashSet::from([chat.clone()]))]) };
+        // The scratch's first commit is seconds old: the clock is moved past it.
+        let beat = |w: &mut MemoryWatch| {
+            tick(&s.ctx, w, live());
+            w.here.0 += 60;
+        };
+        beat(&mut w);
+        s.put("topics/t.md", "one\n");
+        beat(&mut w);
+        w.seen.get_mut(&s.id).unwrap().moved = Instant::now().checked_sub(QUIET);
+        beat(&mut w);
+        let top = || store::log_at(s.ctx.workspaces_dir(), &s.id, None, None, Some(1)).unwrap().changes.remove(0);
+        assert_eq!((top().subject.as_str(), top().live), ("Edited: topics/t.md", vec![chat.clone()]));
+        assert!(w.seen[&s.id].live.is_empty(), "a commit clears who was named");
     }
 
     #[test]

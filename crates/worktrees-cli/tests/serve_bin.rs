@@ -785,6 +785,10 @@ fn a_workspace_chat_from_start_to_the_workspaces_removal() {
     let fake = sb.root.join("fake");
     fake_chat_claude(&fake);
     let folder = sb.root.join("wsdir");
+    let ideas = sb.root.join("ideas");
+    let linked = worktrees_core::ideas::create_at(&ideas, "Jellyfin sharing").unwrap().idea;
+    worktrees_core::ideas::create_at(&ideas, "Nobody linked it").unwrap();
+    let ideas = std::fs::canonicalize(ideas).unwrap();
     let a = sb.project("alpha");
     let private = sb.project("priv");
     let reg = sb.root.join("xdg/worktrees/projects.json");
@@ -801,6 +805,7 @@ fn a_workspace_chat_from_start_to_the_workspaces_removal() {
         &[
             ("TMUX", &tmux.env()),
             ("WORKTREES_WORKSPACES_DIR", folder.to_str().unwrap()),
+            ("WORKTREES_IDEAS_DIR", ideas.to_str().unwrap()),
             ("PATH", &path),
             ("WORKTREES_USAGE_PROBE", "off"),
             ("DISABLE_AUTOUPDATER", "1"),
@@ -828,6 +833,8 @@ fn a_workspace_chat_from_start_to_the_workspaces_removal() {
 
     let id = call("workspace_create", json!({ "name": "Home" })).unwrap()["workspaces"][0]["id"].as_str().unwrap().to_string();
     call("workspace_set_projects", json!({ "id": id, "roots": [a, private] })).unwrap();
+    call("workspace_link_idea", json!({ "id": id, "idea": linked.id })).unwrap();
+    let doc = ideas.join(&linked.file);
 
     // Nothing under the workspaces folder is ever a project.
     let mem = folder.join(&id).join("memory");
@@ -875,7 +882,7 @@ fn a_workspace_chat_from_start_to_the_workspaces_removal() {
     assert_eq!(std::fs::read_to_string(fake.join("index")).unwrap().lines().next(), Some("# Memory: Home"), "the memory is there when Claude starts");
     assert_eq!(&got[1..5], ["--name", &session, "--session-id", sid]);
     assert_eq!(got.last().unwrap(), &format!("Read chats/{conv}/start.md and begin."));
-    let rules = format!(r#"{{"autoMemoryEnabled":false,"permissions":{{"allow":["Read(/{a}/**)"],"deny":["Edit(/{a}/**)","Read(/{private}/**)"]}}}}"#);
+    let rules = format!(r#"{{"autoMemoryEnabled":false,"permissions":{{"allow":["Read(/{a}/**)","Read(/{})"],"deny":["Edit(/{a}/**)","Edit(/{}/**)","Read(/{private}/**)"]}}}}"#, doc.display(), ideas.display());
     assert!(got.windows(2).any(|w| w == ["--settings", rules.as_str()]), "{got:?}");
     assert!(!got.iter().any(|w| w.starts_with("--add-dir")), "{got:?}");
     let own = folder.join(&id).join("chats").join(&conv);
@@ -884,11 +891,15 @@ fn a_workspace_chat_from_start_to_the_workspaces_removal() {
     assert!(ctx.contains(&format!("- `alpha`: `{a}` — registered, read\n  - place `(main)`")), "{ctx}");
     assert!(ctx.contains(&format!("- `priv`: `{private}` — registered, NOT READ (private)\n\n")), "{ctx}");
 
+    assert!(ctx.contains(&format!("## Linked ideas\n\n- `{}`: `Jellyfin sharing` in `{}`\n", linked.id.as_deref().unwrap(), doc.display())), "{ctx}");
+
     // The list, from the record and tmux.
     let l = call("workspace_chats", json!({ "id": id })).unwrap();
     assert_eq!((l["name"].as_str(), l["folder"].as_str()), (Some("Home"), folder.join(&id).to_str()), "{l}");
     assert_eq!((l["chats"][0]["state"].as_str(), l["chats"][0]["note_exists"].as_bool()), (Some("running"), Some(false)), "{l}");
     assert_eq!((l["projects"][0]["reads"].as_str(), l["projects"][1]["reads"].as_str(), l["projects"][1]["why"].as_str()), (Some("yes"), Some("no"), Some("private")), "{l}");
+    let d = &l["documents"][0];
+    assert_eq!((d["kind"].as_str(), d["title"].as_str(), d["path"].as_str(), d["reads"].as_str(), l["documents"].as_array().unwrap().len()), (Some("idea"), Some("Jellyfin sharing"), doc.to_str(), Some("yes"), 1), "{l}");
     let places = call("list_places", json!({ "repo": a })).unwrap();
     assert_eq!(places["places"][0]["tmux_session"]["up"], json!(false), "a chat is no place's session: {places}");
 

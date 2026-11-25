@@ -25,9 +25,9 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use worktrees_core::workspacechats::{self as chats, Chat, Context, PlaceLine, ProjectContext, ProjectRead, Reads, Start};
+use worktrees_core::workspacechats::{self as chats, Chat, Context, DocRead, PlaceLine, ProjectContext, ProjectRead, Reads, Start};
 use worktrees_core::workspaces::{self as store, Workspace};
-use worktrees_core::{activity, agent, desksessions, harness, ideas, registry, store as declared, sysclock, tmux, wsfolder, Project};
+use worktrees_core::{activity, agent, desksessions, harness, registry, store as declared, sysclock, tmux, wsfolder, Project};
 
 use crate::agents::{self, Locus};
 use crate::watch::WorkspaceSessions;
@@ -82,6 +82,9 @@ pub struct Chats {
     /// What a chat of this workspace reads, project by project, and why not:
     /// the same list its `context.md` is written from.
     pub projects: Vec<ProjectRead>,
+    /// The workspace's plan and linked ideas, with where each is and whether a
+    /// chat reads it: also what `context.md` is written from.
+    pub documents: Vec<DocRead>,
 }
 
 fn state_of(live: bool, a: &activity::Activity) -> &'static str {
@@ -106,10 +109,12 @@ pub fn workspace_chats(ctx: &Ctx, id: String) -> Result<Chats, String> {
     crate::workspacefolds::ensure(ctx);
     let w = workspace(ctx, &id)?;
     let root = ctx.workspaces_dir();
+    let reg = registry::read_lenient();
     let live: std::collections::HashSet<String> = tmux::session_names().into_iter().collect();
     Ok(Chats {
         chats: chats::list_at(root, &id)?.into_iter().map(|c| listed(ctx, &id, c, &live)).collect::<Result<_, _>>()?,
-        projects: chats::project_reads(&w, &registry::read_lenient()),
+        projects: chats::project_reads(&w, &reg),
+        documents: chats::doc_reads(&w, &chats::Sources { root, ideas: ctx.ideas_dir(), reg: &reg }),
         folder: wsfolder::folder_at(root, &id)?.to_string_lossy().into_owned(),
         name: w.name,
         id,
@@ -161,21 +166,19 @@ fn places(root: &str, panes: Option<&tmux::PaneList>, probes: &[agent::ClaudePro
 fn context(ctx: &Ctx, w: &Workspace, conv: &str) -> Context {
     let panes = tmux::PaneList::fetch();
     let probes = agent::live_probes_in(panes.as_ref());
-    let projects = chats::project_reads(w, &registry::read_lenient())
+    let reg = registry::read_lenient();
+    let projects = chats::project_reads(w, &reg)
         .into_iter()
         .map(|read| {
             let places = if read.reads == Reads::No { Ok(Vec::new()) } else { places(&read.root, panes.as_ref(), &probes) };
             ProjectContext { read, places }
         })
         .collect();
-    let idx = ideas::list_at(ctx.ideas_dir()).ok();
-    let title = |id: &str| idx.as_ref()?.lookup(id).ok().map(|(d, _)| d.title.clone());
     Context {
         workspace: w.name.clone(),
         written: desksessions::now_iso(),
         projects,
-        plan: w.plan.as_ref().map(|p| (p.clone(), title(p))),
-        ideas: w.ideas.iter().map(|i| (i.clone(), title(i))).collect(),
+        docs: chats::doc_reads(w, &chats::Sources { root: ctx.workspaces_dir(), ideas: ctx.ideas_dir(), reg: &reg }),
         notes: chats::earlier_notes(ctx.workspaces_dir(), &w.id, Some(conv)),
     }
 }
@@ -192,7 +195,7 @@ pub fn workspace_chat_start(ctx: &Ctx, id: String) -> Result<Value, String> {
     let w = workspace(ctx, &id)?;
     crate::workspacefolds::ensure(ctx);
     crate::memory::before_launch(ctx, &w)?;
-    let (c, session) = chats::start_at(ctx.workspaces_dir(), &w, |conv| chats::context_text(&context(ctx, &w, conv)))?;
+    let (c, session) = chats::start_at(ctx.workspaces_dir(), ctx.ideas_dir(), &w, |conv| chats::context_text(&context(ctx, &w, conv)))?;
     Ok(json!({ "id": id, "chat": c, "session": session }))
 }
 
@@ -214,7 +217,7 @@ pub fn workspace_chat_resume(ctx: &Ctx, id: String, conv: String) -> Result<Valu
     }
     crate::memory::before_launch(ctx, &w)?;
     chats::write_context_at(root, &id, &conv, &chats::context_text(&context(ctx, &w, &conv)))?;
-    let session = chats::launch_at(root, &w, &conv, Start::Resume, None)?;
+    let session = chats::launch_at(root, ctx.ideas_dir(), &w, &conv, Start::Resume, None)?;
     touched(ctx, &id, &conv);
     Ok(json!({ "id": id, "conv": conv, "session": session }))
 }

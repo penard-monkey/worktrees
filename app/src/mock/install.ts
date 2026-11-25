@@ -423,7 +423,8 @@ const mockWsGet = (id: unknown) => {
 };
 /** A workspace's memory (`worktrees_api::memory`): ./memory.ts. */
 const mockMemory = memoryMock((e, p) => emitEvent(e, p), (id) => { mockWsView(); return mockWsGet(id).name; },
-  (id, title) => mockChats.get(id)?.find((c) => c.title === title && c.fold)?.note.replace(/^memory\//, "") ?? null);
+  (id, title) => mockChats.get(id)?.find((c) => c.title === title && c.fold)?.note.replace(/^memory\//, "") ?? null,
+  (id) => (mockChats.get(id) ?? []).filter((c) => c.live).map((c) => c.id));
 // The launch gate's `[quota]` policy (`quota_settings`): `?quota=off` starts
 // with the gate off, `?quotapct=<n>` with a weekly threshold, and
 // `?quotapct=bad` with a hand-edit the gate ignored (so the problems line shows).
@@ -2239,6 +2240,19 @@ const mockChatReads = (id: string) => mockWsGet(id).projects.map((root) => {
   const why = !on ? "not registered" : priv ? "private" : null;
   return { root, name, registered: on, private: priv, reads: why ? "no" : "yes", ...(why ? { why } : {}) };
 });
+/** The plan and the linked ideas, and whether a chat reads each
+ *  (`workspacechats::doc_reads`). */
+const mockChatDocs = (id: string) => {
+  const w = mockWsGet(id);
+  const docs: ["plan" | "idea", string][] = [...(w.plan ? [["plan", w.plan] as ["plan", string]] : []), ...(w.ideas ?? []).map((i) => ["idea", i] as ["idea", string])];
+  return docs.map(([kind, doc]) => {
+    let d: MockIdea | null = null;
+    try { d = ideaLookup(doc).d; } catch { /* gone */ }
+    return d
+      ? { kind, id: doc, live: d.id, title: ideaTitle(d.content) ?? d.file, path: `/Users/mock/.local/share/worktrees/ideas/${d.file}`, reads: "yes" }
+      : { kind, id: doc, live: null, title: null, path: null, reads: "no", why: "it is gone" };
+  });
+};
 setTimeout(() => chatSessionsPush(), 300);
 
 /** Every idea_send the page made (`__mock.ideaSends()`). */
@@ -4845,7 +4859,7 @@ Phase 3: Frontend pane and mock harness
       mockWsView();
       const w = mockWsGet(args.id);
       return {
-        id: w.id, name: w.name, folder: `${MOCK_WS_DIR}/${w.id}`, projects: mockChatReads(w.id),
+        id: w.id, name: w.name, folder: `${MOCK_WS_DIR}/${w.id}`, projects: mockChatReads(w.id), documents: mockChatDocs(w.id),
         chats: [...(mockChats.get(w.id) ?? [])].sort((a, b) => (a.id < b.id ? 1 : -1)).map(mockChatRow),
       };
     }

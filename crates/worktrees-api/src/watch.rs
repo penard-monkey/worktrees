@@ -217,6 +217,15 @@ impl WorkspaceSessions {
         self
     }
 
+    /// The live chats, by workspace.
+    pub fn by_workspace(&self) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
+        let mut m: std::collections::HashMap<String, std::collections::HashSet<String>> = Default::default();
+        for c in self.chat_of.values() {
+            m.entry(c.workspace.clone()).or_default().insert(c.chat.clone());
+        }
+        m
+    }
+
     /// The chats something ended in between `before` and this tick: a turn
     /// that was running is not, or the session is gone. What `last_activity`
     /// is stamped for (`workspacechats::tick`).
@@ -1335,6 +1344,7 @@ mod tests {
         assert_eq!((got.live.len(), got.busy.clone(), got.waiting.clone()), (2, vec![a.clone()], vec![b.clone()]));
         assert_eq!(got.chat_of[&a], ChatOf { workspace: ws.clone(), chat: ca.clone() });
         assert!(got.fold.is_empty());
+        assert_eq!(got.by_workspace(), std::collections::HashMap::from([(ws.clone(), std::collections::HashSet::from([ca.clone(), cb.clone()]))]));
         assert_eq!(serde_json::to_value(&got).unwrap()["fold"], serde_json::json!({}), "the field is in the shape");
         assert_eq!(idea_sessions_in(&probes, &panes, |t| { assert_eq!(t.len(), 1); Vec::new() }).live, v(&[idea]));
         assert!(claude_startup_tick(&mut panes, &[], no_ps, |t| {
