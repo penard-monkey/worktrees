@@ -2119,6 +2119,9 @@ type MockChat = {
   fold?: MockFold; note_exists: boolean; live: boolean; state: "idle" | "busy" | "waiting"; turns: MockConv["turns"]; prompt: MockConv["prompt"];
 };
 const mockChats = new Map<string, MockChat[]>(); // workspace id → chats
+/** A live chat whose launch's rules are no longer what a launch would get:
+ *  what changed (`__mock.wsStale`). A resume takes the new ones. */
+const mockStale = new Map<string, { kind: string; name: string; path: string; change: string }[]>();
 /** The event's fold map, by session. */
 const mockChatFolds = new Map<string, { workspace: string; chat: string; state: string; why: string | null; left: number | null }>();
 const FOLD_MS = Number(new URLSearchParams(location.search).get("foldms") ?? 2500);
@@ -2206,6 +2209,7 @@ const mockChatRecord = (c: MockChat) => ({
 const mockChatRow = (c: MockChat) => ({
   ...mockChatRecord(c), session: chatSession(c), state: !c.live ? "ended" : c.state === "idle" ? "running" : c.state, note_exists: !!c.note && mockMemory.has(chatWs(c), c.note),
   fold_now: mockChatFolds.get(chatSession(c)) ?? null,
+  access: !c.live ? null : mockStale.has(c.id) ? "stale" : "current", access_changes: c.live ? mockStale.get(c.id) ?? [] : [],
 });
 // ── folds (api `workspacefolds.rs`), the rules simplified ──
 const FOLD_RUNNING = ["folding", "waiting", "checking"];
@@ -4871,6 +4875,7 @@ Phase 3: Frontend pane and mock harness
       const w = mockWsGet(args.id);
       return {
         id: w.id, name: w.name, folder: `${MOCK_WS_DIR}/${w.id}`, projects: mockChatReads(w.id), documents: mockChatDocs(w.id),
+        limits: "The rules are set when the chat starts. They stop Claude's file tools, not every program it runs.",
         chats: [...(mockChats.get(w.id) ?? [])].sort((a, b) => (a.id < b.id ? 1 : -1)).map(mockChatRow),
       };
     }
@@ -4889,7 +4894,7 @@ Phase 3: Frontend pane and mock harness
       if (FOLD_RUNNING.includes(mockChatFolds.get(chatSession(c))?.state ?? "")) throw "this chat is folding already";
       if (c.live) throw `chat ${c.id} is already running (tmux session ${chatSession(c)})`;
       mockMemory.beforeLaunch(args.id as string);
-      c.live = true; c.state = "idle"; c.last_activity = isoAgo(0); chatSessionsPush();
+      c.live = true; c.state = "idle"; c.last_activity = isoAgo(0); mockStale.delete(c.id); chatSessionsPush();
       return { id: args.id, conv: c.id, session: chatSession(c) };
     }
     case "workspace_chat_fold": {
@@ -7216,6 +7221,12 @@ let mockNotifyGranted = new URLSearchParams(location.search).get("notify") === "
    *  (it writes its note and commits), `nothing`, or `null`, which forgets it. */
   chatSends: () => mockChatSends.slice(),
   wsChats: (id: string) => (mockChats.get(id) ?? []).map(mockChatRow),
+  /** A live chat's rules go stale: `changes` null makes it current again. */
+  wsStale(id: string, conv: string, changes: { kind: string; name: string; path: string; change: string }[] | null = [{ kind: "project", name: "valleos", path: "/Users/demo/workspace/valleos", change: "private" }]) {
+    chatOf(id, conv);
+    if (changes) mockStale.set(conv, changes); else mockStale.delete(conv);
+    chatSessionsPush();
+  },
   endChat: (id: string, conv: string) => { const c = chatOf(id, conv); c.live = false; c.prompt = null; chatSessionsPush(); },
   wsFold(id: string, conv: string, state: "folding" | "waiting" | "checking" | "failed" | "landed" | "nothing" | null, why: string | null = null) {
     const c = chatOf(id, conv);
