@@ -8,7 +8,7 @@
 // `?memquiet=<ms>` the quiet minute (60000).
 type F = { text: string | null; b64: string | null; mtime: number };
 type Files = Map<string, F>;
-type C = { commit: string; at: number; subject: string; kind: string; before: Map<string, F>; after: Map<string, F>; reverts: string | null };
+type C = { commit: string; at: number; subject: string; kind: string; before: Map<string, F>; after: Map<string, F>; reverts: string | null; live: string[] };
 type Mem = { name: string; files: Files; commits: C[]; seen: Map<string, string>; tick: number | null; quiet: number | null };
 type Emit = (event: string, payload: unknown) => void;
 
@@ -137,7 +137,7 @@ function tree(m: Mem, n: number): Files {
   }
   return out;
 }
-function commit(m: Mem, subject: string | null, k: string, at = Date.now(), reverts: string | null = null): C | null {
+function commit(m: Mem, subject: string | null, k: string, at = Date.now(), reverts: string | null = null, live: string[] = []): C | null {
   const h = head(m);
   const before = new Map<string, F>(), after = new Map<string, F>();
   for (const p of new Set([...h.keys(), ...m.files.keys()])) {
@@ -148,7 +148,7 @@ function commit(m: Mem, subject: string | null, k: string, at = Date.now(), reve
   }
   const paths = [...new Set([...before.keys(), ...after.keys()])].sort();
   if (!paths.length) return null;
-  const c: C = { commit: sha(), at: Math.floor(at / 1000), subject: subject ?? `Edited: ${paths.slice(0, 3).join(", ")}${paths.length > 3 ? ` and ${paths.length - 3} more` : ""}`, kind: k, before, after, reverts };
+  const c: C = { commit: sha(), at: Math.floor(at / 1000), subject: subject ?? `Edited: ${paths.slice(0, 3).join(", ")}${paths.length > 3 ? ` and ${paths.length - 3} more` : ""}`, kind: k, before, after, reverts, live };
   m.commits.push(c);
   return c;
 }
@@ -193,7 +193,7 @@ function change(m: Mem, c: C) {
   // Newest first: a revert counts while nothing has reverted it.
   const by = new Map<string, string>();
   for (const x of [...m.commits].reverse()) if (x.reverts && !by.has(x.commit) && !by.has(x.reverts)) by.set(x.reverts, x.commit);
-  return { commit: c.commit, at: c.at, subject: c.subject, kind: c.kind, files, added: files.reduce((n, f) => n + (f.added ?? 0), 0), removed: files.reduce((n, f) => n + (f.removed ?? 0), 0), reverts: c.reverts, reverted_by: by.get(c.commit) ?? null };
+  return { commit: c.commit, at: c.at, subject: c.subject, kind: c.kind, files, added: files.reduce((n, f) => n + (f.added ?? 0), 0), removed: files.reduce((n, f) => n + (f.removed ?? 0), 0), reverts: c.reverts, reverted_by: by.get(c.commit) ?? null, live: c.live };
 }
 
 // ── the rows ────────────────────────────────────────────────────────────────
@@ -201,8 +201,10 @@ export type MemoryMock = ReturnType<typeof memoryMock>;
 
 /** `nameOf` refuses an id `workspaces.json` does not know, as the resolver
  *  does; `noteOf` is where a workspace's chat of that title keeps its note. */
-export function memoryMock(emit: Emit, nameOf: (id: unknown) => string, noteOf: (id: string, title: string) => string | null) {
+export function memoryMock(emit: Emit, nameOf: (id: unknown) => string, noteOf: (id: string, title: string) => string | null, liveOf: (id: string) => string[]) {
   const none = Q.get("memory") === "none";
+  // Workspaces a fold holds: no quiet commit and no undo there.
+  const held = new Set<string>();
   const get = (id: string): Mem | null => {
     const ws = nameOf(id);
     if (!mems.has(id) && !none) mems.set(id, seed(ws, (t) => noteOf(id, t)));
@@ -219,7 +221,7 @@ export function memoryMock(emit: Emit, nameOf: (id: unknown) => string, noteOf: 
   const row = (p: string, f: F) => ({ path: p, file: name(p), title: title(f.text) ?? name(p), mtime_ms: f.mtime, size: size(f) });
   function touched(id: string, m: Mem) {
     if (m.quiet !== null) clearTimeout(m.quiet);
-    m.quiet = window.setTimeout(() => { m.quiet = null; commit(m, null, "edit"); }, QUIET);
+    m.quiet = window.setTimeout(() => { m.quiet = null; if (!held.has(id)) commit(m, null, "edit", Date.now(), null, liveOf(id)); }, QUIET);
     if (m.tick !== null) return;
     m.tick = window.setTimeout(() => {
       m.tick = null;
@@ -341,6 +343,7 @@ export function memoryMock(emit: Emit, nameOf: (id: unknown) => string, noteOf: 
         return { change: ch, file: { ...fc, diff } };
       }
       case "workspace_memory_revert": {
+        if (held.has(id)) throw "a chat is folding into this memory: wait for it, or stop it";
         const m = need(id);
         const c = find(m, a.commit);
         if (c.kind === "made") throw "the change that made this memory cannot be undone";
@@ -378,12 +381,36 @@ export function memoryMock(emit: Emit, nameOf: (id: unknown) => string, noteOf: 
       else commit(m, null, "edit");
     },
     /** What a chat's record says of the fold of that title, as git has it. */
-    fold(id: string, title: string): { commit: string; files: number; lines: { added: number; removed: number }; reverted: boolean } | null {
+    fold(id: string, title: string, sha?: string): { commit: string; files: number; lines: { added: number; removed: number }; reverted: boolean } | null {
       const m = get(id);
-      const c = m?.commits.find((x) => x.subject === `fold: ${title}`);
+      const c = m?.commits.find((x) => x.commit === sha) ?? m?.commits.filter((x) => x.subject === `fold: ${title}`).pop();
       if (!m || !c) return null;
       const ch = change(m, c);
       return { commit: ch.commit, files: ch.files.length, lines: { added: ch.added, removed: ch.removed }, reverted: ch.reverted_by !== null };
+    },
+    hold: (id: string) => { held.add(id); },
+    release: (id: string) => { held.delete(id); },
+    /** Commit what is dirty under `subject`: its id, or null for nothing. */
+    commit(id: string, subject: string | null, kind = "edit"): string | null {
+      const m = get(id);
+      return (m && commit(m, subject, kind)?.commit) || null;
+    },
+    /** How many files are changed and not committed. */
+    dirty(id: string): number {
+      const m = get(id);
+      if (!m) return 0;
+      const h = head(m);
+      return [...new Set([...h.keys(), ...m.files.keys()])].filter((p) => !same(h.get(p), m.files.get(p))).length;
+    },
+    /** What a fold's Claude writes: the chat's note, and a line in the index. */
+    foldWrites(id: string, note: string, chat: string) {
+      const m = need(id);
+      const p = note.replace(/^memory\//, "");
+      m.files.set(p, { text: NOTE(chat, "What the chat was asked.", "What it decided."), b64: null, mtime: now() });
+      const i = m.files.get("MEMORY.md");
+      const line = `- [${chat}](${p}): what it decided.\n`;
+      if (i?.text != null && !i.text.includes(`(${p})`)) m.files.set("MEMORY.md", { ...i, text: i.text.replace("## Decisions\n\n", `## Decisions\n\n${line}`), mtime: now() });
+      touched(id, m);
     },
     /** A note is on disk, by its path in the workspace's folder. */
     has: (id: string, path: string) => !!get(id)?.files.has(path.replace(/^memory\//, "")),

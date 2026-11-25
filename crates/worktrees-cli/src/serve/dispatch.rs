@@ -1,4 +1,4 @@
-//! The 315 commands, each with its exposure, capability and objects, in ONE
+//! The 316 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -39,7 +39,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::sync::Arc;
-use worktrees_api::{agents, config, files, hostenv, ideas, ideasessions, keepawake, macprivacy, memory, meta, ops, plans, prefs, presets, profiles, project, status, term, viewer, workspace, workspacechats, workspaces, Ctx};
+use worktrees_api::{agents, config, files, hostenv, ideas, ideasessions, keepawake, macprivacy, memory, meta, ops, plans, prefs, presets, profiles, project, status, term, viewer, workspace, workspacechats, workspacefolds, workspaces, Ctx};
 use worktrees_core::authz::{self, Caller, Capability, Caps, DeviceId, Grant, Projects, Registry};
 use worktrees_core::fetchpolicy::Fetcher;
 
@@ -1471,6 +1471,9 @@ commands! { cx, a;
     workspace_chats: HostConsole [console, workspace(id)] => workspacechats::workspace_chats(&cx.ctx, a.get("id")?),
     workspace_chat_start: HostConsole [console, workspace(id)] => workspacechats::workspace_chat_start(&cx.ctx, a.get("id")?),
     workspace_chat_resume: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_chat_resume(&cx.ctx, a.get("id")?, a.get("conv")?),
+    // Close, as the person means it: what is worth keeping goes to memory
+    // first, and the poll ends the chat (`worktrees_api::workspacefolds`).
+    workspace_chat_fold: HostConsole [console, workspace_chat(conv, id)] => workspacefolds::workspace_chat_fold(&cx.ctx, a.get("id")?, a.get("conv")?),
     workspace_chat_close: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_chat_close(&cx.ctx, a.get("id")?, a.get("conv")?),
     workspace_chat_remove: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_chat_remove(&cx.ctx, a.get("id")?, a.get("conv")?),
     workspace_chat_rename: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_chat_rename(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("title")?),
@@ -1546,7 +1549,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 315 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 316 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1571,7 +1574,7 @@ mod tests {
     /// `workspace_unlink_idea`, `workspace_overview`) and phase 5's three
     /// (`plan_set_project`, `plan_start`, `plan_link_place`), and the chat's images (`read_place_image`, `agent_call_image`), and phase S's sixteen
     /// idea-session console rows (`idea_conversation*`, `idea_*` over the agent bodies, `idea_term_open`), the workspace
-    /// chats' sixteen console rows (`workspace_chat*`, `workspace_*` over the agent bodies, `workspace_term_open`), and group
+    /// chats' seventeen console rows (`workspace_chat*`, `workspace_*` over the agent bodies, `workspace_term_open`), and group
     /// chat's eighteen share rows (fourteen console with PR D's `share_used` and `share_check`, four
     /// `guest`), its thread's two (`thread_read`, `thread_post`, `guest`) and PR C's
     /// two `guest` history rows (`shared_turns`, `shared_tool_call`), and the host's sleep
@@ -1582,7 +1585,7 @@ mod tests {
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 315, "the table has 315 commands");
+        assert_eq!(TABLE.len(), 316, "the table has 316 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -2025,7 +2028,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 71), ("write", 23), ("admin", 42), ("console", 137), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 71), ("write", 23), ("admin", 42), ("console", 138), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7), ("guest", 8),
         ]
         .into();

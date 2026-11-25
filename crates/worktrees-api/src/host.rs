@@ -95,6 +95,9 @@ pub struct Hooks {
     /// so the person sees it. A phone has no window of ours, so a server
     /// leaves this `None` and the event is the whole answer.
     pub on_inbox: Option<Box<dyn Fn() + Send + 'static>>,
+    /// A workspace chat's fold landed or failed: the poll's decision, which no
+    /// request made. Serve writes it to its audit log, which is in no `Ctx`.
+    pub on_fold: Option<Box<dyn Fn(&crate::workspacefolds::FoldNote) + Send + 'static>>,
 }
 
 /// Start the engine's background work for `ctx`, and return the poll thread.
@@ -267,7 +270,6 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
             }
         }
         crate::ideas::tick(&pollctx, &mut ideas_watch);
-        crate::memory::tick(&pollctx, &mut memory_watch);
         crate::keepawake::tick(&pollctx);
         attach_ticks += 1;
         if attach_ticks >= 1200 {
@@ -340,7 +342,14 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
             pollctx.emit("ideas:sessions", payload(&idea_sessions));
             last_ideas = Some(idea_sessions);
         }
-        crate::workspacechats::tick(&pollctx, chats, &mut last_chats);
+        for note in crate::workspacechats::tick(&pollctx, chats, &mut last_chats) {
+            if let Some(f) = &hooks.on_fold {
+                f(&note);
+            }
+        }
+        // After the chats, so who is live is read in the same beat.
+        let live = last_chats.as_ref().map(crate::watch::WorkspaceSessions::by_workspace).unwrap_or_default();
+        crate::memory::tick(&pollctx, &mut memory_watch, live);
         // Every harness without a probe file, read once each (`harness_feed`:
         // codex's rollouts, pi's session files).
         let lanes: Vec<(&'static str, LaneTick)> = provider::PROVIDERS

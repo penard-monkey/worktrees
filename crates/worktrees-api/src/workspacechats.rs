@@ -25,9 +25,9 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use worktrees_core::workspacechats::{self as chats, Chat, Context, PlaceLine, ProjectContext, ProjectRead, Reads, Start};
+use worktrees_core::workspacechats::{self as chats, Chat, Context, DocRead, PlaceLine, ProjectContext, ProjectRead, Reads, Start};
 use worktrees_core::workspaces::{self as store, Workspace};
-use worktrees_core::{activity, agent, desksessions, harness, ideas, registry, store as declared, sysclock, tmux, wsfolder, Project};
+use worktrees_core::{activity, agent, desksessions, harness, registry, store as declared, sysclock, tmux, wsfolder, Project};
 
 use crate::agents::{self, Locus};
 use crate::watch::WorkspaceSessions;
@@ -38,11 +38,11 @@ pub fn life_lock(ctx: &Ctx, id: &str) -> Arc<Mutex<()>> {
     ctx.agents.place_lock(&format!("ws-life:{id}"))
 }
 
-fn workspace(ctx: &Ctx, id: &str) -> Result<Workspace, String> {
+pub(crate) fn workspace(ctx: &Ctx, id: &str) -> Result<Workspace, String> {
     store::read_at(ctx.workspaces_file())?.workspaces.into_iter().find(|w| w.id == id).ok_or_else(|| format!("no workspace {id}"))
 }
 
-fn locus_of(ctx: &Ctx, id: &str, c: &Chat) -> Result<Locus, String> {
+pub(crate) fn locus_of(ctx: &Ctx, id: &str, c: &Chat) -> Result<Locus, String> {
     Ok(Locus::Workspace { session: chats::session_name(&c.id), dir: wsfolder::folder_at(ctx.workspaces_dir(), id)?, session_id: c.session_id.clone() })
 }
 
@@ -65,6 +65,9 @@ pub struct Listed {
     pub state: &'static str,
     /// Its note is on disk, at `note`.
     pub note_exists: bool,
+    /// How its fold stands now, when there is something to say: the event's
+    /// entry for it (`WorkspaceSessions::fold`). `fold` is the record's.
+    pub fold_now: Option<crate::watch::FoldOf>,
 }
 
 /// `workspace_chats`' answer.
@@ -79,6 +82,9 @@ pub struct Chats {
     /// What a chat of this workspace reads, project by project, and why not:
     /// the same list its `context.md` is written from.
     pub projects: Vec<ProjectRead>,
+    /// The workspace's plan and linked ideas, with where each is and whether a
+    /// chat reads it: also what `context.md` is written from.
+    pub documents: Vec<DocRead>,
 }
 
 fn state_of(live: bool, a: &activity::Activity) -> &'static str {
@@ -94,18 +100,21 @@ fn listed(ctx: &Ctx, id: &str, c: Chat, live: &std::collections::HashSet<String>
     let session = chats::session_name(&c.id);
     let up = live.contains(&session);
     let a = if up { ctx.agents.io().activity(&locus_of(ctx, id, &c)?) } else { activity::Activity::none() };
-    Ok(Listed { state: state_of(up, &a), session, note_exists: chats::note_exists(ctx.workspaces_dir(), id, &c), chat: c })
+    Ok(Listed { state: state_of(up, &a), session, note_exists: chats::note_exists(ctx.workspaces_dir(), id, &c), fold_now: ctx.folds.of(&c.id), chat: c })
 }
 
 /// `workspace_chats`: the workspace's chats, newest first, each with its
 /// state, from `chats.json` and tmux — no git call — and what they read.
 pub fn workspace_chats(ctx: &Ctx, id: String) -> Result<Chats, String> {
+    crate::workspacefolds::ensure(ctx);
     let w = workspace(ctx, &id)?;
     let root = ctx.workspaces_dir();
+    let reg = registry::read_lenient();
     let live: std::collections::HashSet<String> = tmux::session_names().into_iter().collect();
     Ok(Chats {
         chats: chats::list_at(root, &id)?.into_iter().map(|c| listed(ctx, &id, c, &live)).collect::<Result<_, _>>()?,
-        projects: chats::project_reads(&w, &registry::read_lenient()),
+        projects: chats::project_reads(&w, &reg),
+        documents: chats::doc_reads(&w, &chats::Sources { root, ideas: ctx.ideas_dir(), reg: &reg }),
         folder: wsfolder::folder_at(root, &id)?.to_string_lossy().into_owned(),
         name: w.name,
         id,
@@ -157,21 +166,19 @@ fn places(root: &str, panes: Option<&tmux::PaneList>, probes: &[agent::ClaudePro
 fn context(ctx: &Ctx, w: &Workspace, conv: &str) -> Context {
     let panes = tmux::PaneList::fetch();
     let probes = agent::live_probes_in(panes.as_ref());
-    let projects = chats::project_reads(w, &registry::read_lenient())
+    let reg = registry::read_lenient();
+    let projects = chats::project_reads(w, &reg)
         .into_iter()
         .map(|read| {
             let places = if read.reads == Reads::No { Ok(Vec::new()) } else { places(&read.root, panes.as_ref(), &probes) };
             ProjectContext { read, places }
         })
         .collect();
-    let idx = ideas::list_at(ctx.ideas_dir()).ok();
-    let title = |id: &str| idx.as_ref()?.lookup(id).ok().map(|(d, _)| d.title.clone());
     Context {
         workspace: w.name.clone(),
         written: desksessions::now_iso(),
         projects,
-        plan: w.plan.as_ref().map(|p| (p.clone(), title(p))),
-        ideas: w.ideas.iter().map(|i| (i.clone(), title(i))).collect(),
+        docs: chats::doc_reads(w, &chats::Sources { root: ctx.workspaces_dir(), ideas: ctx.ideas_dir(), reg: &reg }),
         notes: chats::earlier_notes(ctx.workspaces_dir(), &w.id, Some(conv)),
     }
 }
@@ -186,8 +193,9 @@ pub fn workspace_chat_start(ctx: &Ctx, id: String) -> Result<Value, String> {
     let lock = life_lock(ctx, &id);
     let _life = lock.lock().unwrap_or_else(|e| e.into_inner());
     let w = workspace(ctx, &id)?;
+    crate::workspacefolds::ensure(ctx);
     crate::memory::before_launch(ctx, &w)?;
-    let (c, session) = chats::start_at(ctx.workspaces_dir(), &w, |conv| chats::context_text(&context(ctx, &w, conv)))?;
+    let (c, session) = chats::start_at(ctx.workspaces_dir(), ctx.ideas_dir(), &w, |conv| chats::context_text(&context(ctx, &w, conv)))?;
     Ok(json!({ "id": id, "chat": c, "session": session }))
 }
 
@@ -200,39 +208,50 @@ pub fn workspace_chat_resume(ctx: &Ctx, id: String, conv: String) -> Result<Valu
     let w = workspace(ctx, &id)?;
     let root = ctx.workspaces_dir();
     chats::find_at(root, &id, &conv)?;
+    crate::workspacefolds::ensure(ctx);
+    if ctx.folds.is_folding(&conv) {
+        return Err(crate::workspacefolds::ERR_ALREADY.into());
+    }
     if tmux::session_exists(&chats::session_name(&conv)) {
         return Err(format!("chat {conv} is already running (tmux session {})", chats::session_name(&conv)));
     }
     crate::memory::before_launch(ctx, &w)?;
     chats::write_context_at(root, &id, &conv, &chats::context_text(&context(ctx, &w, &conv)))?;
-    let session = chats::launch_at(root, &w, &conv, Start::Resume, None)?;
+    let session = chats::launch_at(root, ctx.ideas_dir(), &w, &conv, Start::Resume, None)?;
     touched(ctx, &id, &conv);
     Ok(json!({ "id": id, "conv": conv, "session": session }))
 }
 
 /// `workspace_chat_close`: end its tmux session. The record, its files and
-/// Claude's transcript stay. This is "close without folding".
+/// Claude's transcript stay. This is "close without folding", and, while it
+/// folds, Stop the fold: what is left in the memory is committed under its own
+/// subject (`workspacefolds::closed`). `stopped_fold` and `commit` say so.
 pub fn workspace_chat_close(ctx: &Ctx, id: String, conv: String) -> Result<Value, String> {
     let lock = life_lock(ctx, &id);
     let _life = lock.lock().unwrap_or_else(|e| e.into_inner());
-    chats::find_at(ctx.workspaces_dir(), &id, &conv)?;
-    let was = chats::close(&conv)?;
-    if was {
+    crate::workspacefolds::ensure(ctx);
+    let c = chats::find_at(ctx.workspaces_dir(), &id, &conv)?;
+    let was = ctx.folds.close(&conv)?;
+    let (stopped, change) = crate::workspacefolds::closed(ctx, &id, &c, was)?;
+    if was || stopped {
         touched(ctx, &id, &conv);
     }
-    Ok(json!({ "id": id, "conv": conv, "closed": was }))
+    Ok(json!({ "id": id, "conv": conv, "closed": was, "stopped_fold": stopped, "commit": change.map(|c| c.commit) }))
 }
 
-/// `workspace_chat_remove`: close it if it runs, then forget it: its record
+/// `workspace_chat_remove`: close it if it runs (a fold is stopped, as
+/// `workspace_chat_close` stops one), then forget it: its record
 /// entry and its folder. Its note stays, in the memory; Claude's transcript
 /// is Claude's file.
 pub fn workspace_chat_remove(ctx: &Ctx, id: String, conv: String) -> Result<Value, String> {
     let lock = life_lock(ctx, &id);
     let _life = lock.lock().unwrap_or_else(|e| e.into_inner());
-    chats::find_at(ctx.workspaces_dir(), &id, &conv)?;
-    chats::close(&conv)?;
+    crate::workspacefolds::ensure(ctx);
+    let c = chats::find_at(ctx.workspaces_dir(), &id, &conv)?;
+    let was = ctx.folds.close(&conv)?;
+    let (stopped, change) = crate::workspacefolds::closed(ctx, &id, &c, was)?;
     chats::remove_at(ctx.workspaces_dir(), &id, &conv)?;
-    Ok(json!({ "id": id, "conv": conv, "removed": true }))
+    Ok(json!({ "id": id, "conv": conv, "removed": true, "stopped_fold": stopped, "commit": change.map(|c| c.commit) }))
 }
 
 /// `workspace_chat_rename`: a new title, one line.
@@ -251,28 +270,39 @@ pub fn close_all(ctx: &Ctx, id: &str) -> Result<(), String> {
         .filter_map(|s| chats::conv_of_session(s).map(str::to_string))
         .filter(|c| chats::workspace_of_conv(root, c).as_deref() == Some(id))
         .collect();
-    convs.extend(chats::list_at(root, id).unwrap_or_default().into_iter().map(|c| c.id));
+    crate::workspacefolds::ensure(ctx);
+    let recorded = chats::list_at(root, id).unwrap_or_default();
+    convs.extend(recorded.iter().map(|c| c.id.clone()));
     for conv in convs {
-        chats::close(&conv)?;
+        ctx.folds.close(&conv)?;
     }
+    // A fold is stopped with its chat, and what it wrote goes with the folder
+    // as a commit of its own.
+    for c in recorded.iter().filter(|c| ctx.folds.is_folding(&c.id)) {
+        if let Err(e) = crate::workspacefolds::closed(ctx, id, c, true) {
+            crate::log::warn(&format!("workspace {id}: what chat {}'s fold left could not be committed: {e}", c.id));
+        }
+    }
+    ctx.folds.forget(id);
     Ok(())
 }
 
 /// Stamp `last_activity`. A stamp that could not be written is logged and
 /// never fails the act it follows.
-fn touched(ctx: &Ctx, id: &str, conv: &str) {
+pub(crate) fn touched(ctx: &Ctx, id: &str, conv: &str) {
     if let Err(e) = chats::touch_at(ctx.workspaces_dir(), id, conv) {
         crate::log::warn(&format!("workspace {id}: could not stamp chat {conv}: {e}"));
     }
 }
 
-/// The poll's part: push `workspaces:sessions` when it changed (and on the
-/// first tick, whatever it holds), and stamp the chats a turn or a session
-/// ended in.
-pub fn tick(ctx: &Ctx, now: WorkspaceSessions, last: &mut Option<WorkspaceSessions>) {
-    let now = if now.live.is_empty() { now } else { now.with_chats(ctx.workspaces_dir()) };
+/// The poll's part: look at the folds, push `workspaces:sessions` when it
+/// changed (and on the first tick, whatever it holds), and stamp the chats a
+/// turn or a session ended in. Answers the folds it decided.
+pub fn tick(ctx: &Ctx, now: WorkspaceSessions, last: &mut Option<WorkspaceSessions>) -> Vec<crate::workspacefolds::FoldNote> {
+    let mut now = if now.live.is_empty() { now } else { now.with_chats(ctx.workspaces_dir()) };
+    let folded = crate::workspacefolds::tick(ctx, &mut now);
     if last.as_ref() == Some(&now) {
-        return;
+        return folded;
     }
     if let Some(before) = last.as_ref() {
         for c in now.ended_since(before) {
@@ -284,6 +314,7 @@ pub fn tick(ctx: &Ctx, now: WorkspaceSessions, last: &mut Option<WorkspaceSessio
     }
     ctx.emit("workspaces:sessions", serde_json::to_value(&now).unwrap_or(Value::Null));
     *last = Some(now);
+    folded
 }
 
 // ── the chat: the agent rows' bodies on the chat's session ──────────────────

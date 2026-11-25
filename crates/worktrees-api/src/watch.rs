@@ -174,7 +174,8 @@ pub struct WorkspaceSessions {
     /// knows the folder ([`WorkspaceSessions::with_chats`]).
     pub chat_of: std::collections::BTreeMap<String, ChatOf>,
     /// Each chat with a fold to say something about, by its session's name,
-    /// live or not. Empty until the fold is built; the shape is its.
+    /// live or not: the ones running, and the failed ones until the chat is
+    /// folded again or closed (`workspacefolds`).
     pub fold: std::collections::BTreeMap<String, FoldOf>,
 }
 
@@ -190,10 +191,14 @@ pub struct ChatOf {
 pub struct FoldOf {
     pub workspace: String,
     pub chat: String,
-    /// `folding`, `waiting` (on a prompt) or `failed`.
+    /// `folding`, `waiting` (on a prompt), `checking` (the engine has just
+    /// started and has not looked yet) or `failed`.
     pub state: String,
     /// Why it failed, in words.
     pub why: Option<String>,
+    /// With `failed`: how many files it left changed and not committed; null
+    /// when that could not be read.
+    pub left: Option<u32>,
 }
 
 impl WorkspaceSessions {
@@ -210,6 +215,15 @@ impl WorkspaceSessions {
             })
             .collect();
         self
+    }
+
+    /// The live chats, by workspace.
+    pub fn by_workspace(&self) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
+        let mut m: std::collections::HashMap<String, std::collections::HashSet<String>> = Default::default();
+        for c in self.chat_of.values() {
+            m.entry(c.workspace.clone()).or_default().insert(c.chat.clone());
+        }
+        m
     }
 
     /// The chats something ended in between `before` and this tick: a turn
@@ -1330,6 +1344,7 @@ mod tests {
         assert_eq!((got.live.len(), got.busy.clone(), got.waiting.clone()), (2, vec![a.clone()], vec![b.clone()]));
         assert_eq!(got.chat_of[&a], ChatOf { workspace: ws.clone(), chat: ca.clone() });
         assert!(got.fold.is_empty());
+        assert_eq!(got.by_workspace(), std::collections::HashMap::from([(ws.clone(), std::collections::HashSet::from([ca.clone(), cb.clone()]))]));
         assert_eq!(serde_json::to_value(&got).unwrap()["fold"], serde_json::json!({}), "the field is in the shape");
         assert_eq!(idea_sessions_in(&probes, &panes, |t| { assert_eq!(t.len(), 1); Vec::new() }).live, v(&[idea]));
         assert!(claude_startup_tick(&mut panes, &[], no_ps, |t| {

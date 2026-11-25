@@ -423,7 +423,8 @@ const mockWsGet = (id: unknown) => {
 };
 /** A workspace's memory (`worktrees_api::memory`): ./memory.ts. */
 const mockMemory = memoryMock((e, p) => emitEvent(e, p), (id) => { mockWsView(); return mockWsGet(id).name; },
-  (id, title) => mockChats.get(id)?.find((c) => c.title === title && c.fold)?.note.replace(/^memory\//, "") ?? null);
+  (id, title) => mockChats.get(id)?.find((c) => c.title === title && c.fold)?.note.replace(/^memory\//, "") ?? null,
+  (id) => (mockChats.get(id) ?? []).filter((c) => c.live).map((c) => c.id));
 // The launch gate's `[quota]` policy (`quota_settings`): `?quota=off` starts
 // with the gate off, `?quotapct=<n>` with a weekly threshold, and
 // `?quotapct=bad` with a hand-edit the gate ignored (so the problems line shows).
@@ -2109,25 +2110,36 @@ setTimeout(() => ideaSessionsPush(), 300);
 // up an Edit permission prompt, and each reply is `?chatreply=<ms>` (default
 // 600) of "busy". The first workspace (`?workspaces=1`) starts with two live
 // chats (one waiting on the person) and three closed (folded, its fold undone,
-// never folded); the second has none.
-type MockFold = { asked: string; state: string; commit?: string; files?: number; lines?: { added: number; removed: number }; reverted: boolean; why?: string };
+// never folded), and one more that is FOLDING and stays so until
+// `__mock.wsFold` moves it (`?folding=0` leaves it out); the second has none.
+// A fold takes `?foldms=<ms>` (default 2500) to write its note and land.
+type MockFold = { asked: string; asked_ms?: number; left?: number; state: string; commit?: string; files?: number; lines?: { added: number; removed: number }; reverted: boolean; why?: string };
 type MockChat = {
   id: string; harness: "claude"; session_id: string; title: string; started: string; last_activity: string; note: string;
   fold?: MockFold; note_exists: boolean; live: boolean; state: "idle" | "busy" | "waiting"; turns: MockConv["turns"]; prompt: MockConv["prompt"];
 };
 const mockChats = new Map<string, MockChat[]>(); // workspace id → chats
-/** The event's fold map, by session: empty until `__mock.wsFold` says. */
-const mockChatFolds = new Map<string, { workspace: string; chat: string; state: string; why: string | null }>();
+/** The event's fold map, by session. */
+const mockChatFolds = new Map<string, { workspace: string; chat: string; state: string; why: string | null; left: number | null }>();
+const FOLD_MS = Number(new URLSearchParams(location.search).get("foldms") ?? 2500);
 const mockChatSends: { id: string; conv: string; text: string }[] = [];
 const CHAT_REPLY_MS = Number(new URLSearchParams(location.search).get("chatreply") ?? 600);
 const chatSession = (c: MockChat) => `worktrees~ws~${c.id}`;
 const isoAgo = (min: number) => new Date(Date.now() - min * 60_000).toISOString().replace(/\.\d+Z$/, "Z");
 const MOCK_WS_DIR = "/Users/demo/.local/share/worktrees/workspaces";
+/** A chat's note (`workspacechats::note_name`): named when it is first folded,
+ *  by the day here and the words it is called by then, and kept. */
+function nameNote(c: MockChat, at = new Date()) {
+  if (c.note) return;
+  const words = c.title.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "").split("-").reduce((s, w) => (s && s.length + 1 + w.length > 40 ? s : s ? `${s}-${w}` : w.slice(0, 40)), "") || "chat";
+  const day = `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, "0")}-${String(at.getDate()).padStart(2, "0")}`;
+  c.note = `memory/notes/${day}-${words}-${c.id.slice(-6).toLowerCase()}.md`;
+}
 function mockChatNew(id: string, title: string, startedMin: number, activeMin: number, extra: Partial<MockChat> = {}): MockChat {
   const started = isoAgo(startedMin);
   return {
     id, harness: "claude", session_id: crypto.randomUUID(), title, started, last_activity: isoAgo(activeMin),
-    note: `memory/notes/${started.slice(0, 10)}-${id}.md`, note_exists: false, live: false, state: "idle", turns: [], prompt: null, ...extra,
+    note: "", note_exists: false, live: false, state: "idle", turns: [], prompt: null, ...extra,
   };
 }
 const chatTurn = (n: number, minAgo: number, user: string | null, reply: string) =>
@@ -2143,6 +2155,15 @@ function mockChatSeed(first: string) {
     mockChatNew(id(4), "Release order", 180, 1, { live: true, turns: [chatTurn(1, 180, null, "I read the index and what I may of the projects. What should we settle first?"), chatTurn(2, 4, "Which ships first?", "The role, before the app: its check names the role.")] }),
     mockChatNew(id(5), "Who can see what", 90, 12, { live: true, state: "waiting", prompt: { fp: `fp-${id(5)}`, ask: "Guests see the shared library only" }, turns: [chatTurn(1, 90, "Add who sees what to the memory.", "I'll add one line to the index.")] }),
   ]);
+  for (const c of mockChats.get(first)!) if (c.fold) nameNote(c, new Date(c.fold.asked));
+  if (new URLSearchParams(location.search).get("folding") !== "0") {
+    const c = mockChatNew(id(6), "Subtitles pipeline", 50, 0, { live: true, state: "busy", fold: { asked: isoAgo(0), state: "folding", reverted: false }, turns: [chatTurn(1, 50, "How do subtitles get made?", "Whisper on the box, then a review by hand.")] });
+    nameNote(c);
+    mockChats.get(first)!.push(c);
+    // Drawn, not run: unlike a fold that is started it holds no memory, so the
+    // memory's own rows (Undo) still answer in this workspace.
+    mockChatFolds.set(chatSession(c), { workspace: first, chat: c.id, state: "folding", why: null, left: null });
+  }
 }
 function chatOf(id: string, conv: string): MockChat {
   mockWsView();
@@ -2180,11 +2201,47 @@ const chatWs = (c: MockChat) => [...mockChats].find(([, cs]) => cs.includes(c))?
 const mockChatRecord = (c: MockChat) => ({
   id: c.id, harness: c.harness, session_id: c.session_id, title: c.title, started: c.started, last_activity: c.last_activity, note: c.note,
   // A fold's numbers are its commit's, in the memory (./memory.ts).
-  ...(c.fold ? { fold: { ...c.fold, ...(c.fold.state === "done" ? mockMemory.fold(chatWs(c), c.title) : null) } } : {}),
+  ...(c.fold ? { fold: { ...c.fold, ...(c.fold.state === "done" ? mockMemory.fold(chatWs(c), c.title, c.fold.commit) : null) } } : {}),
 });
 const mockChatRow = (c: MockChat) => ({
-  ...mockChatRecord(c), session: chatSession(c), state: !c.live ? "ended" : c.state === "idle" ? "running" : c.state, note_exists: mockMemory.has(chatWs(c), c.note),
+  ...mockChatRecord(c), session: chatSession(c), state: !c.live ? "ended" : c.state === "idle" ? "running" : c.state, note_exists: !!c.note && mockMemory.has(chatWs(c), c.note),
+  fold_now: mockChatFolds.get(chatSession(c)) ?? null,
 });
+// ── folds (api `workspacefolds.rs`), the rules simplified ──
+const FOLD_RUNNING = ["folding", "waiting", "checking"];
+const foldRunning = (w: string) => [...mockChatFolds.values()].find((f) => f.workspace === w && FOLD_RUNNING.includes(f.state));
+/** A fold is over: landed with what it wrote, or with nothing to keep. */
+function foldLand(w: string, c: MockChat, wrote: boolean) {
+  nameNote(c);
+  if (wrote) mockMemory.foldWrites(w, c.note, c.title);
+  const commit = wrote ? mockMemory.commit(w, `fold: ${c.title}`, "fold") : null;
+  c.fold = { asked: c.fold?.asked ?? isoAgo(0), state: "done", ...(commit ? { commit } : { files: 0, lines: { added: 0, removed: 0 }, left: mockMemory.dirty(w) }), reverted: false };
+  c.live = false; c.prompt = null; c.state = "idle"; c.last_activity = isoAgo(0);
+  mockChatFolds.delete(chatSession(c));
+  mockMemory.release(w);
+}
+function foldFail(w: string, c: MockChat, why: string | null) {
+  const left = mockMemory.dirty(w);
+  const holds = left ? `Memory may hold part of it: ${left} file${left === 1 ? "" : "s"} changed.` : "Memory is unchanged.";
+  const said = why ?? `it wrote no note in five minutes, and the chat is still open. ${holds}`;
+  c.fold = { asked: c.fold?.asked ?? isoAgo(0), state: "failed", reverted: false, why: said, left };
+  c.state = "idle"; c.prompt = null;
+  mockChatFolds.set(chatSession(c), { workspace: w, chat: c.id, state: "failed", why: said, left });
+  mockMemory.release(w);
+}
+/** A chat closed without its fold: a running one is stopped. */
+function foldClosed(w: string, c: MockChat, ran: boolean): { stopped_fold: boolean; commit: string | null } {
+  const f = mockChatFolds.get(chatSession(c));
+  const stopped = !!f && FOLD_RUNNING.includes(f.state);
+  mockChatFolds.delete(chatSession(c));
+  if (f || c.fold?.state === "folding" || c.fold?.state === "failed") c.fold = { asked: c.fold?.asked ?? "", state: "none", reverted: false };
+  if (stopped) {
+    mockMemory.release(w);
+    return { stopped_fold: true, commit: mockMemory.commit(w, `Fold stopped: ${c.title}`) };
+  }
+  return { stopped_fold: false, commit: ran && !foldRunning(w) ? mockMemory.commit(w, `Chat closed: ${c.title}`) : null };
+}
+
 /** What a chat reads of each project (`workspacechats::project_reads`): a
  *  private or unregistered one, not at all. */
 const mockChatReads = (id: string) => mockWsGet(id).projects.map((root) => {
@@ -2194,6 +2251,19 @@ const mockChatReads = (id: string) => mockWsGet(id).projects.map((root) => {
   const why = !on ? "not registered" : priv ? "private" : null;
   return { root, name, registered: on, private: priv, reads: why ? "no" : "yes", ...(why ? { why } : {}) };
 });
+/** The plan and the linked ideas, and whether a chat reads each
+ *  (`workspacechats::doc_reads`). */
+const mockChatDocs = (id: string) => {
+  const w = mockWsGet(id);
+  const docs: ["plan" | "idea", string][] = [...(w.plan ? [["plan", w.plan] as ["plan", string]] : []), ...(w.ideas ?? []).map((i) => ["idea", i] as ["idea", string])];
+  return docs.map(([kind, doc]) => {
+    let d: MockIdea | null = null;
+    try { d = ideaLookup(doc).d; } catch { /* gone */ }
+    return d
+      ? { kind, id: doc, live: d.id, title: ideaTitle(d.content) ?? d.file, path: `/Users/mock/.local/share/worktrees/ideas/${d.file}`, reads: "yes" }
+      : { kind, id: doc, live: null, title: null, path: null, reads: "no", why: "it is gone" };
+  });
+};
 setTimeout(() => chatSessionsPush(), 300);
 
 /** Every idea_send the page made (`__mock.ideaSends()`). */
@@ -4796,7 +4866,7 @@ Phase 3: Frontend pane and mock harness
       mockWsView();
       const w = mockWsGet(args.id);
       return {
-        id: w.id, name: w.name, folder: `${MOCK_WS_DIR}/${w.id}`, projects: mockChatReads(w.id),
+        id: w.id, name: w.name, folder: `${MOCK_WS_DIR}/${w.id}`, projects: mockChatReads(w.id), documents: mockChatDocs(w.id),
         chats: [...(mockChats.get(w.id) ?? [])].sort((a, b) => (a.id < b.id ? 1 : -1)).map(mockChatRow),
       };
     }
@@ -4812,22 +4882,49 @@ Phase 3: Frontend pane and mock harness
     }
     case "workspace_chat_resume": {
       const c = chatOf(args.id as string, args.conv as string);
+      if (FOLD_RUNNING.includes(mockChatFolds.get(chatSession(c))?.state ?? "")) throw "this chat is folding already";
       if (c.live) throw `chat ${c.id} is already running (tmux session ${chatSession(c)})`;
       mockMemory.beforeLaunch(args.id as string);
       c.live = true; c.state = "idle"; c.last_activity = isoAgo(0); chatSessionsPush();
       return { id: args.id, conv: c.id, session: chatSession(c) };
     }
+    case "workspace_chat_fold": {
+      const id = args.id as string;
+      const c = chatOf(id, args.conv as string);
+      const other = foldRunning(id);
+      if (other?.chat === c.id) throw "this chat is folding already";
+      if (other) throw `“${(mockChats.get(id) ?? []).find((x) => x.id === other.chat)?.title ?? "Another chat"}” is folding. Close this one after.`;
+      if (c.live && c.state === "busy") throw "it is working: stop it or wait";
+      if (c.live && c.state === "waiting") throw "it is waiting on you: answer it first";
+      const reattach = c.live;
+      mockMemory.beforeLaunch(id);
+      mockMemory.hold(id);
+      nameNote(c);
+      c.fold = { asked: isoAgo(0), asked_ms: Date.now(), state: "folding", reverted: false };
+      c.live = true; c.state = "busy"; c.last_activity = isoAgo(0);
+      mockChatFolds.set(chatSession(c), { workspace: id, chat: c.id, state: "folding", why: null, left: null });
+      chatSessionsPush();
+      setTimeout(() => {
+        // Stopped, or moved by `__mock.wsFold`, meanwhile.
+        if (mockChatFolds.get(chatSession(c))?.state !== "folding") return;
+        foldLand(id, c, true);
+        chatSessionsPush();
+      }, FOLD_MS);
+      return { id, conv: c.id, session: chatSession(c), fold: c.fold, reattach };
+    }
     case "workspace_chat_close": {
       const c = chatOf(args.id as string, args.conv as string);
       const was = c.live;
+      const f = foldClosed(args.id as string, c, was);
       c.live = false; c.prompt = null; if (was) c.last_activity = isoAgo(0); chatSessionsPush();
-      return { id: args.id, conv: c.id, closed: was };
+      return { id: args.id, conv: c.id, closed: was, ...f };
     }
     case "workspace_chat_remove": {
-      chatOf(args.id as string, args.conv as string);
+      const gone = chatOf(args.id as string, args.conv as string);
+      const f = foldClosed(args.id as string, gone, gone.live);
       mockChats.set(args.id as string, (mockChats.get(args.id as string) ?? []).filter((c) => c.id !== args.conv));
       chatSessionsPush();
-      return { id: args.id, conv: args.conv, removed: true };
+      return { id: args.id, conv: args.conv, removed: true, ...f };
     }
     case "workspace_chat_rename": {
       const c = chatOf(args.id as string, args.conv as string);
@@ -4870,6 +4967,9 @@ Phase 3: Frontend pane and mock harness
       const choice = args.choice as number;
       const label = choice === 1 ? "Yes" : choice === 2 ? "Yes, allow all edits during this session" : "No, and tell Claude what to do differently";
       c.prompt = null;
+      // A fold that waited on it runs again.
+      const f = mockChatFolds.get(chatSession(c));
+      if (f?.state === "waiting") mockChatFolds.set(chatSession(c), { ...f, state: "folding" });
       chatReply(c, null, choice === 3 ? "Understood: I left the memory as it was." : "Done: one line in MEMORY.md.");
       return { answered: true, confirmed: true, harness: "claude", session: chatSession(c), choice, label };
     }
@@ -7102,14 +7202,23 @@ let mockNotifyGranted = new URLSearchParams(location.search).get("notify") === "
   ideaSends: () => mockIdeaSends.slice(),
   ideaConvs: (id: string) => (mockConvs.get(id) ?? []).map(mockConvRow),
   /** Workspace chats: what `workspace_send` sent, each workspace's chats, a
-   *  chat whose Claude exits, and the event's fold map (`null` clears one). */
+   *  chat whose Claude exits, and a fold moved to a state: `folding`, `waiting`
+   *  (a prompt is up), `checking`, `failed` (`why`, or the real words), `landed`
+   *  (it writes its note and commits), `nothing`, or `null`, which forgets it. */
   chatSends: () => mockChatSends.slice(),
   wsChats: (id: string) => (mockChats.get(id) ?? []).map(mockChatRow),
   endChat: (id: string, conv: string) => { const c = chatOf(id, conv); c.live = false; c.prompt = null; chatSessionsPush(); },
-  wsFold(id: string, conv: string, state: "folding" | "waiting" | "failed" | null, why: string | null = null) {
+  wsFold(id: string, conv: string, state: "folding" | "waiting" | "checking" | "failed" | "landed" | "nothing" | null, why: string | null = null) {
     const c = chatOf(id, conv);
-    if (state) mockChatFolds.set(chatSession(c), { workspace: id, chat: conv, state, why });
-    else mockChatFolds.delete(chatSession(c));
+    if (state === "landed" || state === "nothing") foldLand(id, c, state === "landed");
+    else if (state === "failed") foldFail(id, c, why);
+    else if (state) {
+      mockChatFolds.set(chatSession(c), { workspace: id, chat: conv, state, why, left: null });
+      c.fold = { asked: isoAgo(0), state: "folding", reverted: false };
+      c.live = true; c.state = state === "waiting" ? "waiting" : "busy";
+      c.prompt = state === "waiting" ? { fp: `fp-${c.id}-fold`, ask: `${c.title}. → note` } : null;
+      mockMemory.hold(id);
+    } else { mockChatFolds.delete(chatSession(c)); c.fold = undefined; mockMemory.release(id); }
     chatSessionsPush();
   },
   /** A conversation's Claude exits (or a terminal closed it): it reads ended. */
