@@ -1,4 +1,4 @@
-// The Ideas editor's save and conflict rules (app/companion/ideasave.ts), on
+// The Ideas editor's save and conflict rules (app/src/doc/ideasave.ts), on
 // a VIRTUAL clock with scripted rows.
 //
 //   node app/scripts/ideas-save-check.mjs      # from the repo root; exits non-zero on failure
@@ -32,7 +32,7 @@ import { fileURLToPath } from "node:url";
 import { transformWithEsbuild } from "vite";
 
 const here = (p) => fileURLToPath(new URL(p, import.meta.url));
-const SRC = process.env.IDEASAVE_SRC ?? here("../companion/ideasave.ts");
+const SRC = process.env.IDEASAVE_SRC ?? here("../src/doc/ideasave.ts");
 let failed = 0;
 const check = (c, m) => { if (!c) failed++; console.log(`${c ? "ok" : "not ok"} — ${m}`); };
 
@@ -360,6 +360,102 @@ function rig(initial = "---\nid: 01JC\n---\n\n# A\n", { holdWrites = false } = {
   r.s.close();
   await r.c.advance(SAVE_PAUSE_MS * 2);
   check(r.writes().length === 0 && r.c.pending() === 0, "a closed session's timer never fires (the window flushes before it closes one)");
+}
+
+// ── one file, two windows (the documents lane) ──────────────────────────────
+// The main window and the Ideas window each hold a Session on the same file,
+// each with its own socket, and both hear every `ideas:changed`. The rules are
+// the ones above; what is held here is that two of OURS meeting lose nothing.
+function windows() {
+  const disk = { content: "---\nid: 01JC\n---\n\n# A\n", mtime: 1000 };
+  const history = [];
+  const c = clock();
+  const open = () => {
+    const w = { editor: disk.content, states: [] };
+    w.s = new Session("01JC", disk.content, disk.mtime, {
+      rows: {
+        write: async (id, content, exp, keep) => {
+          if (exp !== disk.mtime) throw STALE;
+          if (keep) history.push(disk.content);
+          if (content !== disk.content) { disk.content = content; disk.mtime += 10; }
+          return { mtime_ms: disk.mtime, file: "a.md", title: "A" };
+        },
+        read: async () => ({ content: disk.content, mtime_ms: disk.mtime, file: "a.md", title: /^# (.*)$/m.exec(disk.content)?.[1] }),
+      },
+      onTaken: (d) => { w.title = d.title; },
+      clock: c,
+      text: () => w.editor,
+      replace: (t) => { w.editor = t; },
+      onState: (st) => w.states.push(st.kind),
+    });
+    w.type = (t) => { w.editor += t; w.s.edited(); };
+    return w;
+  };
+  const main = open(), ideas = open();
+  /** The poll's push, to both windows. */
+  const tick = async () => {
+    const ev = { changed: [{ id: "01JC", mtime_ms: disk.mtime }], removed: [] };
+    await Promise.all([main.s.external(ev), ideas.s.external(ev)]);
+    await settle();
+  };
+  return { disk, history, c, main, ideas, tick };
+}
+{
+  const w = windows();
+  w.main.type("from main");
+  await w.c.advance(SAVE_PAUSE_MS);
+  await w.tick();
+  check(w.ideas.title === "A", "a text taken from the other window brings its title");
+  check(w.ideas.editor === w.disk.content && w.ideas.editor.endsWith("from main") && !w.ideas.states.includes("conflict"), "typed in one window: the other, clean, takes the saved text");
+  w.ideas.type(", then ideas");
+  await w.c.advance(SAVE_PAUSE_MS);
+  await w.tick();
+  check(w.main.editor === w.disk.content && w.main.editor.endsWith("from main, then ideas") && w.main.s.current.kind === "clean", "…and typed back in the other: no refusal, and the first takes it");
+}
+{
+  const w = windows();
+  w.main.type("MAIN");
+  w.ideas.type("IDEAS");
+  await w.c.advance(SAVE_PAUSE_MS);
+  const [a, b] = [w.main.s.current, w.ideas.s.current];
+  const loser = a.kind === "conflict" ? w.main : w.ideas;
+  const winner = loser === w.main ? w.ideas : w.main;
+  check([a.kind, b.kind].sort().join() === "clean,conflict" && loser.editor !== winner.editor && w.disk.content === winner.editor, "typed in both at once: one saves, the other is told, its text kept in its editor");
+  await w.tick();
+  check(loser.s.current.kind === "conflict" && loser.editor !== w.disk.content, "the push does not reload over it");
+  const theirs = winner.editor;
+  await within(loser.s.keepMine(), "keepMine");
+  await w.tick();
+  check(w.disk.content === loser.editor && w.history.length === 1 && w.history[0] === theirs, "Keep mine writes it, the other window's text in history first");
+  check(winner.editor === w.disk.content && winner.s.current.kind === "clean", "…and the other window, clean, follows");
+}
+{
+  // A tick BETWEEN one window's two saves, heard late by the other.
+  const w = windows();
+  w.main.type("1");
+  await w.c.advance(SAVE_PAUSE_MS);
+  w.ideas.type("unsaved");
+  await w.tick();
+  check(w.ideas.s.current.kind === "conflict" && w.ideas.editor.endsWith("unsaved") && w.main.s.current.kind === "clean", "a change from one window meeting unsaved text in the other is a conflict there, and nowhere else");
+  await w.c.advance(SAVE_PAUSE_MS * 3);
+  check(w.disk.content === w.main.editor, "and nothing is written over the other's while it waits for the person");
+}
+
+// ── a source with its own refusals ──────────────────────────────────────────
+{
+  const c = clock();
+  let st = null;
+  const mk = (err) => new Session("notes/a.md", "a", 1, {
+    rows: { write: async () => { throw err; }, read: async () => { throw err; } },
+    refusals: { stale: (e) => e === "moved on", gone: (e) => e === "no such file" },
+    clock: c, text: () => "b", replace() {}, onState: (x) => { st = x; },
+  });
+  await mk("moved on").flush();
+  check(st?.kind === "conflict", "a source's own stale refusal is a conflict");
+  await mk(STALE).flush();
+  check(st?.kind === "error", "…and the ideas' is then just an error");
+  await mk("no such file").external({ changed: [], removed: ["notes/a.md"] });
+  check(st?.kind === "removed", "a source's own gone refusal is a removal");
 }
 
 console.log(failed ? `\nideas-save-check: ${failed} failure(s)` : "\nideas-save-check: all good");

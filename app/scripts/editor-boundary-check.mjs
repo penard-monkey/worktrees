@@ -1,17 +1,22 @@
-// Guards the boundary around the Ideas companion window's bundle.
+// Guards two boundaries: CodeMirror's (one module, loaded on first use) and the
+// Ideas companion window's (its own build, its own rights).
 //
-//   node app/scripts/companion-boundary-check.mjs    # from the repo root; exits non-zero on failure
+//   node app/scripts/editor-boundary-check.mjs    # from the repo root; exits non-zero on failure
 //
-// The companion (app/companion/, vite.companion.config.ts → app/dist/companion/)
-// is where the libraries ideas need will live — CodeMirror 6 in phase 1
-// (docs/proposals/idea-board-phases.md §4.3) — and the app's own bundle must
-// never gain a byte of them. Same shape and same reason as
-// viewer-boundary-check.mjs: "it is isolated" is otherwise a claim about a vite
-// config, and a single import in a shared file falsifies it silently.
+// CodeMirror 6 is the document editor in BOTH windows (AGENTS.md, the third
+// admitted library; docs/proposals/workspace-chats.md §4.5). The rule is not
+// "never in app/src" any more: it is ONE module, app/src/doc/editor.ts, reached
+// only through loadeditor.ts's dynamic import with destructured names, so it
+// is a chunk fetched when a document is first opened and the main window's
+// start does not carry it. "It is lazy" is otherwise a claim about a bundler,
+// and one static import in a shared file falsifies it silently.
 //
 // Assertions:
-//   1. Nothing reachable from the APP's entry imports a companion file, or a
-//      library only the companion may use (COMPANION_ONLY).
+//   1. The library: only editor.ts names an editor package, in any form, in
+//      app/src, app/companion or app/viewer. editor.ts itself is imported once,
+//      by `const { mountEditor } = await import("./editor")` in loadeditor.ts:
+//      no static import, no namespace, no second door. Both windows reach it
+//      (the positive control), and app/src imports nothing of app/companion's.
 //   2. The companion reaches the backend through the one door (app/src/ipc.ts)
 //      and imports no @tauri-apps/api/core or /event of its own; it opens its
 //      engine door reconnect-only (`neverStart`), and takes the port and token
@@ -20,14 +25,19 @@
 //      the companion's builds into dist/companion with its own root and base,
 //      and `pnpm build` runs the app's (which empties dist/) first.
 //   4. The window the shim opens is that page, and its capability is its own.
-//   5. If a build exists: the app's assets hold no companion-only library, the
-//      companion's page is there, and no built file carries the dev-only drag
-//      probe or the dev token client.
+//   5. If a build exists: exactly one of the app's files carries CodeMirror, it
+//      is in no page and no chunk statically imports it (so neither the entry
+//      chunk nor App's does), and something imports it dynamically. The
+//      companion's page is there with its editor, and no built file carries
+//      the dev-only drag probe or the dev token client.
+//
+// APP_ROOT=<copy of app/> checks another tree, so a mutation can be shown red
+// without touching this one.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const APP = fileURLToPath(new URL("..", import.meta.url));
+const APP = process.env.APP_ROOT ? path.resolve(process.env.APP_ROOT) + path.sep : fileURLToPath(new URL("..", import.meta.url));
 let failed = 0;
 const fail = (m) => { failed++; console.log(`not ok — ${m}`); };
 const ok = (m) => console.log(`ok — ${m}`);
@@ -36,9 +46,10 @@ const read = (rel) => fs.readFileSync(path.join(APP, rel), "utf8");
 const exists = (rel) => fs.existsSync(path.join(APP, rel));
 const code = (s) => s.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "");
 
-/** Packages only the companion's bundle may reach: CodeMirror and its parser
- *  (Ideas phase 1, the editor). */
-const COMPANION_ONLY = ["codemirror", "@codemirror", "@lezer", "@uiw"];
+/** CodeMirror, its parser, and what they alone pull in. */
+const EDITOR_LIBS = ["codemirror", "@codemirror", "@lezer", "@uiw", "@marijn", "style-mod", "crelt", "w3c-keyname"];
+const EDITOR = path.join(APP, "src/doc/editor.ts");
+const DOOR = path.join(APP, "src/doc/loadeditor.ts");
 
 function resolveRel(fromFile, spec) {
   const base = path.resolve(path.dirname(fromFile), spec);
@@ -69,16 +80,38 @@ function graph(entry) {
   }
   return { files, pkgs };
 }
-const only = (pkg) => COMPANION_ONLY.some((c) => pkg === c || pkg.startsWith(`${c}/`));
+const only = (pkg) => EDITOR_LIBS.some((c) => pkg === c || pkg.startsWith(`${c}/`));
 const inCompanion = (f) => f.startsWith(path.join(APP, "companion") + path.sep);
 
-// ── 1. the app's graph reaches nothing of the companion's ───────────────────
+// ── 1. the library: one module, one lazy door ───────────────────────────────
+/** Every module specifier in a file, however it is named: `from "x"`,
+ *  `import "x"`, `import("x")`, `require("x")`. Comments are blanked, so prose
+ *  that names a package is not an import. */
+function specs(file) {
+  const text = fs.readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
+  return [...text.matchAll(/\bfrom\s*["'`]([^"'`]+)["'`]|\bimport\s*["'`]([^"'`]+)["'`]|\b(?:import|require|glob)\s*\(\s*["'`]([^"'`]+)["'`]/g)]
+    .map((m) => ({ spec: (m[1] ?? m[2] ?? m[3]).split("?")[0], at: m.index, text }));
+}
+const sources = (dir) => (fs.existsSync(dir) ? fs.readdirSync(dir, { withFileTypes: true }) : []).flatMap((e) => {
+  const p = path.join(dir, e.name);
+  return e.isDirectory() ? sources(p) : /\.(ts|tsx|js|jsx|mjs|mts)$/.test(e.name) ? [p] : [];
+});
 {
+  const all = ["src", "companion", "viewer"].flatMap((d) => sources(path.join(APP, d)));
+  const rel = (f) => path.relative(APP, f);
+  check(all.length > 100, `every source file was read (${all.length}) — a read of nothing would pass everything`);
+  const users = all.filter((f) => specs(f).some(({ spec }) => only(spec)));
+  check(users.length === 1 && users[0] === EDITOR, `one module imports the editor's libraries (${EDITOR_LIBS.join(", ")}): ${users.map(rel).join(", ") || "none"}`);
+  const doors = all.flatMap((f) => specs(f).filter(({ spec }) => spec.startsWith(".") && resolveRel(f, spec) === EDITOR).map((x) => ({ f, ...x })));
+  check(doors.length === 1 && doors[0].f === DOOR, `editor.ts is imported once, by loadeditor.ts: ${doors.map((d) => rel(d.f)).join(", ") || "nowhere"}`);
+  // Destructured: a namespace (`const ed = await import(…)`, or `.then((m) =>`)
+  // keeps every export alive and defeats tree-shaking.
+  check(/\bconst \{ mountEditor \} = await import\("\.\/editor"\);/.test(code(fs.existsSync(DOOR) ? fs.readFileSync(DOOR, "utf8") : "")),
+    "…and by a dynamic import with destructured names");
   const g = graph(path.join(APP, "src/main.tsx"));
-  check(g.files.size > 50, `the app's graph was walked (${g.files.size} files) — a walk of nothing would pass everything`);
-  const pkgs = [...g.pkgs].filter(only);
-  check(pkgs.length === 0, `no companion-only library (${COMPANION_ONLY.join(", ")}) is reachable from app/src/main.tsx${pkgs.length ? `: ${pkgs.join(", ")}` : ""}`);
-  const files = [...g.files].filter(inCompanion).map((f) => path.relative(APP, f));
+  check(g.files.size > 50, `the app's graph was walked (${g.files.size} files)`);
+  check(g.files.has(EDITOR) && g.pkgs.has("@codemirror/view"), "the main window reaches the editor (through that door): the rule guards something");
+  const files = [...g.files].filter(inCompanion).map(rel);
   check(files.length === 0, `the app imports nothing from app/companion/ — the companion may import app/src, never the other way round${files.length ? `: ${files.join(", ")}` : ""}`);
 }
 
@@ -100,10 +133,7 @@ const inCompanion = (f) => f.startsWith(path.join(APP, "companion") + path.sep);
       "the port and token go from engine_connect's answer straight to connectSocket, stored and logged nowhere");
     check(!/bootSocket/.test(main) && /version: __WT_VERSION__/.test(main), "the companion never names the dev token client, and hands its socket __WT_VERSION__");
     check(/document\.addEventListener\("visibilitychange", \(\) => door\.visibility\(\)\);/.test(main), "a hidden companion defers its retries (it hears visibilitychange)");
-    // The positive control: a walk that stopped short would pass assertion 1
-    // with CodeMirror in the app, because it would find it nowhere.
-    const cm = [...g.pkgs].filter(only);
-    check(cm.includes("@codemirror/view") && cm.includes("@codemirror/state"), `the walk finds the editor where it lives: the companion's graph reaches CodeMirror (${cm.join(", ") || "nothing"})`);
+    check(g.files.has(EDITOR), "the companion's editor is the same module as the main window's");
   }
 }
 
@@ -162,9 +192,26 @@ const inCompanion = (f) => f.startsWith(path.join(APP, "companion") + path.sep);
     walk(path.join(APP, "dist"));
     const appFiles = all.filter((f) => !f.startsWith(path.join(APP, "dist/companion") + path.sep));
     // Package names may not survive minification; CodeMirror's own class
-    // names do (the positive control below finds them in the companion's).
-    const leak = appFiles.filter((f) => /@codemirror|codemirror|@lezer|cm-content|cm-scroller/i.test(fs.readFileSync(f, "utf8")));
-    check(leak.length === 0, `the app's built files carry no companion-only library${leak.length ? `: ${leak.map((f) => path.relative(APP, f)).join(", ")}` : ""}`);
+    // names do (the companion's, below, is the same grep finding them).
+    const has = (f) => /@codemirror|@lezer|cm-content|cm-scroller/i.test(fs.readFileSync(f, "utf8"));
+    const carriers = appFiles.filter(has);
+    const name = (f) => path.relative(APP, f);
+    check(carriers.length === 1 && carriers[0].endsWith(".js"), `exactly one of the app's built files carries CodeMirror: ${carriers.map(name).join(", ") || "none"}`);
+    // A static import would fold it INTO App's chunk, which is itself one file,
+    // imported dynamically by the entry: every other line here passes on that.
+    const pane = appFiles.filter((f) => f.endsWith(".js") && /main-doc-float/.test(fs.readFileSync(f, "utf8")));
+    check(pane.length === 1 && pane[0] !== carriers[0], `and that file is not the one with the pane's own code (${pane.map(name).join(", ") || "found nowhere"})`);
+    const chunk = carriers[0] && path.basename(carriers[0]);
+    const lit = chunk?.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") ?? "(?!)";
+    const pages = appFiles.filter((f) => f.endsWith(".html") && new RegExp(lit).test(fs.readFileSync(f, "utf8")));
+    check(pages.length === 0, `no page names it: it is neither the entry chunk nor preloaded${pages.length ? `: ${pages.map(name).join(", ")}` : ""}`);
+    const js = appFiles.filter((f) => f.endsWith(".js") && f !== carriers[0]);
+    const hard = js.filter((f) => new RegExp(`(?:\\bfrom|\\bimport)\\s*["'][^"']*${lit}["']`).test(fs.readFileSync(f, "utf8")));
+    check(hard.length === 0, `no chunk statically imports it, the entry's and App's included${hard.length ? `: ${hard.map(name).join(", ")}` : ""}`);
+    const soft = js.filter((f) => new RegExp(`\\bimport\\(\\s*["'][^"']*${lit}["']`).test(fs.readFileSync(f, "utf8")));
+    check(soft.length >= 1, `and it is imported dynamically (${soft.map(name).join(", ") || "nowhere"})`);
+    const kb = (f) => `${(fs.statSync(f).size / 1000).toFixed(1)} kB`;
+    if (carriers.length === 1) ok(`sizes: ${chunk} ${kb(carriers[0])}; ${js.filter((f) => /\/(index|App)-/.test(f)).map((f) => `${path.basename(f)} ${kb(f)}`).join(", ")}`);
     check(exists("dist/companion/index.html"), "the build has the companion's page at dist/companion/index.html");
     const cmp = all.filter((f) => f.startsWith(path.join(APP, "dist/companion") + path.sep));
     check(cmp.some((f) => /cm-content|cm-scroller/.test(fs.readFileSync(f, "utf8"))), "the companion's build carries the editor (the leak test above greps for something that exists)");
@@ -175,5 +222,5 @@ const inCompanion = (f) => f.startsWith(path.join(APP, "companion") + path.sep);
   }
 }
 
-console.log(failed ? `\ncompanion-boundary-check: ${failed} failure(s)` : "\ncompanion-boundary-check: all good");
+console.log(failed ? `\neditor-boundary-check: ${failed} failure(s)` : "\neditor-boundary-check: all good");
 process.exit(failed ? 1 : 0);

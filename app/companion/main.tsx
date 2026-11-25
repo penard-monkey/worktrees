@@ -1,9 +1,8 @@
 // The Ideas companion window's entry (Ideas phase 0). Its own page and its own
 // build (vite.companion.config.ts → app/dist/companion/), never a second input
-// to the app's: the libraries ideas will need (CodeMirror, phase 1) live in
-// this bundle and companion-boundary-check.mjs keeps them out of app/src's
-// import graph. It imports app/src as SOURCE files — the door (ipc.ts), the
-// socket client (ipcws.ts), the tokens — never the other way round.
+// to the app's. It imports app/src as SOURCE files — the door (ipc.ts), the
+// socket client (ipcws.ts), the tokens, the document pane and its editor
+// (src/doc/) — never the other way round (editor-boundary-check.mjs).
 //
 // It is one more loopback client of this host's `worktrees serve`, through the
 // same door as the main window: `engine_connect` for the port and token, then
@@ -72,6 +71,10 @@ async function boot() {
     void door.connect();
   }
   const { Companion } = await import("./Companion");
+  // This window is an editor: have it before the first frame, so a document
+  // opens with its editor in place. A failed fetch is said by the pane.
+  const { loadEditor } = await import("../src/doc/loadeditor");
+  await loadEditor().catch(() => {});
   // A second React root, so a second boundary: the main window's is not above
   // this one.
   const { AppErrorBoundary } = await import("../src/AppErrorBoundary");

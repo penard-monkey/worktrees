@@ -132,14 +132,20 @@ const chord = code.match(/if \([^\n]*e\.code === "KeyI"\)\) \{/)?.[0] ?? "";
 ok(/^if \(keyRef\.current\.ideasOn && /.test(chord), "⌘⇧I is taken only with Ideas on");
 ok(/keyRef\.current = \{[\s\S]*?\bideasOn\b[\s\S]*?\};/.test(code), "…and keyRef carries ideasOn");
 ok((code.match(/openIdeas\(\)|onClick=\{openIdeas\}/g) ?? []).length === 3, "openIdeas has exactly its three callers, the chord, the rail and openIdeaDoc");
-// The third (phase 4): a workspace overview's plan ▸ / idea ▸ opens the
-// document in the Ideas window, and returns first with Ideas off.
+// The third: Float, on a document open in the main area, opens it in the
+// Ideas window, and returns first with Ideas off.
 ok(/const openIdeaDoc = \(id: string\) => \{\s*if \(!ideasOn\) return;/.test(code), "…and openIdeaDoc opens nothing with Ideas off");
 // Phase 4's overview is Ideas', on a nav that is nobody's beta (#662).
 ok(gated('data-testid="ws-overview-open"'), "a workspace menu's Overview renders only with Ideas on");
 ok(/const openWsOverview = \(id: string\) => \{\s*if \(!ideasOn \|\| id === EVERYTHING_ELSE_ID\) return;/.test(code), "openWsOverview opens nothing with Ideas off, nor for Everything Else");
 ok(/onOpen=\{ideasOn \? \(\) => openWsOverview\(w\.id\) : undefined\}/.test(code) && /onClick=\{onOpen \?\? onToggle\}/.test(code), "with Ideas off a workspace's name folds its card, as before phase 4");
-ok(/\) : ideasOn && wsOpen && wsById\(wsOpen\) \? \(\s*<WorkspaceOverview/.test(code), "the overview is drawn only with Ideas on");
+ok(/\) : docShown \? null : ideasOn && wsOpen && wsById\(wsOpen\) \? \(\s*<WorkspaceOverview/.test(code), "the overview is drawn only with Ideas on");
+// The documents lane: a plan or an idea opens over the overview, gated as it
+// is. The pane itself may stay mounted behind the gate (a text that could not
+// be saved waits in it), so what is held is that it SHOWS and OPENS nothing.
+ok(/const openDocHere = async \(id: string\) => \{\s*if \(!ideasOn \|\| !wsOpen\) return;/.test(code), "openDocHere opens nothing with Ideas off");
+ok(/const docShown = ideasOn && !\(selected && sel\) && mainDoc !== null && wsOpen === mainDoc\.ws;/.test(code) && /<MainDocument\s[\s\S]{0,120}?shown=\{docShown\}/.test(code), "a document in the main area is shown only with Ideas on");
+ok((code.match(/<MainDocument\b/g) ?? []).length === 1 && (code.match(/setMainDoc\(\{/g) ?? []).length === 1, "…drawn in one place, and opened by openDocHere alone");
 ok((code.match(/<WorkspaceOverview\b/g) ?? []).length === 1, "…and in one place");
 ok(/if \(was === true && !ideasOn\) \{\s*invoke\("close_companion"\)/.test(code), "turning Ideas off closes the Ideas window (close_companion)");
 // Workspaces: out of the beta (2026-11-14).

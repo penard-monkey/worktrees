@@ -77,6 +77,7 @@ import { privacyArea, privacyWords } from "./privacypaths";
 import { PickPlace, StartReview } from "./StartWork";
 import { useGone } from "./useGone";
 import { WorkspaceOverview, type DocLite } from "./WorkspaceOverview";
+import { MainDocument, type MainDocApi } from "./doc/MainDocument";
 import { remoteHostLabel, remoteTitle, remoteWebUrl } from "./remote";
 import { PrsPane } from "./PrsPane";
 import { ageOf, prOfPlace, prsShown, prSummary, TAB_MAX_AGE_S, useProjectPrs } from "./prs";
@@ -4410,6 +4411,10 @@ function App() {
   const [wsOpen, setWsOpen] = useState<string | null>(null);
   const [wsOv, setWsOv] = useState<{ id: string; ov: Overview | null; error: string | null } | null>(null);
   const [ideaDocs, setIdeaDocs] = useState<DocLite[]>([]);
+  // The document open in the main area in place of a workspace's overview
+  // (doc/MainDocument.tsx), and the workspace it was opened from.
+  const [mainDoc, setMainDoc] = useState<{ ws: string; id: string } | null>(null);
+  const mainDocApi = useRef<MainDocApi | null>(null);
   const [ideasTick, setIdeasTick] = useState(0);
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
   // A persisted Off must suppress even the first usage request at startup.
@@ -6725,6 +6730,15 @@ function App() {
     closeShare();
     setSel(null);
     setWsOpen(id);
+    // Its overview, so a document open over it is left, once it is saved.
+    void leaveMainDoc();
+  };
+  /** Leave the document open in the main area, if it can be left: `false`
+   *  while its text is saved nowhere else. */
+  const leaveMainDoc = async (): Promise<boolean> => {
+    if (mainDocApi.current && !(await mainDocApi.current.leave())) return false;
+    setMainDoc(null);
+    return true;
   };
   useEffect(() => { if (sel) setWsOpen(null); }, [sel]);
   useEffect(() => { if (!ideasOn) setWsOpen(null); }, [ideasOn]);
@@ -6744,8 +6758,28 @@ function App() {
       .catch(() => { if (alive) setIdeaDocs([]); });
     return () => { alive = false; };
   }, [ideasOn, wsOpen, wsList, ideasTick]);
-  /** Open a plan or an idea in the Ideas window: the hand-off key, then
-   *  open (or raise) it; it reads the key on load, focus or `storage`. */
+  /** Open a plan or an idea in the main area, over the workspace's overview.
+   *  A document of another workspace whose text cannot be saved stays, and
+   *  the window goes to it: its banner says what to do. */
+  const openDocHere = async (id: string) => {
+    if (!ideasOn || !wsOpen) return;
+    const ws = wsOpen;
+    if (mainDoc && mainDoc.ws !== ws && mainDocApi.current && !(await mainDocApi.current.leave())) {
+      setSel(null);
+      setWsOpen(mainDoc.ws);
+      return;
+    }
+    setMainDoc({ ws, id });
+  };
+  const docShown = ideasOn && !(selected && sel) && mainDoc !== null && wsOpen === mainDoc.ws;
+  // "It is still open in its workspace" is answered by going there.
+  const docWaits = useRef<string | null>(null);
+  useEffect(() => {
+    if (docShown) setNotice((n) => (n === docWaits.current ? "" : n));
+  }, [docShown]);
+  /** Open a plan or an idea in the Ideas window (the document's Float): the
+   *  hand-off key, then open (or raise) it; it reads the key on load, focus or
+   *  `storage`. */
   const openIdeaDoc = (id: string) => {
     if (!ideasOn) return;
     try { window.localStorage.setItem(SHOW_KEY, JSON.stringify({ id, at: Date.now() })); } catch { /* the window still opens */ }
@@ -10275,7 +10309,7 @@ function App() {
                   </footer>
                 )}
               </>
-            ) : ideasOn && wsOpen && wsById(wsOpen) ? (
+            ) : docShown ? null : ideasOn && wsOpen && wsById(wsOpen) ? (
               <WorkspaceOverview
                 key={wsOpen}
                 name={wsById(wsOpen)!.name}
@@ -10283,7 +10317,7 @@ function App() {
                 error={wsOv?.id === wsOpen ? wsOv.error : null}
                 freePlans={ideaDocs.filter((d) => d.kind === "plan" && !(wsList?.workspaces ?? []).some((w) => w.plan === d.id))}
                 linkable={ideaDocs.filter((d) => d.kind === "idea" && !(wsById(wsOpen)!.ideas ?? []).includes(d.id))}
-                openDoc={openIdeaDoc}
+                openDoc={(id) => void openDocHere(id)}
                 setPlan={(plan) => void wsCall(setPlanCall(wsOpen, plan))}
                 linkIdea={(id) => void wsCall(linkIdeaCall(wsOpen, id))}
                 unlinkIdea={(id) => void wsCall(unlinkIdeaCall(wsOpen, id))}
@@ -10359,6 +10393,22 @@ function App() {
                   </div>
                 </div>
               </div>
+            )}
+            {/* A plan or an idea opened from the overview, over it. Last, and
+                mounted whatever is shown: it goes once its text is saved. */}
+            {mainDoc && (
+              <MainDocument
+                id={mainDoc.id}
+                shown={docShown}
+                backTo={wsById(mainDoc.ws)?.name ?? "Home"}
+                rows={ideaDocs}
+                api={mainDocApi}
+                opened={(id) => setMainDoc((d) => (d && d.id !== id ? { ...d, id } : d))}
+                close={() => setMainDoc(null)}
+                waits={(title) => { docWaits.current = `“${title}” has text that is not saved. It is still open in its workspace.`; setNotice(docWaits.current); }}
+                back={() => setMainDoc(null)}
+                float={openIdeaDoc}
+              />
             )}
           </main>
 
@@ -11020,7 +11070,7 @@ function App() {
               try { return await invoke<CmdResult>(c.cmd, c.args); } finally { void refresh(); }
             }}
             show={(root, slug) => { setWorkReview(null); selectSlug(root, slug); }}
-            edit={() => { setWorkReview(null); if (ovHere.plan?.live) openIdeaDoc(ovHere.plan.live); }}
+            edit={() => { setWorkReview(null); if (ovHere.plan?.live) void openDocHere(ovHere.plan.live); }}
             close={() => setWorkReview(null)}
           />
         );
