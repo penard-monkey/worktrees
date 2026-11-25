@@ -309,8 +309,14 @@ Undo.
    `fold.md` and in `chats.json`; the agent does not pick it. Then update `memory/MEMORY.md`, one line and a link per durable fact;
    move anything long to `topics/`; then say in two lines what you changed.
 4. It ends the session if it is live and launches the same conversation as a
-   resume **with a fixed opener**: `Read chats/<conv>/fold.md and do what it
-   says.`
+   resume **with a fixed opener**: `Read <the folder>/chats/<conv>/fold.md and
+   do what it says. This is fold <attempt>.` (as built: the path is absolute
+   and the attempt is a ULID of its own.) No client knows a line of the
+   engine's by its words: `workspace_turns` and `workspace_turn_text` mark the
+   turn each launch opened, `engine: "start"` or `"fold"`, by the exact lines it
+   launched the chat on, and nothing else. A chat is never called by one: a
+   rename to one, whole or cut, is refused, and a fold of a chat that has such
+   a name gives it `Chat N` back first.
 5. When the note at that path is **newer than the fold's start** and the
    agent has been idle for one poll tick, the poll commits ("fold: <title>"),
    records the commit, its files and line counts in `chats.json`, and ends

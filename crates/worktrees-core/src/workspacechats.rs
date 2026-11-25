@@ -54,6 +54,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::desksessions::{self as desk, Desk, Launch};
+use crate::turns::{Engine, Opener};
 pub use crate::desksessions::Start;
 use crate::wsfolder::{engine_dir_at, folder_at, make_at, refuse_real, OVERRIDE_ENV};
 
@@ -220,6 +221,10 @@ pub struct Chat {
     /// Its last fold, or none asked yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fold: Option<Fold>,
+    /// Every fold's attempt, oldest first: an earlier one's opener is in the
+    /// transcript for good ([`openers`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempts: Vec<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -362,6 +367,7 @@ fn checked(mut c: Chat) -> Chat {
         f.commit = f.commit.take().filter(|s| crate::memory::is_sha(s));
         f.attempt = f.attempt.take().filter(|s| crate::ulid::is_valid(s));
     }
+    c.attempts.retain(|s| crate::ulid::is_valid(s));
     if !note_ok(&c) {
         c.note.clear();
     }
@@ -410,9 +416,13 @@ pub fn touch_at(root: &Path, ws: &str, conv: &str) -> Result<(), String> {
     .map(|_| ())
 }
 
-/// Retitle chat `conv`. A title is one line of at most 120 characters.
+/// Retitle chat `conv`. A title is one line of at most 120 characters, and
+/// never what the engine launched the chat on.
 pub fn rename_at(root: &Path, ws: &str, conv: &str, title: &str) -> Result<Chat, String> {
     check_conv(conv)?;
+    if is_opener(&folder_at(root, ws)?, conv, title) {
+        return Err(ERR_OPENER.into());
+    }
     ws_desk(root, ws)?.rename(conv, title).map(checked)
 }
 
@@ -447,6 +457,7 @@ pub fn prepare_at(root: &Path, ws: &str, context: impl FnOnce(&str) -> String) -
             started,
             access: None,
             fold: None,
+            attempts: Vec::new(),
             extra: Map::new(),
         };
         rec.conversations.push(c.clone());
@@ -1092,6 +1103,55 @@ pub fn fold_opener(folder: &Path, conv: &str, attempt: &str) -> String {
     format!("Read {} and do what it says. This is fold {attempt}.", folder.join(CHATS_DIR).join(conv).join(FOLD).display())
 }
 
+/// Every line the engine launched chat `c` on, as it was sent.
+pub fn openers(folder: &Path, c: &Chat) -> Vec<Opener> {
+    let mut attempts: Vec<&str> = c.attempts.iter().map(String::as_str).collect();
+    // A record from before the list has the last one.
+    if let Some(a) = c.fold.as_ref().and_then(|f| f.attempt.as_deref()).filter(|a| !attempts.contains(a)) {
+        attempts.push(a);
+    }
+    let mut v = vec![Opener { engine: Engine::Start, text: opener(&c.id) }];
+    v.extend(attempts.into_iter().map(|a| Opener { engine: Engine::Fold, text: fold_opener(folder, &c.id, a) }));
+    v
+}
+
+pub const ERR_OPENER: &str = "that is what the app told the chat, not a name for it";
+
+/// The least of an opener that is taken for one: a client cuts a long title.
+const OPENER_CUT: usize = 20;
+
+/// Whether `title` is what the engine launches chat `conv` on, whole or as a
+/// client cut it to name the chat. The fold's is told without its attempt.
+pub fn is_opener(folder: &Path, conv: &str, title: &str) -> bool {
+    let line: String = title.split(['\n', '\r']).next().unwrap_or("").chars().filter(|c| !c.is_control()).collect();
+    let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let line = line.trim_end_matches(['…', '.']).trim_end();
+    let plain = |s: String| s.split_whitespace().collect::<Vec<_>>().join(" ").trim_end_matches('.').to_string();
+    let (start, fold) = (plain(opener(conv)), plain(fold_opener(folder, conv, "")));
+    line.starts_with(&fold) || (line.chars().count() >= OPENER_CUT && (start.starts_with(line) || fold.starts_with(line)))
+}
+
+/// Chat `conv`, called by a name of its own: one that was named after an opener
+/// goes back to `Chat N`, in the record.
+pub fn named_at(root: &Path, ws: &str, conv: &str) -> Result<Chat, String> {
+    let c = find_at(root, ws, conv)?;
+    let folder = folder_at(root, ws)?;
+    if !is_opener(&folder, conv, &c.title) {
+        return Ok(c);
+    }
+    ws_desk(root, ws)?
+        .edit(|rec: &mut Record| {
+            let i = rec.conversations.iter().position(|c| c.id == conv).ok_or("the chat is gone")?;
+            if is_opener(&folder, conv, &rec.conversations[i].title) {
+                let own = format!("Chat {}", i + 1);
+                let taken = rec.conversations.iter().any(|c| c.title == own);
+                rec.conversations[i].title = if taken { next_title(rec) } else { own };
+            }
+            Ok(rec.conversations[i].clone())
+        })
+        .map(checked)
+}
+
 /// Write chat `c`'s `fold.md` and answer the opener that reads it.
 pub fn write_fold_at(root: &Path, ws: &str, c: &Chat, attempt: &str) -> Result<String, String> {
     if !crate::ulid::is_valid(attempt) {
@@ -1310,8 +1370,54 @@ mod tests {
             note: String::new(),
             access: None,
             fold: None,
+            attempts: Vec::new(),
             extra: Map::new(),
         }
+    }
+
+    /// What the engine told a chat is no name for it, whole or as a client cut
+    /// it; a person's words are. One that has such a name gets its own back.
+    #[test]
+    fn a_chat_is_never_called_by_its_opener() {
+        let root = tmp("named");
+        let ws = crate::ulid::new();
+        let one = prepare_at(&root, &ws, |_| String::new()).unwrap();
+        let c = prepare_at(&root, &ws, |_| String::new()).unwrap();
+        let folder = folder_at(&root, &ws).unwrap();
+        let fold = fold_opener(&folder, &c.id, &crate::ulid::new());
+        let start = opener(&c.id);
+        let cut = |s: &str, n: usize| format!("{}…", s.chars().take(n).collect::<String>());
+        let no = [
+            start.clone(), fold.clone(), format!("  {fold}\nmore"), format!("{}\u{7}", start), cut(&start, 40), cut(&fold, 40), cut(&fold, 24),
+            // What a rename would have cut it to, and the first builds' opener.
+            fold.chars().take(120).collect(),
+            fold.split(" This is fold").next().unwrap().to_string(),
+            start.trim_end_matches('.').to_string(),
+        ];
+        for t in &no {
+            assert_eq!(rename_at(&root, &ws, &c.id, t).err().as_deref(), Some(ERR_OPENER), "{t:?}");
+        }
+        assert_eq!(find_at(&root, &ws, &c.id).unwrap().title, "Chat 2");
+        let yes = [
+            "Read …", "Read chats", "Read the notes and begin.", "Storage layout",
+            // Another chat's is no line of this one's.
+            &opener(&one.id),
+        ];
+        for t in yes {
+            assert_eq!(rename_at(&root, &ws, &c.id, t).map(|c| c.title), Ok(t.to_string()));
+        }
+        assert!(!is_opener(&folder, &c.id, &fold_opener(&folder, &one.id, "")));
+        // Named so by an older build: its own number again, or a free one.
+        let bad = |c: &Chat| update_at(&root, &ws, &c.id, |x| x.title = cut(&fold_opener(&folder, &c.id, ""), 40)).unwrap();
+        bad(&c);
+        assert_eq!(named_at(&root, &ws, &c.id).unwrap().title, "Chat 2");
+        assert_eq!(find_at(&root, &ws, &c.id).unwrap().title, "Chat 2", "in the record");
+        rename_at(&root, &ws, &one.id, "Chat 2").unwrap();
+        bad(&c);
+        assert_eq!(named_at(&root, &ws, &c.id).unwrap().title, "Chat 3");
+        rename_at(&root, &ws, &c.id, "Mine").unwrap();
+        assert_eq!(named_at(&root, &ws, &c.id).unwrap().title, "Mine", "a name of its own is kept");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

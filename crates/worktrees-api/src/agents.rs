@@ -1503,11 +1503,11 @@ fn kimi_busy(io: &dyn AgentIo, at: &Locus, lane: &Lane) -> bool {
 /// place's first running agent — `{harness, session, turns, more, note}`.
 /// Never the pane.
 pub fn agent_turns(ctx: &Ctx, repo: String, slug: String, session: Option<String>, n: Option<u32>) -> Result<Value, String> {
-    turns_at(ctx, &Locus::place(&repo, slug)?, session, n)
+    turns_at(ctx, &Locus::place(&repo, slug)?, session, n, &[])
 }
 
 /// [`agent_turns`]'s body, for a place's lanes or a desk session's.
-pub(crate) fn turns_at(ctx: &Ctx, at: &Locus, session: Option<String>, n: Option<u32>) -> Result<Value, String> {
+pub(crate) fn turns_at(ctx: &Ctx, at: &Locus, session: Option<String>, n: Option<u32>, openers: &[turns::Opener]) -> Result<Value, String> {
     let io = &*ctx.agents.io;
     let lanes = io.lanes(at);
     let ended = lanes.is_empty() && at.desk().is_some();
@@ -1534,7 +1534,9 @@ pub(crate) fn turns_at(ctx: &Ctx, at: &Locus, session: Option<String>, n: Option
         }
         Err(e) => return Err(e),
     };
-    let (t, more) = turns::within_budget(read(&lines, n.map_or(DEFAULT_TURNS, |n| n as usize)));
+    let n = n.map_or(DEFAULT_TURNS, |n| n as usize);
+    let claude = lane.harness == provider::CLAUDE.id;
+    let (t, more) = turns::within_budget(if claude { turns::claude_opened(&lines, n, openers) } else { read(&lines, n) });
     let mut v = json!({ "harness": lane.harness, "session": lane.session, "turns": t, "more": more, "note": TURNS_NOTE });
     // Ended: read-only, from the transcript alone (a desk session; a
     // place's chat still answers "no agent is running" once its lane ends).
@@ -1643,11 +1645,11 @@ pub(crate) fn call_image_at(ctx: &Ctx, at: &Locus, call_id: String) -> Result<Va
 /// [`ERR_GONE`] once the turn has left what is read of the transcripts, or its
 /// session has ended.
 pub fn agent_turn_text(ctx: &Ctx, repo: String, slug: String, turn_id: String) -> Result<Value, String> {
-    turn_text_at(ctx, &Locus::place(&repo, slug)?, turn_id)
+    turn_text_at(ctx, &Locus::place(&repo, slug)?, turn_id, &[])
 }
 
 /// [`agent_turn_text`]'s body, for a place's lanes or a desk session's.
-pub(crate) fn turn_text_at(ctx: &Ctx, at: &Locus, turn_id: String) -> Result<Value, String> {
+pub(crate) fn turn_text_at(ctx: &Ctx, at: &Locus, turn_id: String, openers: &[turns::Opener]) -> Result<Value, String> {
     let io = &*ctx.agents.io;
     let mut unread = None;
     for lane in read_lanes(io, at) {
@@ -1659,7 +1661,9 @@ pub(crate) fn turn_text_at(ctx: &Ctx, at: &Locus, turn_id: String) -> Result<Val
         };
         match io.transcript(at, &lane) {
             Ok(lines) => {
-                if let Some(turn) = read(&lines, &turn_id) {
+                let claude = lane.harness == provider::CLAUDE.id;
+                let turn = if claude { turns::claude_turn_opened(&lines, &turn_id, openers) } else { read(&lines, &turn_id) };
+                if let Some(turn) = turn {
                     return Ok(json!({ "turn_id": turn_id, "turn": turn, "harness": lane.harness, "session": lane.session, "note": TURN_TEXT_NOTE }));
                 }
             }

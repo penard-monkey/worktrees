@@ -80,6 +80,11 @@ pub fn opener(idea: &str, conv: &str) -> String {
     format!("Read {DESK_DIR}/{idea}/{conv}/{START} and begin.")
 }
 
+/// [`opener`], as the turns are read by it.
+pub fn start_opener(idea: &str, conv: &str) -> crate::turns::Opener {
+    crate::turns::Opener { engine: crate::turns::Engine::Start, text: opener(idea, conv) }
+}
+
 /// One conversation, as the record keeps it.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Conversation {

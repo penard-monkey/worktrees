@@ -47,6 +47,10 @@ export type Turn = {
   at: number | null; user: string | null; reply: string; tools: string[]; truncated: boolean;
   /** Claude's own entry, never the person's message. Older hosts omit it. */
   notice?: Notice;
+  /** The engine launched the conversation on this line (`turns::Engine`): no
+   *  person's message, and never to be known by its words. A workspace chat's
+   *  and an idea conversation's only; older hosts omit it. */
+  engine?: "start" | "fold";
   /** The turn in order (`turns::Step`): absent from a host that predates it. */
   steps?: Step[];
 };

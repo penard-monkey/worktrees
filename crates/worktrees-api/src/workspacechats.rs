@@ -27,7 +27,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use worktrees_core::workspacechats::{self as chats, Chat, Context, DocRead, PlaceLine, ProjectContext, ProjectRead, Reads, Start};
 use worktrees_core::workspaces::{self as store, Workspace};
-use worktrees_core::{activity, agent, desksessions, harness, registry, store as declared, sysclock, tmux, wsfolder, Project};
+use worktrees_core::{activity, agent, desksessions, harness, registry, store as declared, sysclock, tmux, turns, wsfolder, Project};
 
 use crate::agents::{self, Locus};
 use crate::watch::WorkspaceSessions;
@@ -282,7 +282,8 @@ pub fn workspace_chat_remove(ctx: &Ctx, id: String, conv: String) -> Result<Valu
     Ok(json!({ "id": id, "conv": conv, "removed": true, "stopped_fold": stopped, "commit": change.map(|c| c.commit) }))
 }
 
-/// `workspace_chat_rename`: a new title, one line.
+/// `workspace_chat_rename`: a new title, one line. Refused for what the engine
+/// launched the chat on (`chats::is_opener`).
 pub fn workspace_chat_rename(ctx: &Ctx, id: String, conv: String, title: String) -> Result<Value, String> {
     let c = chats::rename_at(ctx.workspaces_dir(), &id, &conv, &title)?;
     Ok(json!({ "id": id, "chat": c }))
@@ -348,12 +349,22 @@ pub fn tick(ctx: &Ctx, now: WorkspaceSessions, last: &mut Option<WorkspaceSessio
 
 // ── the chat: the agent rows' bodies on the chat's session ──────────────────
 
+/// The chat, and the lines it was launched on.
+fn opened(ctx: &Ctx, id: &str, conv: &str) -> Result<(Locus, Vec<turns::Opener>), String> {
+    let c = chats::find_at(ctx.workspaces_dir(), id, conv)?;
+    Ok((locus_of(ctx, id, &c)?, chats::openers(&wsfolder::folder_at(ctx.workspaces_dir(), id)?, &c)))
+}
+
+/// A turn the engine sent says so (`engine`: `start`, `fold`): it is not the
+/// person's, and no client needs to know it by its words.
 pub fn workspace_turns(ctx: &Ctx, id: String, conv: String, n: Option<u32>) -> Result<Value, String> {
-    agents::turns_at(ctx, &locus(ctx, &id, &conv)?, None, n)
+    let (at, openers) = opened(ctx, &id, &conv)?;
+    agents::turns_at(ctx, &at, None, n, &openers)
 }
 
 pub fn workspace_turn_text(ctx: &Ctx, id: String, conv: String, turn_id: String) -> Result<Value, String> {
-    agents::turn_text_at(ctx, &locus(ctx, &id, &conv)?, turn_id)
+    let (at, openers) = opened(ctx, &id, &conv)?;
+    agents::turn_text_at(ctx, &at, turn_id, &openers)
 }
 
 pub fn workspace_tool_call(ctx: &Ctx, id: String, conv: String, call_id: String) -> Result<Value, String> {
