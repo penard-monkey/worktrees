@@ -1234,6 +1234,30 @@ fn head(repo: &Repo) -> Result<Option<Change>, String> {
     Ok(log_in(repo, None, None, 1)?.changes.pop())
 }
 
+/// The commit HEAD is, read from the repository's files: no process, for a
+/// poll. `None` before the first commit, or with no memory.
+pub fn head_at(root: &Path, id: &str) -> Option<String> {
+    head_id(&git_dir(root, dir_at(root, id).ok().map(|_| id)?))
+}
+
+/// Where workspace `id`'s repository is.
+pub fn git_dir(root: &Path, id: &str) -> PathBuf {
+    root.join(id).join(DIR).join(".git")
+}
+
+fn head_id(git: &Path) -> Option<String> {
+    let text = |p: PathBuf| fs::read_to_string(p).ok();
+    let head = text(git.join("HEAD"))?;
+    let Some(name) = head.trim().strip_prefix("ref: ") else {
+        return Some(head.trim().to_string()).filter(|h| is_sha(h));
+    };
+    if name.split('/').any(|p| p.is_empty() || p.starts_with('.')) {
+        return None;
+    }
+    let loose = text(git.join(name)).map(|t| t.trim().to_string()).filter(|h| is_sha(h));
+    loose.or_else(|| text(git.join("packed-refs"))?.lines().find_map(|l| l.split_once(' ').filter(|(_, n)| *n == name).map(|(h, _)| h.to_string())).filter(|h| is_sha(h)))
+}
+
 /// Commit a dirty tree: what a fold, a chat's start and the quiet minute do.
 /// `message` `None` names the files. `None` back: there was nothing to commit.
 pub fn commit_if_dirty_at(root: &Path, id: &str, message: Option<&str>) -> Result<Option<Change>, String> {
@@ -2460,6 +2484,23 @@ mod tests {
         assert_eq!(find(&a).unwrap().commit, c.commit);
         assert_eq!(find(&b), None);
         assert!(fold_commit_at(&s.root, &s.id, ".*").is_err() && commit_fold_at(&s.root, &s.id, "x", "a\nb").is_err());
+    }
+
+    #[test]
+    fn the_head_read_from_its_files_is_gits_own() {
+        let s = Scratch::new("head");
+        assert_eq!(head_at(&s.root, &s.id), None);
+        init_at(&s.root, &s.id, "x").unwrap();
+        assert_eq!(head_at(&s.root, &s.id), Some(s.log()[0].commit.clone()));
+        s.git(&["pack-refs", "--all"]);
+        assert_eq!(head_at(&s.root, &s.id), Some(s.log()[0].commit.clone()), "packed");
+        s.put("topics/t.md", "x");
+        let c = s.commit("later");
+        assert_eq!(head_at(&s.root, &s.id), Some(c.commit.clone()), "a loose one over a packed one");
+        s.git(&["checkout", "--quiet", "--detach"]);
+        assert_eq!(head_at(&s.root, &s.id), Some(c.commit));
+        s.git(&["symbolic-ref", "HEAD", "refs/heads/none"]);
+        assert_eq!(head_at(&s.root, &s.id), None);
     }
 
     /// The poll's cost, measured: `cargo test -p worktrees-core --release

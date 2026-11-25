@@ -83,7 +83,8 @@ check(rows.size === 9, `nine rows in serve's table (${rows.size})`);
 const mock = fs.readFileSync(path.join(ROOT, "src/mock/install.ts"), "utf8");
 const mm = fs.readFileSync(path.join(ROOT, "src/mock/memory.ts"), "utf8");
 for (const r of rows.keys()) check(mock.includes(`case "${r}":`) && mm.includes(`case "${r}"`), `the mock answers ${r}`);
-check(/\("workspaces:memory", Event::Console\)/.test(fs.readFileSync(path.join(REPO, "crates/worktrees-cli/src/serve/scope.rs"), "utf8")), "the event is the console's");
+for (const ev of ["workspaces:memory", "workspaces:history"]) check(new RegExp(`\\("${ev}", Event::Console\\)`).test(fs.readFileSync(path.join(REPO, "crates/worktrees-cli/src/serve/scope.rs"), "utf8")), `${ev} is the console's`);
+check(mm.includes('emit("workspaces:history"') && mm.includes("expectedRev") && rows.get("workspace_memory_write").includes("expected_rev"), "a save's rev and the history event, in the mock and the table");
 
 // ── the source ──────────────────────────────────────────────────────────────
 const D = memoryDocs("W1");
@@ -141,7 +142,10 @@ for (const [r, args] of rows) {
   const got = [...(sent.get(r) ?? [])].map(snake);
   check(sent.has(r), `${r} is called`);
   check(got.every((k) => args.includes(k)), `${r} is sent only what it reads (${got.join(", ")})`);
-  check(args.every((k) => got.includes(k)), `and something sends each argument it reads (${args.join(", ")})`);
+  // OWED: the row reads it and this source does not send it yet. Sent, its
+  // entry here goes.
+  const owed = r === "workspace_memory_write" ? ["expected_rev"] : [];
+  check(args.every((k) => got.includes(k) !== owed.includes(k)), `and something sends each argument it reads (${args.join(", ")})`);
 }
 
 // ── the event ───────────────────────────────────────────────────────────────

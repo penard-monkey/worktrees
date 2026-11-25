@@ -1,15 +1,16 @@
 // The mock's stand-in for a workspace's memory (`worktrees_api::memory`): the
 // files, the commits, and the poll's event a tick after any change, our own
-// saves included. The rules are core's, simplified. Every workspace the mock
+// saves included, and `workspaces:history` a tick after a commit. The rules are core's, simplified. Every workspace the mock
 // knows HAS one memory, seeded the first time it is asked for, except where
 // `?memory=none` says none has (Make, then, makes it).
 //
+// `?memfail=1` says the commits of every memory keep failing.
 // `?memtick=<ms>` is the poll's tick (300; the real one is 3 s) and
 // `?memquiet=<ms>` the quiet minute (60000).
 type F = { text: string | null; b64: string | null; mtime: number };
 type Files = Map<string, F>;
 type C = { commit: string; at: number; subject: string; kind: string; before: Map<string, F>; after: Map<string, F>; reverts: string | null; live: string[] };
-type Mem = { name: string; files: Files; commits: C[]; seen: Map<string, string>; tick: number | null; quiet: number | null };
+type Mem = { name: string; files: Files; commits: C[]; seen: Map<string, string>; tick: number | null; quiet: number | null; landed?: (commit: string) => void };
 type Emit = (event: string, payload: unknown) => void;
 
 const Q = new URLSearchParams(location.search);
@@ -156,6 +157,7 @@ function commit(m: Mem, subject: string | null, k: string, at = Date.now(), reve
   if (!paths.length) return null;
   const c: C = { commit: sha(), at: Math.floor(at / 1000), subject: subject ?? `Edited: ${paths.slice(0, 3).join(", ")}${paths.length > 3 ? ` and ${paths.length - 3} more` : ""}`, kind: k, before, after, reverts, live };
   m.commits.push(c);
+  m.landed?.(c.commit);
   return c;
 }
 
@@ -211,9 +213,19 @@ export function memoryMock(emit: Emit, nameOf: (id: unknown) => string, noteOf: 
   const none = Q.get("memory") === "none";
   // Workspaces a fold holds: no quiet commit and no undo there.
   const held = new Set<string>();
+  // The poll tells of the newest commit there is when it looks.
+  const due = new Map<string, string>();
+  const told = (id: string, m: Mem): Mem => {
+    m.landed = (commit) => {
+      const waiting = due.has(id);
+      due.set(id, commit);
+      if (!waiting) window.setTimeout(() => { const c = due.get(id); due.delete(id); if (mems.get(id) === m) emit("workspaces:history", { id, commit: c }); }, TICK);
+    };
+    return m;
+  };
   const get = (id: string): Mem | null => {
     const ws = nameOf(id);
-    if (!mems.has(id) && !none) mems.set(id, seed(ws, (t) => noteOf(id, t)));
+    if (!mems.has(id) && !none) mems.set(id, told(id, seed(ws, (t) => noteOf(id, t))));
     return mems.get(id) ?? null;
   };
   const need = (id: string) => { const m = get(id); if (!m) throw "this workspace has no memory yet"; return m; };
@@ -241,7 +253,7 @@ export function memoryMock(emit: Emit, nameOf: (id: unknown) => string, noteOf: 
   const view = (id: string) => {
     const m = get(id);
     const dir = `/Users/mock/.local/share/worktrees/workspaces/${id}/memory`;
-    if (!m) return { made: false, dir, index: null, folders: [], count: 0, bytes: 0, skipped: [], truncated: false, last: null };
+    if (!m) return { made: false, dir, index: null, folders: [], count: 0, bytes: 0, skipped: [], truncated: false, last: null, commit_error: null };
     const ix = m.files.get("MEMORY.md");
     const by = new Map<string, ReturnType<typeof listed>[]>();
     const listed = (p: string, f: F) => ({ path: p, name: name(p), size: size(f), mtime_ms: f.mtime, kind: kind(p), title: ["md", "markdown"].includes(ext(p)) ? title(f.text) : null });
@@ -258,6 +270,7 @@ export function memoryMock(emit: Emit, nameOf: (id: unknown) => string, noteOf: 
       folders: [...by].map(([n, files]) => ({ name: n, files })).sort((a, b) => rank(a.name) - rank(b.name) || (a.name < b.name ? -1 : 1)),
       count: all.length, bytes: all.reduce((n, f) => n + size(f), 0), skipped: [], truncated: false,
       last: m.commits.length ? change(m, m.commits[m.commits.length - 1]) : null,
+      commit_error: Q.get("memfail") ? { error: "git commit failed: fatal: no space left on device", since: Math.floor(Date.now() / 1000) - 600, times: 4 } : null,
     };
   };
   const side = (p: string, f: F | undefined) => (f ? { mime: IMAGES[ext(p)], size: size(f), b64: f.b64 ?? btoa(f.text ?? ""), refused: null } : null);
@@ -274,7 +287,7 @@ export function memoryMock(emit: Emit, nameOf: (id: unknown) => string, noteOf: 
           m.files.set("MEMORY.md", { text: TEMPLATE(m.name), b64: null, mtime: now() });
           commit(m, "Memory made", "made");
           m.seen = stamp(m);
-          mems.set(id, m);
+          mems.set(id, told(id, m));
         }
         return view(id);
       }

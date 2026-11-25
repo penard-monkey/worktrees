@@ -93,6 +93,7 @@ pub mod plans;
 pub mod ulid;
 pub mod workspacechats;
 pub mod workspaces;
+pub mod pindir;
 pub mod wsfolder;
 pub mod wslock;
 pub mod ui;
