@@ -49,7 +49,7 @@ function DocPicture({ source, from, src, alt }: { source: DocSource; from: strin
  *  as nothing — later phases' anchors are comments (§4.4); other raw HTML stays
  *  literal, inert text. A mermaid fence is code here: mermaid lives in the docs
  *  viewer's bundle alone. What a link or an image is, the source says. */
-function ReadView({ open, text, follow, linkNote }: { open: Open; text: string; follow(to: DocTarget): void; linkNote?: (from: string, href: string) => string | null }) {
+export function ReadView({ open, text, follow, linkNote }: { open: Pick<Open, "source" | "id">; text: string; follow(to: DocTarget): void; linkNote?: (from: string, href: string) => string | null }) {
   const { source, id } = open;
   const body = useMemo(() => source.readBody(text), [source, text]);
   const draw = useMemo(() => source.image && ((src: string, alt: string) => <DocPicture source={source} from={id} src={src} alt={alt} />), [source, id]);

@@ -75,7 +75,7 @@ export type PlacePanels = {
    *  was the Chat | Terminal switch has a record with no dock tab or width in
    *  it, and absent means what no record means, the global seed (`panelsFor`
    *  spreads only the keys that are there). */
-  dock_tab?: "files" | "terminal" | "docs" | "plan" | "prs";
+  dock_tab?: "files" | "terminal" | "docs" | "plan" | "prs" | "workspace";
   dock_width?: number;
   /** Markdown reading size for THIS place. Seeds from the flat last-used value
    *  (unlike `dock_open`, which deliberately does not seed — see `panelsFor`):
@@ -124,7 +124,7 @@ const isAgentView = (v: unknown): v is AgentView =>
 /** Every tab the dock can show, as a VALUE — the unions above are types and
  *  vanish at runtime. `dockrail-check.mjs` pins it to `DOCK_RAIL` and to both
  *  unions. */
-export const DOCK_TABS = ["files", "terminal", "docs", "plan", "prs"] as const;
+export const DOCK_TABS = ["files", "terminal", "docs", "plan", "prs", "workspace"] as const;
 const isDockTab = (t: unknown): t is Settings["dock_tab"] =>
   typeof t === "string" && (DOCK_TABS as readonly string[]).includes(t);
 
@@ -292,7 +292,7 @@ export type Settings = {
   chat_default_v1: boolean;
   dock_open: boolean; // right dock (Files / Terminal) visible for the selected place
   dock_width: number; // ≥240, ceiling is viewport-derived (see dockCeiling)
-  dock_tab: "files" | "terminal" | "docs" | "plan" | "prs"; // last-used dock tab
+  dock_tab: "files" | "terminal" | "docs" | "plan" | "prs" | "workspace"; // last-used dock tab
   // The reference column's LOWER slot: a section that stays on screen under
   // whichever tab is showing, instead of being one of the tabs. Only the
   // Terminal can take it — `"terminal" | null` rather than every tab, because

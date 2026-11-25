@@ -21,7 +21,9 @@ import "./WorkspaceMemory.css";
 const errText = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : String(e));
 
 /** The files: the index, then notes, topics, files; folded where there are many. */
-export function MemoryFiles(props: { ws: string; view: MemoryView; on: string | null; ago(epoch: number): string; open(path: string): void; made(path: string): void }) {
+export function MemoryFiles(props: { ws: string; view: MemoryView; on: string | null; ago(epoch: number): string; open(path: string): void; 
+  /** A new file was made; null: the list is to read. */
+  made: ((path: string) => void) | null }) {
   const { view } = props;
   const [q, setQ] = useState("");
   const [folds, setFolds] = useState<Record<string, boolean>>({});
@@ -57,7 +59,7 @@ export function MemoryFiles(props: { ws: string; view: MemoryView; on: string | 
           </section>
         );
       })}
-      <NewFile ws={props.ws} made={props.made} />
+      {props.made && <NewFile ws={props.ws} made={props.made} />}
       {(view.truncated || view.skipped.length > 0) && (
         <p className="wsm-skipped" data-testid="memory-skipped" title={view.skipped.map((s) => `${s.path}: ${s.why}`).join("\n")}>
           {view.truncated ? "Not every file is listed. " : ""}{view.skipped.length ? `${filesWords(view.skipped.length)} not shown: ${view.skipped[0].path} (${view.skipped[0].why})${view.skipped.length > 1 ? "…" : ""}` : ""}

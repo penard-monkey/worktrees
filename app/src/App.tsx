@@ -79,14 +79,15 @@ import { useGone } from "./useGone";
 import { NoMemory, WorkspaceOverview, type DocLite, type WsParts } from "./WorkspaceOverview";
 import { DocChips, WorkspaceFrame } from "./WorkspaceFrame";
 import { ChatDot, ChatLines, ChatsTab, NavChats, RefusedStart, StartingChat, WorkspaceChatColumn } from "./WorkspaceChat";
+import { PickPlaceWs, WorkspaceDock, type DockDoc } from "./WorkspaceDock";
 import { useWsChats } from "./useWsChats";
 import { keepFiles, MemoryCard, MemoryFiles, MemoryHistory, MemoryPreview, MemoryStrips, MemoryUnread } from "./WorkspaceMemory";
 import { useWsMemory } from "./useWsMemory";
 import { fileOf, longIndex, memoryPicks, notePath, sizeWords, trailStart, trailStep, trailTo, type Trail } from "./wsmemory";
-import { memoryDocs } from "./doc/memory";
+import { memoryDocs, type MemoryView } from "./doc/memory";
 import { linkTo, memoryLink } from "./doc/memorypath";
 import { navRows, type ChatRow } from "./wschats";
-import { attentionOf, docChips, LAST_VIEW_KEY, lastView, rollupOf, tabOr, wsCounts, wsFrameOn, wsTabs, type LastView, type Rollup } from "./wsview";
+import { attentionOf, docChips, LAST_VIEW_KEY, lastView, placeWorkspace, placeWorkspaces, PLACE_WS_KEY, placeWsRead, placeWsSet, rollupOf, tabOr, wsCounts, wsFrameOn, wsTabs, type LastView, type Rollup } from "./wsview";
 import { MainDocument, type MainDocApi } from "./doc/MainDocument";
 import { ideaDocs as ideaSource, sameDoc, type DocTarget } from "./doc/source";
 import { remoteHostLabel, remoteTitle, remoteWebUrl } from "./remote";
@@ -564,6 +565,14 @@ function NavButtons({ canBack, canForward, backTitle, forwardTitle, onStep, onLi
 /** What `updatePanels` may write: a place's panels less `agent_view`, which
  *  has no global and is written by `withAgentView` alone (see PlacePanels). */
 type DockPatch = Partial<Omit<PlacePanels, "agent_view">>;
+/** Why a link in the memory file `from` goes nowhere, when it does. */
+const memNote = (v: MemoryView | undefined, from: string, href: string): string | null => {
+  if (/^#?idea:/.test(href)) return null;
+  const l = memoryLink(from, href);
+  if (l.kind === "none") return l.why;
+  return l.kind === "file" && v && !v.truncated && !fileOf(v, l.path) ? `There is no ${l.path} in this memory.` : null;
+};
+const EMPTY_WS: WsDef[] = [];
 /** The document the main window has open, and where (a workspace's tab). */
 type MainDoc = DocTarget & { ws: string; tab: "plan" | "ideas" | "memory"; startIn?: "edit" };
 /** One entry of `DOCK_RAIL` (declared inside App, which owns the icons). */
@@ -4446,6 +4455,26 @@ function App() {
   const [wsOpen, setWsOpen] = useState<string | null>(null);
   const [wsOv, setWsOv] = useState<{ id: string; ov: Overview | null; error: string | null } | null>(null);
   const [ideaDocs, setIdeaDocs] = useState<DocLite[]>([]);
+  /** The workspace card each place was last clicked in. This machine's own. */
+  const [placeWsFrom, setPlaceWsFrom] = useState<Record<string, string>>(() => { try { return placeWsRead(window.localStorage.getItem(PLACE_WS_KEY)); } catch { return {}; } });
+  const fromWs = useCallback((repo: string, slug: string, id: string | null) => setPlaceWsFrom((cur) => {
+    const key = placeKey(repo, slug);
+    if ((cur[key] ?? null) === id) return cur;
+    const next = placeWsSet(cur, key, id);
+    try { window.localStorage.setItem(PLACE_WS_KEY, JSON.stringify(next)); } catch { /* while the app runs, then */ }
+    return next;
+  }), []);
+  /** A place's row carries the workspace card it is in; from All projects, none.
+   *  Called in the row's own handler: setting state any earlier in the click (a
+   *  capture handler) re-renders the nav under it, and the click is lost. */
+  const fromRow = (el: Element, repo: string, slug: string) => fromWs(repo, slug, el.closest<HTMLElement>("[data-ws-id]")?.dataset.wsId ?? null);
+  /** The card of the row a place's menu was opened on; undefined: not on a row. */
+  const ctxCard = useRef<string | null | undefined>(undefined);
+  /** Which of a place's workspace documents the dock shows. */
+  const [dockDoc, setDockDoc] = useState<DockDoc>("memory");
+  const [placeWsPick, setPlaceWsPick] = useState<{ x: number; y: number } | null>(null);
+  /** Where each workspace was last seen, for the crumb's way back. */
+  const wsWas = useRef<Record<string, NonNullable<Loc["ws"]>>>({});
   const [wsTab, setWsTab] = useState<WsTab>("overview");
   /** The idea each workspace's Ideas tab shows, while the app runs. */
   const [wsPick, setWsPick] = useState<Record<string, string>>({});
@@ -6138,6 +6167,13 @@ function App() {
   // ⌘J that can't visibly do anything is at least honest about why.
   const dockFits = fitLayout({ ...eff, dock_open: true }, dockEligible, vw).dockShown;
 
+  // A place knows its workspace (workspace-view-design.md §6): the card it was
+  // clicked in, else the only one that holds its project.
+  const placeWsAll = frameOn && selected && sel && wsList ? placeWorkspaces(wsList.workspaces, sel.repo) : EMPTY_WS;
+  const placeWs = sel ? placeWorkspace(placeWsAll, placeWsFrom[placeKey(sel.repo, sel.slug)]) : null;
+  // Files, for the workspace's tab in a place that has none. Nothing is written:
+  // the tab is there again in one that has.
+  const dockTabHere = eff.dock_tab === "workspace" && placeWsAll.length === 0 ? "files" : eff.dock_tab;
   // ── the dock's lower slot (Settings → Navigation → Terminal) ──
   // `lowerSet` is the preference; `lowerOn` is whether it is ON SCREEN — the
   // dock shown, the place's session up (with it down there are no shells, and
@@ -6165,7 +6201,7 @@ function App() {
   const lowerOn = lowerSet && dockShown && !!selected?.tmux_session.up && lowerFits(spaceH);
   const dockLower: Settings["dock_lower"] = lowerOn ? "terminal" : null;
   // What the UPPER half shows: never the section in the lower slot.
-  const shownTab = upperTab(eff.dock_tab, dockLower);
+  const shownTab = upperTab(dockTabHere, dockLower);
   // ⌘J / the rail says "hide files" — leaving a full-pane reader behind would
   // make that a lie. Same for flipping the dock to the Terminal tab. Keyed on
   // `shownTab` (what is ON SCREEN), like every other reader of the tab.
@@ -6951,24 +6987,27 @@ function App() {
   const docBeta = !mainDoc || (mainDoc.source === ideaSource ? ideasOn : wsChatsOn);
   const docWs = !mainDoc || !wsList || !!wsById(mainDoc.ws);
   useEffect(() => { if (!docBeta || !docWs) void leaveMainDoc(); }, [docBeta, docWs]); // eslint-disable-line react-hooks/exhaustive-deps
+  /** The workspace whose plan and ideas are on screen: in its view, or in a
+   *  place's dock. */
+  const wsFor = wsOpen ?? (dockShown && shownTab === "workspace" ? placeWs?.id ?? null : null);
   // What the plan and the ideas say: read again on every list change and every
   // change in the ideas folder (`ideas:changed`). Ideas' own rows, its beta.
   useEffect(() => {
-    if (!ideasOn || !wsOpen) return;
+    if (!ideasOn || !wsFor) return;
     const un = listen("ideas:changed", () => setIdeasTick((n) => n + 1));
     return () => { un.then((f) => f()).catch(() => {}); };
-  }, [ideasOn, wsOpen]);
+  }, [ideasOn, wsFor]);
   useEffect(() => {
-    if (!ideasOn || !wsOpen) { setWsOv(null); return; }
+    if (!ideasOn || !wsFor) { setWsOv(null); return; }
     let alive = true;
-    invoke<Overview>("workspace_overview", { id: wsOpen })
-      .then((ov) => { if (alive) setWsOv({ id: wsOpen, ov, error: null }); })
-      .catch((e) => { if (alive) setWsOv({ id: wsOpen, ov: null, error: String(e) }); });
+    invoke<Overview>("workspace_overview", { id: wsFor })
+      .then((ov) => { if (alive) setWsOv({ id: wsFor, ov, error: null }); })
+      .catch((e) => { if (alive) setWsOv({ id: wsFor, ov: null, error: String(e) }); });
     invoke<{ ideas: { id: string | null; title: string; kind?: "idea" | "plan"; problem?: string }[] }>("ideas_list")
       .then((l) => { if (alive) setIdeaDocs(l.ideas.filter((d) => d.id && !d.problem).map((d) => ({ id: d.id!, title: d.title, kind: d.kind === "plan" ? "plan" : "idea" }))); })
       .catch(() => { if (alive) setIdeaDocs([]); });
     return () => { alive = false; };
-  }, [ideasOn, wsOpen, wsList, ideasTick]);
+  }, [ideasOn, wsFor, wsList, ideasTick]);
   /** Open a plan or an idea in the workspace shown: its own plan on the Plan
    *  tab, anything else on Ideas (linked there or not). */
   /** ‹ › in a memory file: the files read there, one step. */
@@ -7007,12 +7046,7 @@ function App() {
   };
   /** Why a link in a memory file goes nowhere. */
   const memView = wsShown ? wsMem.of(wsShown.id) : undefined;
-  const memLinkNote = useCallback((from: string, href: string): string | null => {
-    if (/^#?idea:/.test(href)) return null;
-    const l = memoryLink(from, href);
-    if (l.kind === "none") return l.why;
-    return l.kind === "file" && memView && !memView.truncated && !fileOf(memView, l.path) ? `There is no ${l.path} in this memory.` : null;
-  }, [memView]);
+  const memLinkNote = useCallback((from: string, href: string) => memNote(memView, from, href), [memView]);
   // "It is still open in its workspace" is answered by going there.
   const docWaits = useRef<string | null>(null);
   useEffect(() => {
@@ -7772,6 +7806,7 @@ function App() {
   };
   const placeCtx = (e: React.MouseEvent, repo: string, p: Place) => {
     e.preventDefault();
+    ctxCard.current = e.currentTarget.matches("li.row") ? e.currentTarget.closest<HTMLElement>("[data-ws-id]")?.dataset.wsId ?? null : undefined;
     e.stopPropagation();
     setMenu(null);
     setConfirmRm(null);
@@ -8857,7 +8892,7 @@ function App() {
     const row = navScrollRef.current?.querySelector<HTMLElement>(`li.row[data-slug]:not(.pending)${q ? ", [data-testid=ws-chat-row]" : ""}`);
     if (row?.dataset.chat) { row.click(); return; }
     const repo = row?.closest<HTMLElement>("[data-project-root]")?.dataset.projectRoot;
-    if (repo && row?.dataset.slug) selectSlug(repo, row.dataset.slug);
+    if (repo && row?.dataset.slug) { fromRow(row, repo, row.dataset.slug); selectSlug(repo, row.dataset.slug); }
     hideNav();
   };
 
@@ -8992,6 +9027,7 @@ function App() {
     },
   };
   const navKey = navLoc ? locKey(navLoc) : null;
+  if (wsLoc) wsWas.current[wsLoc.id] = wsLoc;
   const navLocRef = useRef(navLoc);
   navLocRef.current = navLoc;
   const commitHist = useCallback((f: (h: NavHistory) => NavHistory) => {
@@ -9252,7 +9288,45 @@ function App() {
     bringProject: (name) => { const p = ovHere?.projects?.find((x) => x.name === name); if (p && ovHere?.plan?.live) bringProject(ovHere.plan.live, wsHere, p); },
     review: setWorkReview,
     linkPlace: setWorkPick,
-    showPlace: selectSlug,
+    showPlace: (repo, slug) => { fromWs(repo, slug, wsHere || null); selectSlug(repo, slug); },
+  };
+  /** The crumb: the workspace, where you were in it. */
+  const backToWs = (id: string) => {
+    const was = wsWas.current[id];
+    void showWs(id, was?.tab ?? "overview", { doc: was?.doc, chat: was?.chat ?? null });
+  };
+  /** A place's workspace in the dock. */
+  const dockWorkspace = () => {
+    if (!placeWs) return <PickPlaceWs rows={placeWsAll} pick={(id) => { if (sel) fromWs(sel.repo, sel.slug, id); }} />;
+    const id = placeWs.id;
+    const tabs = docChips({ ideas: ideasOn, chats: wsChatsOn });
+    const tab = tabs.includes(dockDoc) ? dockDoc : tabs[0];
+    const ideas = (wsOv?.id === id ? wsOv.ov?.ideas.flatMap((i) => (i.live ? [{ id: i.live, title: i.title ?? "" }] : [])) : undefined)
+      ?? (placeWs.ideas ?? []).map((i) => ({ id: i, title: ideaDocs.find((d) => d.id === i)?.title ?? "" }));
+    const idea = tabDoc(id, "ideas")?.name ?? null;
+    const trail = wsTrail[id] ?? trailStart(), prev = trailStep(trail, -1);
+    const toFile = (path: string) => setWsTrail((t) => ({ ...t, [id]: trailTo(t[id] ?? trailTo(trailStart(), "MEMORY.md"), path) }));
+    return (
+      <WorkspaceDock ws={{ id, name: placeWs.name }} tabs={tabs} tab={tab} setTab={setDockDoc} plan={tabDoc(id, "plan")} ideas={ideas} idea={idea}
+        setIdea={(i) => setWsPick((p) => ({ ...p, [id]: i }))} ideaTarget={(i) => ({ source: ideaSource, name: i })}
+        memory={{ view: wsMem.of(id), error: wsMem.error(id), path: memPath(id), open: toFile, back: prev ? () => setWsTrail((t) => ({ ...t, [id]: prev })) : null, tick: wsMem.tick(id), retry: () => void wsMem.refresh(id),
+          linkNote: (from, href) => memNote(wsMem.of(id), from, href) }}
+        ago={ago}
+        follow={(to) => {
+          if (to.source !== ideaSource) { setDockDoc("memory"); toFile(to.name); return; }
+          if (!ideasOn) { setNotice("That is an idea, and Ideas is off (Settings → General → Beta features)."); return; }
+          if (to.name === tabDoc(id, "plan")?.name) setDockDoc("plan"); else { setDockDoc("ideas"); setWsPick((p) => ({ ...p, [id]: to.name })); }
+        }}
+        edit={(t, name) => void showWs(id, t, { doc: t === "plan" ? undefined : name ?? undefined, startIn: "edit", chat: null })}
+        float={ideasOn ? (to) => void (async () => {
+          // One document, one editor: what is open here of it is saved and closed.
+          const cur = mainDocRef.current;
+          if (sameDoc(cur, to) && !(await leaveMainDoc())) { setNotice("It is open in its workspace with text that is not saved."); return; }
+          setFloated({ ...to, title: ideaDocs.find((d) => d.id === to.name)?.title ?? "It" });
+          openIdeaDoc(to.name);
+        })() : null}
+        reveal={(path) => { revealOnHost(path).catch((e) => fail(e)); }} />
+    );
   };
 
   // ── nav resizer (drag the nav's INNER edge — the one facing the terminal) ──
@@ -9492,7 +9566,7 @@ function App() {
         // ▸ button below, the topbar/empty-state Enter, or the ctx menu). The
         // first click of a double-click selects and the second enters — enterPlace
         // selects as well, so the pair lands on the same place either way.
-        onClick={() => { selectPlace(repo, p); hideNav(); }}
+        onClick={(e) => { fromRow(e.currentTarget, repo, p.slug); selectPlace(repo, p); hideNav(); }}
         onDoubleClick={() => { enterPlace(repo, p); hideNav(); }}
         onContextMenu={(e) => placeCtx(e, repo, p)}
         onPointerDown={draggable ? (e) => arm(e, { kind: "place", repo, slug: p.slug }) : undefined}
@@ -9538,7 +9612,7 @@ function App() {
               className="row-enter"
               title="Enter — open the session"
               data-track="nav.row.enter"
-              onClick={(e) => { e.stopPropagation(); enterPlace(repo, p); hideNav(); }}
+              onClick={(e) => { e.stopPropagation(); fromRow(e.currentTarget, repo, p.slug); enterPlace(repo, p); hideNav(); }}
             >
               <Icons.ChevronRight size={12} />
             </button>
@@ -9978,9 +10052,11 @@ function App() {
     // Rendered only for a project that resolved to GitHub (`prsOn`) — see the
     // rail's map below. A GitLab or local-only project gets no icon at all.
     { key: "prs" as Settings["dock_tab"], track: "dock.prs", icon: <Icons.GitPullRequest size={17} />, title: "Pull requests" },
+    // Only for a place whose project a workspace holds.
+    { key: "workspace" as Settings["dock_tab"], track: "dock.workspace", icon: <Icons.Layers size={17} />, title: "Workspace" },
   ];
   // What `DockRailGroup` renders, wherever it is hosted (see there).
-  const dockRailItems: DockRailItem[] = DOCK_RAIL.filter((d) => d.key !== "prs" || prsOn);
+  const dockRailItems: DockRailItem[] = DOCK_RAIL.filter((d) => (d.key !== "prs" || prsOn) && (d.key !== "workspace" || placeWsAll.length > 0));
   const dockWhy = !dockEligible ? "select a place first" : !dockFits ? "window too narrow" : null;
   const onDockRailPick = (key: Settings["dock_tab"], on: boolean) => {
     if (key === "prs" && !on) prs.refresh(TAB_MAX_AGE_S);
@@ -10252,6 +10328,17 @@ function App() {
             <header className="topbar">
               {navButtons}
               <div className="identity">
+                {/* Which workspace: where its card was clicked, and the way back. */}
+                {placeWsAll.length > 0 && (
+                  <span className="wsd-crumb" data-ws-color={placeWs ? wsColorOf(placeWs) ?? undefined : undefined}>
+                    <button className="wsf-name" data-testid="place-ws" data-track="topbar.workspace"
+                      title={placeWs ? `Back to ${placeWs.name}` : "This project is in several workspaces"}
+                      onClick={(e) => { if (placeWs) backToWs(placeWs.id); else { const r = e.currentTarget.getBoundingClientRect(); setPlaceWsPick({ x: r.left, y: r.bottom + 4 }); } }}>
+                      <span className="wsd-crumb-in"><Icons.Layers size={13} /><span className="wsf-name-t">{placeWs ? placeWs.name : `${placeWsAll.length} workspaces ▾`}</span></span>
+                    </button>
+                    <span className="topbar-proj-sep" aria-hidden="true">▸</span>
+                  </span>
+                )}
                 {/* Which project this place belongs to — the same name the nav's
                     project header shows (`basename(root)`). `(main)` named after
                     its own project would read "x / ◆ x", so it says it once.
@@ -11037,7 +11124,7 @@ function App() {
                 )}
               </div>
               <div className="dock-body">
-                {shownTab === "prs" ? (
+                {shownTab === "workspace" ? dockWorkspace() : shownTab === "prs" ? (
                   // Keyed on the project: the list is the project's, the same
                   // from any of its places, so a place switch keeps its open
                   // groups.
@@ -11522,6 +11609,14 @@ function App() {
           onError={fail}
         />
       )}
+      {placeWsPick && sel && (
+        <CtxMenu x={placeWsPick.x} y={placeWsPick.y} onClose={() => setPlaceWsPick(null)}>
+          <div className="pop-hint">this project's workspaces</div>
+          {placeWsAll.map((w) => (
+            <button key={w.id} className="pop-item" data-testid="place-ws-pick" data-track="topbar.workspace.pick" data-ws={w.id} onClick={() => { setPlaceWsPick(null); fromWs(sel.repo, sel.slug, w.id); }}>{w.name}</button>
+          ))}
+        </CtxMenu>
+      )}
       {ideasOn && wsOpen && ovHere && workReview && (() => {
         const cur = ovItem(workReview.line);
         return (
@@ -11693,15 +11788,15 @@ function App() {
       {ctx?.kind === "place" && ctxPlace && (
         <CtxMenu x={ctx.x} y={ctx.y} onClose={closeCtx}>
           <div className="pop-hint">{ctxPlace.is_main ? "◆ main" : ctxPlace.slug}</div>
-          <button className="pop-item" onClick={() => enterPlace(ctx.repo, ctxPlace)}>Enter <Icons.ChevronRight size={12} /></button>
+          <button className="pop-item" onClick={() => { if (ctxCard.current !== undefined) fromWs(ctx.repo, ctxPlace.slug, ctxCard.current); enterPlace(ctx.repo, ctxPlace); }}>Enter <Icons.ChevronRight size={12} /></button>
           {groupChatOn && shareStart(ctx.repo, ctxPlace.slug) && (
             <button className="pop-item" data-testid="ctx-share" onClick={() => { const r = ctx.repo, sl = ctxPlace.slug; closeCtx(); openShareDialog(r, sl); }}>Share this session…</button>
           )}
           {!ctxPlace.tmux_session.up && ctxPlace.claude_session_present && (
             settings.ai_auto_resume ? (
-              <button className="pop-item" onClick={() => enterPlace(ctx.repo, ctxPlace, { fresh: true })}>Open fresh (skip resume)</button>
+              <button className="pop-item" onClick={() => { if (ctxCard.current !== undefined) fromWs(ctx.repo, ctxPlace.slug, ctxCard.current); enterPlace(ctx.repo, ctxPlace, { fresh: true }); }}>Open fresh (skip resume)</button>
             ) : (
-              <button className="pop-item" onClick={() => enterPlace(ctx.repo, ctxPlace, { fresh: false })}>Open with resume</button>
+              <button className="pop-item" onClick={() => { if (ctxCard.current !== undefined) fromWs(ctx.repo, ctxPlace.slug, ctxCard.current); enterPlace(ctx.repo, ctxPlace, { fresh: false }); }}>Open with resume</button>
             )
           )}
           {ctxPlace.tmux_session.up && (
