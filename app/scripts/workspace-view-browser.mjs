@@ -386,6 +386,32 @@ async function elsewhere(page, tag) {
   await other.close();
 }
 
+/** Quit on a workspace's tab, and opened again. */
+async function relaunch(page, tag) {
+  for (const [on, want] of [[true, "ideas"], [false, null]]) {
+    const p = await page.context().newPage();
+    await p.addInitScript(([s]) => { if (!sessionStorage.getItem("wt-mock-ui-state")) sessionStorage.setItem("wt-mock-ui-state", JSON.stringify(s)); },
+      [{ places_side: "left", dock_side: "right", settings_rev: 5, nav_pinned: true, nav_view: "workspaces", beta_ideas: true, beta_workspace_chats: true, restore_last: on }]);
+    await p.goto(`${BASE}/?ideas=seed&workspaces=1`);
+    await p.waitForSelector("[data-testid=ws-group]");
+    await p.waitForTimeout(800);
+    await p.locator("[data-testid=ws-chat-row]", { hasText: "Release order" }).first().click();
+    await p.click("[data-testid=ws-tab][data-tab=ideas]");
+    await p.waitForTimeout(300);
+    await p.reload();
+    await p.waitForSelector("[data-testid=ws-group]");
+    await p.waitForTimeout(800);
+    const got = await p.evaluate(() => [document.querySelector("[data-testid=ws-tab].on")?.dataset.tab ?? null, document.querySelector(".wsc-name-t")?.textContent ?? null, document.querySelector("[data-testid=nav-back]")?.disabled]);
+    ok(JSON.stringify(got.slice(0, 2)) === JSON.stringify(want ? ["ideas", "Release order"] : [null, null]), `${tag} restore last ${on ? "on: the workspace, its tab and its chat" : "off: Home, as for a place"} (${JSON.stringify(got)})`);
+    if (on) ok(got[2] === true, `${tag} …and launching is not a step to go back from`);
+    // Home is what is restored after Home.
+    await p.click(".home-item");
+    await p.waitForTimeout(200);
+    ok(await p.evaluate(() => localStorage.getItem("wt.last.view")) === null, `${tag} leaving it forgets it`);
+    await p.close();
+  }
+}
+
 async function layout(page, tag, name) {
   await setup(page, ["beta_ideas", "beta_workspace_chats"]);
   for (const [w, h] of [[1600, 1000], [1440, 900], [1200, 800], [900, 700]]) {
@@ -455,7 +481,7 @@ async function themes(page, tag, name) {
 const only = process.env.ONLY?.split(",");
 for (const [engine, name] of [[chromium, "chromium"], [webkit, "webkit"]]) {
   const browser = await engine.launch();
-  for (const part of [gates, frame, history, life, removed, orphan, elsewhere, layout, themes]) {
+  for (const part of [gates, frame, history, life, removed, orphan, elsewhere, relaunch, layout, themes]) {
     if (only && !only.includes(part.name)) continue;
     const page = await (await browser.newContext({ viewport: { width: 1440, height: 900 } })).newPage();
     const errors = [];

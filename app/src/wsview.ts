@@ -55,6 +55,20 @@ export function attentionOf(a: {
   return out;
 }
 
+/** The workspace view as it was at the last quit, for the launch restore (the
+ *  same switch a place's is: Settings' "restore last"). Browser storage, read as
+ *  anything may be in it. */
+export const LAST_VIEW_KEY = "wt.last.view";
+export type LastView = { id: string; tab: WsTab; doc?: string; chat?: string };
+const TABS: readonly string[] = ["overview", "memory", "plan", "ideas", "chats"];
+export function lastView(raw: string | null): LastView | null {
+  try {
+    const v = JSON.parse(raw ?? "null") as Record<string, unknown> | null;
+    if (!v || typeof v.id !== "string" || !v.id || typeof v.tab !== "string" || !TABS.includes(v.tab)) return null;
+    return { id: v.id, tab: v.tab as WsTab, ...(typeof v.doc === "string" && v.doc ? { doc: v.doc } : {}), ...(typeof v.chat === "string" && v.chat ? { chat: v.chat } : {}) };
+  } catch { return null; }
+}
+
 /** The counts beside a workspace's name. */
 export const wsCounts = (projects: number, liveChats = 0): string =>
   `${projects} project${projects === 1 ? "" : "s"}${liveChats ? ` · ${liveChats} chat${liveChats === 1 ? "" : "s"} live` : ""}`;

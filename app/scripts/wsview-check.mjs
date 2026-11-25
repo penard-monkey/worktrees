@@ -41,6 +41,7 @@ eq("more than one: the count and the first", V.attentionOf({ ...none, problems: 
 eq("a plan that cannot be read has no problems to count", V.attentionOf({ ...none, problems: ["Line 3: x"], planError: "it is gone" }), [{ kind: "plan", text: "The plan cannot be read: it is gone." }]);
 eq("the document first", V.attentionOf({ unsaved: { title: "P", elsewhere: null }, problems: ["L"], planError: null }).map((a) => a.kind), ["unsaved", "plan"]);
 
+eq("the last view, as anything may be stored", ['{"id":"w","tab":"ideas","doc":"i1","chat":"c1","x":1}', '{"id":"w","tab":"settings"}', '{"tab":"plan"}', "{", "null", null].map(V.lastView), [{ id: "w", tab: "ideas", doc: "i1", chat: "c1" }, null, null, null, null, null]);
 eq("a tab that is not drawn is Overview", [V.tabOr("plan", ["overview", "memory"]), V.tabOr("memory", ["overview", "memory"])], ["overview", "memory"]);
 eq("a chat that waits is first, one line each", V.attentionOf({ ...none, unsaved: { title: "P", elsewhere: null }, chats: [{ conv: "c1", title: "Who", failed: false }, { conv: "c2", title: "Sub", failed: true }] }).map((a) => a.text),
   ["“Who” is waiting for an answer.", "The fold of “Sub” did not finish.", "“P” has text that is not saved."]);

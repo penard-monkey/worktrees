@@ -86,7 +86,7 @@ import { fileOf, longIndex, notePath, sizeWords, trailStart, trailStep, trailTo,
 import { memoryDocs } from "./doc/memory";
 import { memoryLink } from "./doc/memorypath";
 import { navRows, type ChatRow } from "./wschats";
-import { attentionOf, docChips, rollupOf, tabOr, wsCounts, wsFrameOn, wsTabs, type Rollup } from "./wsview";
+import { attentionOf, docChips, LAST_VIEW_KEY, lastView, rollupOf, tabOr, wsCounts, wsFrameOn, wsTabs, type LastView, type Rollup } from "./wsview";
 import { MainDocument, type MainDocApi } from "./doc/MainDocument";
 import { ideaDocs as ideaSource, sameDoc, type DocTarget } from "./doc/source";
 import { remoteHostLabel, remoteTitle, remoteWebUrl } from "./remote";
@@ -8911,8 +8911,22 @@ function App() {
     // toggle off, so enabling it later can't yank the selection mid-session
     if (!settings.restore_last) return;
     if (sel) return; // user already clicked — don't override their choice
+    // The workspace view it was quit on, once the workspaces are here.
+    let view: LastView | null = null;
+    try { view = lastView(window.localStorage.getItem(LAST_VIEW_KEY)); } catch { /* no storage */ }
+    if (view && frameOn) { setWsRestore(view); return; }
     if (restoreTarget) setSel({ repo: restoreTarget.pv.root, slug: restoreTarget.p.slug });
   }, [ws, settings.restore_last, restoreTarget, sel]);
+  const [wsRestore, setWsRestore] = useState<LastView | null>(null);
+  useEffect(() => {
+    if (!wsRestore || !wsList) return;
+    setWsRestore(null);
+    if (sel || wsOpen) return; // something was clicked meanwhile
+    navAmend.current = true;
+    if (wsById(wsRestore.id)) void showWsRef.current(wsRestore.id, wsRestore.tab, { doc: wsRestore.doc, chat: wsRestore.chat ?? null });
+    else if (restoreTarget) setSel({ repo: restoreTarget.pv.root, slug: restoreTarget.p.slug });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once, when the list is here
+  }, [wsRestore, wsList]);
 
   // ── navigation history: ‹ › and ⌘[ ⌘] / ⌘← ⌘→ ─────────────────────────────
   // OBSERVED, not instrumented: the location is derived from the state that
@@ -9003,6 +9017,16 @@ function App() {
    *  does: the next observed change amends the current entry instead of
    *  pushing one. */
   const navAmend = useRef(false);
+  // What a relaunch restores: the workspace view when that is what is shown. A
+  // place, or Home, leaves it to the place's own rule.
+  useEffect(() => {
+    if (!restoredOnce.current || !navLoc || wsRestore) return;
+    try {
+      if (navLoc.ws) window.localStorage.setItem(LAST_VIEW_KEY, JSON.stringify(navLoc.ws));
+      else window.localStorage.removeItem(LAST_VIEW_KEY);
+    } catch { /* nothing is restored */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navKey, !!ws, wsRestore]);
   useEffect(() => {
     if (!restoredOnce.current || !navLoc) return;
     const ap = navApplying.current;
