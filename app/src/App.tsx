@@ -86,8 +86,8 @@ import { useWsMemory } from "./useWsMemory";
 import { fileOf, longIndex, memoryPicks, nameAt, sizeWords, trailStart, trailStep, trailTo, type Trail } from "./wsmemory";
 import { memoryDocs, type MemoryView } from "./doc/memory";
 import { linkTo, memoryLink } from "./doc/memorypath";
-import { navRows, type ChatRow } from "./wschats";
-import { attentionOf, docChips, LAST_VIEW_KEY, lastView, placeWorkspace, placeWorkspaces, PLACE_WS_KEY, placeWsRead, placeWsSet, rollupOf, tabsWith, tabOr, wsCounts, wsFrameOn, wsTabs, type LastView, type Rollup } from "./wsview";
+import { navRows, needsYouKeys, needsYouWords, type ChatRow } from "./wschats";
+import { attentionOf, chatActivity, placeActivity, docChips, LAST_VIEW_KEY, lastView, placeWorkspace, placeWorkspaces, PLACE_WS_KEY, placeWsRead, placeWsSet, rollupOf, tabsWith, tabOr, wsCounts, wsFrameOn, wsTabs, type LastView, type Rollup } from "./wsview";
 import { answer, ask, DOCK, FLOAT, take, windowEnv, type Ask, type HandDoc } from "./doc/handoff";
 import { MainDocument, type MainDocApi } from "./doc/MainDocument";
 import { ideaDocs as ideaSource, ideaHand, sameDoc, type DocTarget } from "./doc/source";
@@ -1529,7 +1529,7 @@ function QuickSwitch({ open, items, more, rank, busyPaths, waitingPaths, draftPa
                 );
               }
               const { pv, p } = it;
-              const act = busyPaths.has(p.path) ? "busy" : waitingPaths.has(p.path) ? "waiting" : "";
+              const act = placeActivity(busyPaths, waitingPaths, p.path);
               const draft = draftPaths.get(p.path);
               return (
                 <div
@@ -5297,8 +5297,7 @@ function App() {
     const un = listen<{ waiting?: string[] }>("ideas:sessions", (e) => setIdeaWaiting((e.payload?.waiting?.length ?? 0) > 0));
     return () => { un.then((f) => f()).catch(() => {}); };
   }, []);
-  const activityOf = (p: Place): "busy" | "waiting" | "" =>
-    busyPaths.has(p.path) ? "busy" : waitingPaths.has(p.path) ? "waiting" : "";
+  const activityOf = (p: Place): "busy" | "waiting" | "" => placeActivity(busyPaths, waitingPaths, p.path);
 
   // The UNSENT prompt: text typed at claude's prompt and never sent. Nothing in
   // the probe file says so (an unsent draft leaves `status: "idle"`, exactly
@@ -6704,6 +6703,21 @@ function App() {
   const wsChats = useWsChats(wsChatsOn && !!wsList, useMemo(() => (wsList?.workspaces ?? []).map((w) => w.id), [wsList]), wsList);
   const wsMem = useWsMemory(wsChatsOn && !!wsList, useMemo(() => (wsList?.workspaces ?? []).map((w) => w.id), [wsList]));
   const chatWaits = (wsList?.workspaces ?? []).some((w) => wsChats.rows(w.id).some((x) => x.state === "waiting"));
+  // A workspace chat, or its fold, that stops on a person is told like a
+  // place's agent: the same setting, and notify.ts's once-only rule on a set
+  // of its own (`needsYouKeys`), so a reload or a replayed push is a baseline.
+  // Its own notifier, so a session name never meets a place's path.
+  const chatNotifier = useRef(newNotifier());
+  useEffect(() => {
+    const ev = wsChats.sessions;
+    if (!ev) { chatNotifier.current = newNotifier(); return; }
+    const names = (id: string, conv: string) => ({ ws: wsById(id)?.name ?? null, chat: wsChats.of(id)?.chats.find((c) => c.id === conv)?.title ?? null });
+    for (const key of onWaitingSnapshot(chatNotifier.current, needsYouKeys(ev), Date.now(), notifyMode.current, document.visibilityState === "hidden")) {
+      const { title, body } = needsYouWords(key, ev, names);
+      notify(title, body);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wsChats.sessions]);
   // Re-read whenever the registry's roots change: "not registered" is the
   // registry's answer, joined in by the row.
   const wsRegKey = (ws?.projects ?? []).map((pv) => pv.root).join("\n");
@@ -9956,7 +9970,7 @@ function App() {
           const chats = wsChatsOn ? wsChats.rows(w.id) : [];
           const rollup = rollupOf([
             ...places.map((p) => ({ a: activityOf(p) as string, done: doneOf(p) === 1 })),
-            ...chats.map((r) => ({ a: r.state === "waiting" || r.state === "fold-failed" ? "waiting" : r.state === "busy" || r.state === "folding" || r.state === "checking" ? "busy" : "", done: false })),
+            ...chats.map((r) => ({ a: chatActivity(r.state), done: false })),
           ], (x) => x.a, (x) => x.done);
           const dropOn = (drag?.target?.kind === "ws-add" || drag?.target?.kind === "ws-plan" || drag?.target?.kind === "ws-idea") && drag.target.id === w.id;
           const dragged = drag?.item.kind === "workspace" && drag.item.id === w.id;

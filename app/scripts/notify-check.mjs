@@ -68,6 +68,12 @@ const eq = (got, want, what) => (JSON.stringify(got) === JSON.stringify(want) ? 
   else ok("sessions:busy feeds notify.ts");
   if (!/onDone\(notifier\.current, e\.payload\.path/.test(done)) fail("App's sessions:done listener does not feed notify.ts");
   else ok("sessions:done feeds notify.ts");
+  // A workspace chat or its fold on a prompt is told the same way, on a
+  // notifier of its own and under the same setting.
+  const ws = app.slice(app.indexOf("const chatNotifier = useRef(newNotifier());"), app.indexOf("}, [wsChats.sessions]);"));
+  if (!/onWaitingSnapshot\(chatNotifier\.current, needsYouKeys\(ev\), Date\.now\(\), notifyMode\.current, document\.visibilityState === "hidden"\)/.test(ws) || !/notify\(title, body\)/.test(ws)) fail("App's workspaces:sessions does not feed notify.ts (needsYouKeys) under the same setting");
+  else if (!/if \(!ev\) \{ chatNotifier\.current = newNotifier\(\); return; \}/.test(ws)) fail("turning workspace chats off does not reset their notifier: the next push would be news, not a baseline");
+  else ok("workspaces:sessions feeds notify.ts on its own notifier, under the same setting");
   const srcDir = fileURLToPath(new URL("../src/", import.meta.url));
   const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => e.isDirectory() ? (e.name === "mock" ? [] : walk(d + e.name + "/")) : /\.tsx?$/.test(e.name) ? [d + e.name] : []);
   const files = walk(srcDir);

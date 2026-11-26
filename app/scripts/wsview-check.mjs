@@ -31,6 +31,13 @@ eq("done", roll("", "done"), "done");
 eq("nothing", roll("", ""), "");
 eq("no items", roll(), "");
 
+// ── one place's mark: its agents roll up, and one waiting beats one working ──
+eq("a place with a working and a waiting agent is waiting", V.placeActivity(new Set(["/p"]), new Set(["/p"]), "/p"), "waiting");
+eq("…working alone, waiting alone, neither", [V.placeActivity(new Set(["/p"]), new Set(), "/p"), V.placeActivity(new Set(), new Set(["/p"]), "/p"), V.placeActivity(new Set(["/q"]), new Set(["/q"]), "/p")], ["busy", "waiting", ""]);
+// ── a chat's part in its workspace's dot ──
+eq("a chat's row state as the card's dot reads it", ["waiting", "fold-failed", "busy", "folding", "checking", "running", "ended"].map(V.chatActivity), ["waiting", "waiting", "busy", "busy", "busy", "", ""]);
+eq("a waiting chat under a working lane: the card is amber", roll(V.placeActivity(new Set(["/l"]), new Set(), "/l"), V.chatActivity("waiting")), "waiting");
+
 // ── the attention line ──
 const none = { unsaved: null, problems: [], planError: null };
 eq("nothing needs anybody", V.attentionOf(none), []);

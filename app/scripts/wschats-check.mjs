@@ -104,5 +104,27 @@ eq("…a document, the rules, and what this build does not know", [...["unlinked
   eq("a fold that landed and is ending its session is drawn as landed", [W.rowOf({ ...c, fold: { ...done, closing: true } }, null, null), W.rowOf({ ...c, fold: done }, null, null), W.rowOf({ ...c, fold: { ...done, closing: true }, fold_now: { state: "folding", why: null } }, null, null)].map((r) => [r.state, r.live]), [["ended", false], ["running", true], ["folding", true]]);
 }
 
+// ── the model in the header ──
+{
+  const c = chat("m", { session: "s~m" });
+  eq("a live chat names the push's model", W.modelOf(c, ev({ live: ["s~m"], model: { "s~m": "Opus 5.5" } }), true), "Opus 5.5");
+  eq("…an ended one names none, nor does a push without one, nor an older engine's", [W.modelOf(c, ev({ model: { "s~m": "Opus 5.5" } }), false), W.modelOf(c, ev({ live: ["s~m"], model: {} }), true), W.modelOf(c, ev({ live: ["s~m"] }), true), W.modelOf(c, null, true)], [null, null, null, null]);
+}
+
+// ── what needs a person, told when the window is away (notify.ts decides once) ──
+{
+  const of = { "s~a": { workspace: "W1", chat: "a" }, "s~b": { workspace: "W1", chat: "b" }, "s~c": { workspace: "W2", chat: "c" } };
+  const e = ev({ live: ["s~a", "s~b", "s~c"], busy: ["s~b"], waiting: ["s~a", "s~c"], chat_of: of,
+    fold: { "s~c": { workspace: "W2", chat: "c", state: "waiting", why: null }, "s~d": { workspace: "W2", chat: "d", state: "failed", why: "no note in five minutes" }, "s~b": { workspace: "W1", chat: "b", state: "folding", why: null } } });
+  eq("every waiting chat, a fold on a prompt, and a failed fold; a busy or folding one is no news", W.needsYouKeys(e), ["failed|s~d", "waiting|s~a", "waiting|s~c"]);
+  eq("a fold that says waiting before the session set does is waiting", W.needsYouKeys(ev({ fold: { "s~x": { workspace: "W", chat: "x", state: "waiting", why: null } } })), ["waiting|s~x"]);
+  eq("nothing waits: nothing", [W.needsYouKeys(ev({ live: ["s~a"], busy: ["s~a"] })), W.needsYouKeys(null)], [[], []]);
+  const names = (ws, conv) => ({ ws: ws === "W1" ? "Jellyfin" : ws === "W2" ? "Homelab" : null, chat: conv === "a" ? "Who can see what" : conv === "c" ? "Release order" : conv === "d" ? "Storage" : null });
+  eq("a waiting chat, in its words", W.needsYouWords("waiting|s~a", e, names), { title: "A workspace chat is waiting for you", body: "“Who can see what” in Jellyfin stopped on a question." });
+  eq("a fold on a prompt says it is the fold", W.needsYouWords("waiting|s~c", e, names), { title: "A workspace chat is waiting for you", body: "The fold of “Release order” in Homelab stopped on a question." });
+  eq("a failed fold, in the engine's words", W.needsYouWords("failed|s~d", e, names), { title: "A fold did not finish", body: "“Storage” in Homelab: no note in five minutes." });
+  eq("a chat this window has not read yet is still told", W.needsYouWords("waiting|s~z", ev({ waiting: ["s~z"], chat_of: { "s~z": { workspace: "W9", chat: "z" } } }), names), { title: "A workspace chat is waiting for you", body: "A chat of a workspace stopped on a question." });
+}
+
 if (failed) { console.log(`\nwschats-check: ${failed} failed`); process.exit(1); }
 console.log("wschats-check: all ok");
