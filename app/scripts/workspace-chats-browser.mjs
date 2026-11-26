@@ -358,7 +358,7 @@ async function themes(page, tag, name) {
         const bgOf = (el) => { const st = []; for (let e = el; e; e = e.parentElement) { const c = parse(getComputedStyle(e).backgroundColor); if (c[3] > 0) st.push(c); if (c[3] >= 1) break; } let acc = [255, 255, 255, 1]; for (const c of st.reverse()) acc = over(c, acc); return acc; };
         const lum = (c) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); };
         const ratio = (el) => { const bg = bgOf(el); const [a, b] = [lum(over(parse(getComputedStyle(el).color), bg)), lum(bg)].sort((p, q) => q - p); return (a + 0.05) / (b + 0.05); };
-        return [...document.querySelectorAll(".wsc-title, .wsc-age.strong, .wsc-all, .wsc-name-t, .wsc-readsb, .wsc-head .ctrl:not(:disabled), .chat-intro, .wsc-when, .wsc-line .ws-ov-name, .wsc-item .ws-ov-name, .wsf-attn-t")]
+        return [...document.querySelectorAll(".wsc-title, .wsc-age.strong, .wsc-all, .wsc-name-t, .wsc-readsb, .wsc-head .ctrl:not(:disabled), .chat-intro, .wsc-model, .wsc-when, .wsc-line .ws-ov-name, .wsc-item .ws-ov-name, .wsf-attn-t")]
           .filter((e) => e.textContent.trim() && e.getBoundingClientRect().width).map((e) => [e.className + ": " + e.textContent.trim().slice(0, 24), ratio(e)]).filter(([, r]) => r < 4.5);
       });
       ok(low.length === 0, `${tag} ${theme} ${t}: its words read ≥ 4.5:1${low.length ? `: ${low.map(([a, r]) => `${a} ${r.toFixed(2)}`).join("; ")}` : ""}`);
@@ -375,6 +375,73 @@ async function themes(page, tag, name) {
   }
 }
 
+// The model in the chat's header, as a place's agent label names it, and a
+// `/model` switch shown by the next push with nothing reloaded. Measured at
+// the narrowest nav and a normal one, in a light theme too.
+async function model(page, tag, name) {
+  const ws = await boot(page, ["beta_workspace_chats", "beta_ideas"], { nav_width: 240 });
+  const conv = await row(page, "Release order").getAttribute("data-chat");
+  await row(page, "Release order").click();
+  await colOf(page, "Release order");
+  const words = () => page.evaluate(() => document.querySelector("[data-testid=ws-chat-model]")?.textContent ?? null);
+  ok(await until(page, () => document.querySelector("[data-testid=ws-chat-model]")?.textContent === "Claude Opus 5.5"), `${tag} the header names the chat's model (${await words()})`);
+  await page.evaluate(([w, c]) => window.__mock.wsChatModel(w, c, "Fable 5.2"), [ws, conv]);
+  ok(await until(page, () => document.querySelector("[data-testid=ws-chat-model]")?.textContent === "Claude Fable 5.2"), `${tag} a /model switch shows at the next push, with no restart`);
+  for (const [theme, width] of [["tokyo-night", 1440], ["tokyo-day", 1440], ["tokyo-day", 1100], ["catppuccin-latte", 900]]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.evaluate((t) => { if (t === "tokyo-night") delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = t; }, theme);
+    await page.waitForTimeout(200);
+    const m = await page.evaluate(() => {
+      const e = document.querySelector("[data-testid=ws-chat-model]"), head = document.querySelector(".wsc-head");
+      if (!e) return { gone: true, head: head.getBoundingClientRect().height };
+      const q = e.getBoundingClientRect(), hit = q.width ? document.elementFromPoint(q.x + Math.min(q.width / 2, 8), q.y + q.height / 2) : null;
+      const nav = document.querySelector(".nav")?.getBoundingClientRect().width ?? 0;
+      const ctrls = [...head.querySelectorAll("button")].filter((b) => !b.disabled).every((b) => { const r = b.getBoundingClientRect(); const h = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2); return r.width > 0 && h && (b === h || b.contains(h)); });
+      return { w: q.width, hit: !!hit && e.contains(hit), head: head.getBoundingClientRect().height, nav, ctrls, color: getComputedStyle(e).color };
+    });
+    ok((m.gone || (m.hit && m.w > 0)) && m.head < 42 && m.ctrls !== false, `${tag} ${theme} ${width}px (nav ${m.nav}): the model is on one header row and hit-tests, every control still reachable (${JSON.stringify(m)})`);
+    if (SHOTS && name === "webkit") await page.screenshot({ path: `${SHOTS}/wsc-model-${theme}-${width}.png` });
+  }
+  // Ended: no model.
+  await page.evaluate(([w, c]) => window.__mock.endChat(w, c), [ws, conv]);
+  ok(await until(page, () => !document.querySelector("[data-testid=ws-chat-model]")), `${tag} an ended chat names no model`);
+}
+
+// A chat, or its fold, that waits is told by a system notification while the
+// window is hidden, under the place agents' setting; never while it shows,
+// never in Off, never from the first push, and once.
+async function notified(page, tag) {
+  await page.addInitScript(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => (window.__hidden ? "hidden" : "visible") });
+  });
+  const ws = await boot(page, ["beta_workspace_chats", "beta_ideas"], { notify_hidden: "waiting" });
+  const sent = () => page.evaluate(() => window.__mock.notifications());
+  const hide = (h) => page.evaluate((h) => { window.__hidden = h; document.dispatchEvent(new Event("visibilitychange")); }, h);
+  await page.waitForTimeout(400);
+  ok((await sent()).length === 0, `${tag} what already waits at load is a baseline, not news`);
+  const rel = await row(page, "Release order").getAttribute("data-chat");
+  await hide(true);
+  await call(page, "workspace_send", { id: ws, conv: rel, text: "edit the index" });
+  ok(await until(page, () => window.__mock.notifications().length === 1, null, 4000), `${tag} a chat that stops on a prompt while the window is hidden is told`);
+  const [n] = await sent();
+  ok(n?.title === "A workspace chat is waiting for you" && n?.body === "“Release order” in Everything stopped on a question.", `${tag} …in words that name it and its workspace (${JSON.stringify(n)})`);
+  await page.evaluate(([w, c]) => window.__mock.wsChatModel(w, c, "Fable 5.2"), [ws, rel]);
+  await page.waitForTimeout(300);
+  ok((await sent()).length === 1, `${tag} a push that changes something else tells nothing again`);
+  const sto = await row(page, "Storage layout").getAttribute("data-chat");
+  await page.evaluate(([w, c]) => window.__mock.wsFold(w, c, "waiting"), [ws, sto]);
+  ok(await until(page, () => window.__mock.notifications().length === 2, null, 3000) && /^The fold of “Storage layout” in Everything stopped on a question\.$/.test((await sent())[1]?.body ?? ""), `${tag} a fold stopped on a prompt is told as the fold's (${JSON.stringify((await sent())[1])})`);
+  await page.evaluate(([w, c]) => window.__mock.wsFold(w, c, "failed", "no note in five minutes"), [ws, sto]);
+  ok(await until(page, () => window.__mock.notifications().length === 3, null, 3000) && (await sent())[2]?.title === "A fold did not finish", `${tag} and a fold that failed (${JSON.stringify((await sent())[2])})`);
+  await page.evaluate(([w, c]) => window.__mock.wsFold(w, c, null), [ws, sto]);
+  await hide(false);
+  const first = await row(page, "First look").getAttribute("data-chat");
+  await call(page, "workspace_chat_resume", { id: ws, conv: first });
+  await call(page, "workspace_send", { id: ws, conv: first, text: "change a line" });
+  await until(page, (c) => document.querySelector(`[data-chat='${c}']`)?.dataset.state === "waiting", first, 4000);
+  ok((await sent()).length === 3, `${tag} nothing while the window shows`);
+}
+
 async function off(page, tag) {
   await boot(page, ["beta_ideas"]);
   await page.locator("[data-testid=ws-name]", { hasText: "Everything" }).first().click();
@@ -388,7 +455,7 @@ async function off(page, tag) {
 const only = process.env.ONLY?.split(",");
 for (const [engine, name] of [[chromium, "chromium"], [webkit, "webkit"]]) {
   const browser = await engine.launch();
-  for (const part of [nav, chat, start, narrow, back, trust, themes, off]) {
+  for (const part of [nav, chat, start, narrow, back, trust, themes, model, notified, off]) {
     if (only && !only.includes(part.name)) continue;
     const page = await (await browser.newContext({ viewport: { width: 1440, height: 900 } })).newPage();
     const errors = [];

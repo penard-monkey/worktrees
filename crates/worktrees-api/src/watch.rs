@@ -117,7 +117,7 @@ pub fn claude_activity(w: &Watch, panes: &mut tmux::PaneList, sessions: &str) ->
     let probes = worktrees_core::agent::live_probes_in(Some(&*panes));
     let tick = claude_activity_in(w, &probes, panes, tmux::ps_foreground, |targets| activity::capture_chain(sessions, targets));
     let ideas = idea_sessions_in(&probes, panes, |targets| activity::capture_chain(sessions, targets));
-    let chats = workspace_sessions_in(&probes, panes, |targets| activity::capture_chain(sessions, targets));
+    let chats = workspace_sessions_in(w, &probes, panes, |targets| activity::capture_chain(sessions, targets));
     (tick, ideas, chats)
 }
 
@@ -177,6 +177,11 @@ pub struct WorkspaceSessions {
     /// live or not: the ones running, and the failed ones until the chat is
     /// folded again or closed (`workspacefolds`).
     pub fold: std::collections::BTreeMap<String, FoldOf>,
+    /// Each live chat's model, display-named (`Opus 5.5`), by its session's
+    /// name: the newest reply or `/model` switch in its transcript
+    /// ([`claude_model`]), never its probe. A chat that has named none yet is
+    /// absent. In the payload, so a switch alone moves the push.
+    pub model: std::collections::BTreeMap<String, String>,
 }
 
 /// Which chat a session is.
@@ -242,12 +247,14 @@ impl WorkspaceSessions {
 
 /// [`WorkspaceSessions`] for one tick ([`desk_sessions_in`]).
 fn workspace_sessions_in(
+    w: &Watch,
     probes: &[worktrees_core::agent::ClaudeProbe],
     panes: &tmux::PaneList,
     capture: impl FnOnce(&[(String, String)]) -> Vec<(String, String, String)>,
 ) -> WorkspaceSessions {
     let [live, busy, waiting] = desk_sessions_in(worktrees_core::workspacechats::is_workspace_session, probes, panes, capture);
-    WorkspaceSessions { live, busy, waiting, ..WorkspaceSessions::default() }
+    let model = live.iter().filter_map(|s| Some((s.clone(), claude_model(w, probes, s)?))).collect();
+    WorkspaceSessions { live, busy, waiting, model, ..WorkspaceSessions::default() }
 }
 
 /// The live, busy and waiting sessions among those `mine` names, over one
@@ -1337,7 +1344,7 @@ mod tests {
         let mut probes: Vec<worktrees_core::agent::ClaudeProbe> =
             vec![serde_json::from_value(serde_json::json!({"pid": 1, "cwd": "/ws", "status": "busy", "tmux": format!("{a}:@1.%1")})).unwrap()];
         worktrees_core::agent::locate(&mut probes, &panes);
-        let got = workspace_sessions_in(&probes, &panes, |targets| {
+        let got = workspace_sessions_in(&Watch::default(), &probes, &panes, |targets| {
             assert_eq!(targets, [(b.clone(), b.clone())], "only the probe-less chat is captured");
             vec![(b.clone(), "claude".into(), TRUST.into())]
         })
@@ -1360,6 +1367,40 @@ mod tests {
         let gone = WorkspaceSessions { live: vec![a.clone()], waiting: vec![], ..got.clone() };
         assert_eq!(gone.ended_since(&got), vec![&ChatOf { workspace: ws, chat: cb }]);
         assert!(got.ended_since(&got).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A workspace chat's model is its transcript's (a reply, or a `/model`
+    /// switch, which shows at once), by the session the probe's pane is in;
+    /// a chat with no probe or no transcript yet names none. The model is in
+    /// the payload, so a switch alone moves the change-gated push.
+    #[test]
+    fn a_workspace_chats_model_is_its_transcripts_and_a_switch_shows_at_once() {
+        use worktrees_core::workspacechats as wc;
+        let root = std::env::temp_dir().join(format!("wt-watch-ws-model-{}", worktrees_core::ulid::new()));
+        let (a, b) = (wc::session_name(&worktrees_core::ulid::new()), wc::session_name(&worktrees_core::ulid::new()));
+        let pane = |s: &str, id: &str| tmux::Pane { session: s.into(), path: "/ws".into(), cmd: "claude".into(), id: Some(id.into()), ..tmux::Pane::default() };
+        let panes = tmux::PaneList::from_panes(vec![pane(&a, "%1"), pane(&b, "%2")]);
+        let mut probe: worktrees_core::agent::ClaudeProbe =
+            serde_json::from_value(serde_json::json!({"pid": 1, "cwd": "/ws", "status": "idle", "sessionId": "sid-a", "tmux": format!("{a}:@1.%1")})).unwrap();
+        probe.root = root.clone();
+        let mut probes = vec![probe];
+        worktrees_core::agent::locate(&mut probes, &panes);
+        let w = Watch::default();
+        let tick = || workspace_sessions_in(&w, &probes, &panes, |_| Vec::new());
+        assert!(tick().model.is_empty(), "no transcript yet: no model");
+        let file = Path::new(&worktrees_core::project::claude_dir_in(&root, "/ws")).join("sid-a.jsonl");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5-5\"}}\n").unwrap();
+        let first = tick();
+        assert_eq!(first.model, std::collections::BTreeMap::from([(a.clone(), "Opus 5.5".to_string())]), "the probe-less chat names none");
+        use std::io::Write;
+        let switch = serde_json::json!({"type":"user","message":{"role":"user","content":"<local-command-stdout>Set model to `Fable 5.2` for this session only</local-command-stdout>"}});
+        writeln!(std::fs::OpenOptions::new().append(true).open(&file).unwrap(), "{switch}").unwrap();
+        let switched = tick();
+        assert_eq!(switched.model.get(&a).map(String::as_str), Some("Fable 5.2"));
+        assert_ne!(first, switched, "a switch alone is a change the push is gated on");
+        assert_eq!(serde_json::to_value(&switched).unwrap()["model"], serde_json::json!({ a.clone(): "Fable 5.2" }));
         let _ = std::fs::remove_dir_all(&root);
     }
 

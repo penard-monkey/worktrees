@@ -2138,6 +2138,8 @@ type MockFold = { asked: string; asked_ms?: number; left?: number; state: string
 type MockChat = {
   id: string; harness: "claude"; session_id: string; title: string; started: string; last_activity: string; note: string;
   fold?: MockFold; note_exists: boolean; live: boolean; state: "idle" | "busy" | "waiting"; turns: MockConv["turns"]; prompt: MockConv["prompt"];
+  /** What its transcript names last (`watch::WorkspaceSessions::model`); none before a reply. */
+  model?: string;
 };
 const mockChats = new Map<string, MockChat[]>(); // workspace id → chats
 /** A live chat whose launch's rules are no longer what a launch would get:
@@ -2163,7 +2165,7 @@ function mockChatNew(id: string, title: string, startedMin: number, activeMin: n
   const started = isoAgo(startedMin);
   return {
     id, harness: "claude", session_id: crypto.randomUUID(), title, started, last_activity: isoAgo(activeMin),
-    note: "", note_exists: false, live: false, state: "idle", turns: [], prompt: null, ...extra,
+    note: "", note_exists: false, live: false, state: "idle", turns: [], prompt: null, model: "Opus 5.5", ...extra,
   };
 }
 const chatTurn = (n: number, minAgo: number, user: string | null, reply: string) =>
@@ -2205,6 +2207,7 @@ function chatSessionsPush() {
     live: live.map(({ c }) => chatSession(c)).sort(), busy: of("busy"), waiting: of("waiting"),
     chat_of: Object.fromEntries(live.map(({ w, c }) => [chatSession(c), { workspace: w, chat: c.id }])),
     fold: Object.fromEntries(mockChatFolds),
+    model: Object.fromEntries(live.filter(({ c }) => c.model).map(({ c }) => [chatSession(c), c.model!])),
   });
 }
 /** What the engine launches a chat on (`workspacechats::openers`); a fold's
@@ -7281,6 +7284,8 @@ let mockNotifyGranted = new URLSearchParams(location.search).get("notify") === "
     if (changes) mockStale.set(conv, changes); else mockStale.delete(conv);
     chatSessionsPush();
   },
+  /** A `/model` switch in a chat's transcript: the next push names it. */
+  wsChatModel: (id: string, conv: string, model: string | null) => { const c = chatOf(id, conv); c.model = model ?? undefined; chatSessionsPush(); },
   endChat: (id: string, conv: string) => { const c = chatOf(id, conv); c.live = false; c.prompt = null; chatSessionsPush(); },
   wsFold(id: string, conv: string, state: "folding" | "waiting" | "checking" | "failed" | "landed" | "nothing" | null, why: string | null = null) {
     const c = chatOf(id, conv);

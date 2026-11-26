@@ -15,6 +15,7 @@ import { useArmed } from "./useArmed";
 import {
   accessWords, activeAt, ageWords, asksTrust, endedLine, failedWords, firstMessage, foldOf, foldRuns, introWords, isDefaultTitle, monthOf, navRows, quietLine, readsWords, stateWords, titleFrom, transcriptGone, TRUST_WORDS, whenWords,
   type ChatRow, type DocRead, type ProjectRead, type RowState, type WsChat, type WsChats,
+  modelOf,
 } from "./wschats";
 import type { WsChatsLive } from "./useWsChats";
 import { RevertButton, useRevert } from "./WorkspaceMemory";
@@ -218,6 +219,7 @@ export function WorkspaceChatColumn(props: {
     if (t.trim() && t.trim() !== c.title) void act("rename it", () => live.rename(ws.id, conv, t.trim()), false);
   };
   const term = view === "terminal" && row.live;
+  const model = modelOf(c, live.sessions, row.live);
   return (
     <div className="wsc-col" data-testid="ws-chat-col" data-chat={conv} data-state={row.state}>
       <header className="wsc-head">
@@ -233,6 +235,7 @@ export function WorkspaceChatColumn(props: {
             <span className="wsc-name-in"><ChatDot state={row.state} /><span className="wsc-name-t">{c.title}</span><Icons.ChevronDown size={11} /></span>
           </button>
         )}
+        {model && <span className="agent-model wsc-model" data-testid="ws-chat-model" title="the model this chat last replied with">Claude {model}</span>}
         <button className="wsc-readsb" data-testid="ws-chat-readsb" data-track="workspace.chat.reads" title="Which projects this chat reads" aria-expanded={menu?.kind === "reads"} onClick={at("reads")}>{readsWords(info.projects)} ▾</button>
         {c.access === "stale" && <button className="wsc-stale-b" data-testid="ws-chat-stale-chip" title="What it may read has changed since it started" onClick={at("reads")}>its rules changed</button>}
         <span className="wsc-acts">

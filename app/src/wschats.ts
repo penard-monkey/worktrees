@@ -30,7 +30,42 @@ export type WsChats = { id: string; name: string; folder: string; chats: WsChat[
 export type WsSessionsEv = DeskEv & {
   chat_of: Record<string, { workspace: string; chat: string }>;
   fold: Record<string, { workspace: string; chat: string } & FoldNow>;
+  /** Each live chat's model, by session: its transcript's newest reply or
+   *  `/model` switch. Absent from an older engine's push. */
+  model?: Record<string, string>;
 };
+
+/** The model a chat's header names: a live chat's, as the push last said it. */
+export const modelOf = (c: WsChat, ev: WsSessionsEv | null, live: boolean): string | null => (live ? ev?.model?.[c.session] ?? null : null);
+
+/** What the workspaces' chats need a person for, from one push, as keys for
+ *  notify.ts's set: `waiting|<session>` for a chat stopped on a prompt (its
+ *  own, or its fold's: a fold runs Claude in the chat's session), and
+ *  `failed|<session>` for a fold that did not finish. Sorted. */
+export function needsYouKeys(ev: WsSessionsEv | null): string[] {
+  if (!ev) return [];
+  const waiting = new Set(ev.waiting);
+  const failed = new Set<string>();
+  for (const [s, f] of Object.entries(ev.fold ?? {})) {
+    if (f.state === "waiting") waiting.add(s);
+    else if (f.state === "failed") failed.add(s);
+  }
+  return [...[...failed].map((s) => `failed|${s}`), ...[...waiting].map((s) => `waiting|${s}`)].sort();
+}
+
+/** A key of [`needsYouKeys`] as a system notification. `names` gives a
+ *  workspace's and a chat's names where this window knows them. */
+export function needsYouWords(key: string, ev: WsSessionsEv, names: (ws: string, conv: string) => { ws: string | null; chat: string | null }): { title: string; body: string } {
+  const i = key.indexOf("|");
+  const kind = key.slice(0, i), s = key.slice(i + 1);
+  const f = ev.fold?.[s];
+  const of = ev.chat_of?.[s] ?? (f ? { workspace: f.workspace, chat: f.chat } : null);
+  const n = of ? names(of.workspace, of.chat) : { ws: null, chat: null };
+  const who = n.chat ? `“${n.chat}”${n.ws ? ` in ${n.ws}` : ""}` : null;
+  if (kind === "failed") return { title: "A fold did not finish", body: `${who ?? "A chat of a workspace"}: ${f?.why ?? "no reason was given"}`.replace(/([^.!?])$/, "$1.") };
+  const fold = !!f && (f.state === "waiting" || f.state === "folding");
+  return { title: "A workspace chat is waiting for you", body: fold ? `The fold of ${who ?? "a chat of a workspace"} stopped on a question.` : `${who ?? "A chat of a workspace"} stopped on a question.` };
+}
 
 /** What a row shows: a chat's own state, or its fold's while there is one to say. */
 export type RowState = ConvState | "folding" | "checking" | "fold-failed";

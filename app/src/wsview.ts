@@ -38,6 +38,20 @@ export function rollupOf<T>(items: readonly T[], activity: (t: T) => string, jus
   return items.some(justDone) ? "done" : "";
 }
 
+/** One place's mark from `sessions:busy`'s two sets. A place can be in both
+ *  (a Codex working beside a Claude stopped on a prompt): waiting wins, as it
+ *  does wherever several agents roll up into one mark. */
+export function placeActivity(busy: ReadonlySet<string>, waiting: ReadonlySet<string>, path: string): "busy" | "waiting" | "" {
+  return waiting.has(path) ? "waiting" : busy.has(path) ? "busy" : "";
+}
+
+/** A workspace chat's row state as its workspace's dot reads it: one that
+ *  needs a person (waiting, or a fold that failed) is waiting; one that runs
+ *  a turn or a fold is busy. */
+export function chatActivity(state: string): "busy" | "waiting" | "" {
+  return state === "waiting" || state === "fold-failed" ? "waiting" : state === "busy" || state === "folding" || state === "checking" ? "busy" : "";
+}
+
 /** One line of what needs a person, over a workspace's Overview. */
 export type Attention =
   | { kind: "chat"; text: string; conv: string }
