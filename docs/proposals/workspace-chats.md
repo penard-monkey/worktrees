@@ -51,8 +51,9 @@ the fixed opener; and the typed-line door for workspace chats is approved, on
 
 ## 0. The answer, on one page
 
-**A workspace gets a folder of its own. Its memory is a git repository inside
-that folder, and its chats run there.**
+**A workspace gets a folder of its own. Its memory is a folder inside it,
+whose git history the engine keeps in its own half, outside the folder
+(`.engine/<workspace id>/memory.git`), and its chats run there.**
 
 ```
  ~/.local/share/worktrees/workspaces/<workspace id>/     the workspace's folder (cwd of every chat)
@@ -196,8 +197,9 @@ fixed, and `--add-dir` carries registry roots, which are the user's.
 
 ## 2. What the working memory is
 
-**Recommendation: a folder per workspace that is its own git repository. One
-index file is always read. Everything else is reached by a link.**
+**Recommendation: a folder per workspace with a git history of its own, whose
+git dir the engine keeps outside it. One index file is always read. Everything
+else is reached by a link.**
 
 ### 2.1 What is in it
 
@@ -209,7 +211,8 @@ index file is always read. Everything else is reached by a link.**
 | `files/…` | Images, PDFs, exported tables, anything a chat or the person drops | When followed |
 
 The names are a convention the templates teach. The app parses none of it. It
-knows two things: `MEMORY.md` is the index, and the folder is a repository.
+knows two things: `MEMORY.md` is the index, and the folder is the work tree of
+a repository whose git dir is the engine's (§2.5).
 
 This is the shape of Claude Code's own memory (a short index that is always
 loaded, files read on demand) and of `/compact` (a chat reduced to a
@@ -253,6 +256,10 @@ id.
 ### 2.5 The repository
 
 **Recommendation: a real git repository, made and committed by the engine.**
+Its git dir is `.engine/<workspace id>/memory.git`, beside the workspace's
+folder and never inside it, so nothing in `memory/` is git's config or hooks;
+a memory made by the earlier layout, with `memory/.git`, is moved there on
+first use.
 git is already required, and worktrees shells out to it on purpose
 (AGENTS.md). Nothing is embedded and nothing new is installed.
 
