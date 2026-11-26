@@ -37,6 +37,7 @@ worktrees — one git worktree per branch, one active agent per worktree.
   worktrees doctor --codex              Codex folder trust: each allowed repo, and whether a launch here is trusted (--json)
   worktrees trust pi|kimi|codex [<repo>] [--revoke]  let a repo's own pi resources load / start kimi and Codex lanes trusted
   worktrees status <name>               health verdict for one worktree (--json)
+  worktrees du [<name>] [--json]        disk used by each place: what only it holds, what it shares
   worktrees show <file>[:line] [--line N]  ask the worktrees app to open a file (at a line)
   worktrees guide [--status] [--json]   what agents are told about places (--rules: the one-line rule;
                                         --default: the shipped skill, ignoring your edit;
@@ -243,6 +244,8 @@ fn run() -> i32 {
         // Read-only, so deliberately absent from MUTATING above — a health
         // verdict is part of finding out what a tree is, like `ls` and `doctor`.
         "status" => ops::cmd_status(&project, &mut ui, rest),
+        // Read-only: it walks the places and writes nothing.
+        "du" => worktrees_core::diskusage::cmd_du(&project, &mut ui, rest),
         // Read-only in the same sense as `status`: it writes a request into
         // `~/.cache/worktrees/inbox` and touches nothing in the repo, so it is
         // deliberately absent from MUTATING.

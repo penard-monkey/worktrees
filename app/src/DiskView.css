@@ -1,0 +1,96 @@
+/* The Disk view (DiskView.tsx). Words wear text tokens; hue is the treemap's and
+   the bars'. The map's canvas paints over --bg-abyss, read at draw time. */
+.dk {
+  position: relative; display: flex; flex-direction: column; gap: var(--s3);
+  padding: var(--s4) var(--s5) var(--s3); height: 100%; min-height: 0; min-width: 0;
+  color: var(--txt); font-size: var(--fs-body); background: var(--bg-abyss);
+}
+.dk-h { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
+.dk-h .sp { flex: 1; }
+.dk-title { min-width: 0; }
+.dk-title h2 { margin: 0; font-size: 1.25rem; color: var(--txt-hi); font-weight: 650; }
+.dk .sub { color: var(--txt-dim); font-size: var(--fs-meta); overflow-wrap: anywhere; }
+.dk-crumb b { color: var(--txt-hi); font-weight: 560; }
+.dk-seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: var(--r-md); overflow: hidden; }
+.dk-seg button {
+  background: none; border: 0; padding: 4px 10px; color: var(--txt-dim); font: inherit; font-size: var(--fs-label); cursor: pointer;
+}
+.dk-seg button.on { background: var(--bg-elev); color: var(--txt-hi); }
+.dk-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--s2); }
+.dk-t { background: var(--bg-panel); border: 1px solid var(--line); border-radius: var(--r-lg); padding: 10px 14px; min-width: 0; }
+.dk-t .l { color: var(--txt-dim); font-size: var(--fs-meta); display: flex; align-items: center; gap: 6px; }
+.dk-t .v { font-size: 1.375rem; font-weight: 650; color: var(--txt-hi); margin: 2px 0; font-variant-numeric: tabular-nums; }
+.dk-t .n { color: var(--txt-dim); font-size: var(--fs-meta); }
+.dk-tag { font-size: var(--fs-micro); border: 1px solid var(--line-strong); border-radius: 4px; padding: 0 4px; color: var(--txt-dim); }
+.dk-body { flex: 1; min-height: 0; display: flex; gap: var(--s3); }
+.dk-map { flex: 1; min-width: 0; position: relative; border-radius: var(--r-md); overflow: hidden; cursor: pointer; }
+.dk-map canvas { position: absolute; inset: 0; width: 100%; height: 100%; background: var(--bg-abyss); }
+.dk-tip {
+  position: absolute; z-index: 2; pointer-events: none; max-width: 240px;
+  background: var(--bg-panel); border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+  padding: 5px 8px; display: flex; flex-direction: column; gap: 2px; font-size: var(--fs-meta); box-shadow: var(--shadow-float);
+}
+.dk-tip b { color: var(--txt-hi); font-weight: 560; overflow-wrap: anywhere; }
+.dk-tip span { color: var(--txt-dim); }
+.dk-side {
+  width: 340px; flex: none; background: var(--bg-panel); border: 1px solid var(--line); border-radius: var(--r-lg);
+  padding: 12px 14px; display: flex; flex-direction: column; min-height: 0; overflow-y: auto;
+}
+.dk-side .cap { font-size: var(--fs-micro); letter-spacing: 0.08em; color: var(--txt-dim); margin-bottom: 6px; display: flex; }
+.dk-side .cap i { flex: 1; }
+.dk-list { flex: none; }
+.dk-r {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 1px 10px; padding: 6px 0; width: 100%;
+  border: 0; border-bottom: 1px solid var(--line); background: none; text-align: left; font: inherit; color: inherit;
+  font-size: var(--fs-label); align-items: baseline;
+}
+button.dk-r { cursor: pointer; }
+button.dk-r:hover b { color: var(--accent, var(--txt-hi)); }
+.dk-r b { color: var(--txt-hi); font-weight: 520; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dk-r b.mono { font-family: var(--font-mono); font-size: var(--fs-meta); }
+.dk-r .num { font-variant-numeric: tabular-nums; color: var(--txt-hi); justify-self: end; }
+.dk-r small { color: var(--txt-dim); font-size: var(--fs-meta); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dk-r small:nth-of-type(2), .dk-r > .ctrl { justify-self: end; }
+.dk-sub { padding-left: 12px; }
+.dk-sub b { font-weight: 450; }
+.dk-wsh { display: flex; justify-content: space-between; padding: 9px 0 3px; color: var(--txt-hi); font-weight: 600; font-size: var(--fs-label); border-bottom: 1px solid var(--line-strong); }
+.dk-wsh .num { font-variant-numeric: tabular-nums; }
+.dk-live { color: var(--ok); font-weight: 500; font-size: var(--fs-micro); }
+.dk-bar { grid-column: 1 / -1; display: flex; gap: 2px; height: 5px; margin-top: 3px; }
+.dk-bar s { display: block; height: 100%; border-radius: 2px; min-width: 1px; }
+.dk-hatch { background: repeating-linear-gradient(45deg, var(--line-strong) 0 3px, var(--bg-elev) 3px 6px); }
+.dk-leg { display: flex; gap: 16px; color: var(--txt-dim); font-size: var(--fs-meta); align-items: center; flex-wrap: wrap; }
+.dk-leg i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.dk-leg i.dk-dash { border: 1.5px dashed var(--txt); width: 8px; height: 8px; }
+.dk-leg i.dk-selk { border: 2px solid var(--txt-hi); width: 7px; height: 7px; }
+.dk-note { color: var(--txt-dim); font-size: var(--fs-meta); line-height: 1.45; margin-top: auto; padding-top: 10px; }
+.dk-hint { color: var(--txt-dim); font-size: var(--fs-meta); line-height: 1.45; padding: 4px 0; }
+.dk-empty { flex: 1; display: grid; place-items: center; color: var(--txt-dim); }
+.dk-err { color: var(--danger); font-size: var(--fs-label); overflow-wrap: anywhere; }
+.dk-selbox { background: var(--bg-elev); border: 1px solid var(--line-strong); border-radius: var(--r-md); padding: 10px 12px; }
+.dk-selp { font-family: var(--font-mono); color: var(--txt-hi); font-size: var(--fs-label); overflow-wrap: anywhere; }
+.dk-selv { font-size: 1.5rem; font-weight: 650; color: var(--txt-hi); margin: 2px 0; }
+.dk-acts { display: flex; gap: 6px; margin-top: 10px; }
+.dk-wait { font-size: var(--fs-meta); color: var(--txt); display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 6px 0; }
+.dk-free { display: flex; align-items: baseline; gap: 10px; }
+.dk-free span { color: var(--txt-dim); }
+.dk-free b { font-size: 1.6rem; color: var(--txt-hi); }
+.dk-bullets { margin: 0; padding-left: 18px; line-height: 1.55; }
+.dk-bulk { width: min(760px, 94%); }
+.dk-tbl { border: 1px solid var(--line); border-radius: var(--r-md); overflow-y: auto; max-height: 46vh; }
+.dk-th, .dk-tr { display: grid; grid-template-columns: 24px minmax(0, 1fr) 100px 70px 76px; align-items: center; padding: 6px 10px; gap: 8px; }
+.dk-th { color: var(--txt-dim); font-size: var(--fs-micro); letter-spacing: 0.05em; background: var(--bg-elev); position: sticky; top: 0; }
+.dk-tr { border-top: 1px solid var(--line); cursor: pointer; }
+.dk-tr b { color: var(--txt-hi); font-weight: 520; }
+.dk-tr small { color: var(--txt-dim); font-size: var(--fs-meta); }
+.dk-tr .dk-done { color: var(--txt); }
+.dk-th .num, .dk-tr .num { text-align: right; font-variant-numeric: tabular-nums; color: var(--txt-hi); }
+.dk-foot-note { margin-right: auto; max-width: 300px; }
+.nav-disk { margin-left: 4px; font-size: var(--fs-micro); color: var(--txt-dim); font-variant-numeric: tabular-nums; flex: none; }
+
+@media (max-width: 760px) {
+  .dk { padding: var(--s3) var(--s4); }
+  .dk-body { flex-direction: column; }
+  .dk-side { width: auto; max-height: 40vh; }
+  .dk-map { min-height: 260px; }
+}

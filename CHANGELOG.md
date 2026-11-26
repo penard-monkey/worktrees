@@ -7,6 +7,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ### Added
 
+- **Disk: how much space your places take, and deleting build output from there.** Every place is a full checkout, often with
+  its own `node_modules` and its own `target/`, and nothing said what that cost. Open **Disk…** on Home, or **Disk usage** on a
+  project's, a place's or a workspace's menu. Home shows every project, by workspace when the nav shows workspaces; a project
+  shows its places; a place shows its files as a treemap. Sizes count what a place holds **alone**, which is what removing it
+  frees: a file cloned on APFS (`cp -c`, pnpm's store) or hard-linked into another place is **shared** and drawn hatched, because
+  removing this place frees none of it. So the numbers are smaller, and truer, than `du`'s, which counts every clone in full; both
+  are shown. (main) is shown as its own checkout beside a dashed box of the places under its `.worktrees/`. Select a folder and
+  **Delete…** it, or use **Clean up…** to delete the build output of many places at once (ticked by default: places idle for two
+  weeks with no agent working). Only paths git **ignores**, holding nothing git tracks, are ever deleted, never `.git`, never
+  (main)'s `.worktrees/`, never through a symlink, and only the folder the scan saw (a swapped one is refused). Deletes are
+  permanent (the Trash would free nothing). In a place where an agent is working, **Delete when idle** waits for it. Time
+  Machine's local snapshots can keep deleted files' space for about a day, and the view says so when there are any. Scans run only
+  when asked, take seconds to a minute, and are kept until **Rescan**. On the command line: `worktrees du [<place>] [--json]`.
+  Linux has no clone ids: there, only hard links count as shared.
 - **Codex folder trust: allow a repo once, and its Codex lanes stop at no prompt.** Codex asks "Trust this folder?" in every repo it
   has not seen, nothing in Worktrees can answer it, and a launch into one was refused (or, forced, sat at the modal). Turn a repo
   on in Settings → Agent policy → Codex folder trust, or run `worktrees trust codex [<repo>] [--revoke]`, and its Codex lanes
