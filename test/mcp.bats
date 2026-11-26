@@ -416,6 +416,51 @@ print(p["agent_state"], len(p["agents"]), a.get("name", "-"), a.get("tmux", "-")
   [[ "$output" == *'no tools'* ]]
 }
 
+# Workspace mode (docs/proposals/workspace-chats.md §5.4). A workspace chat's
+# folder is not a repository, and its server is what it was before the mode:
+# zero tools, unless the chat's launch named a chat the engine's record holds.
+ws_fixture() {
+  WS_ID=01JC90A1000000000000000000
+  WS_CONV=01JC90A2000000000000000000
+  export WORKTREES_WORKSPACES_DIR="$BATS_TEST_TMPDIR/workspaces"
+  export XDG_CONFIG_HOME="$BATS_TEST_TMPDIR/cfg"
+  export WORKTREES_IDEAS_DIR="$BATS_TEST_TMPDIR/ideas"
+  mkdir -p "$WORKTREES_WORKSPACES_DIR/$WS_ID" "$WORKTREES_WORKSPACES_DIR/.engine/$WS_ID" "$XDG_CONFIG_HOME/worktrees"
+  printf '{"version":1,"workspaces":[{"id":"%s","name":"Home","projects":[]}]}\n' "$WS_ID" > "$XDG_CONFIG_HOME/worktrees/workspaces.json"
+  printf '{"conversations":[{"id":"%s","harness":"claude","session_id":"6f1c3a52-6d1e-4b3e-9c55-0a2c0e6b7d11","title":"Chat 1","started":"2026-11-25T10:00:00Z"}]}\n' "$WS_CONV" > "$WORKTREES_WORKSPACES_DIR/.engine/$WS_ID/chats.json"
+  printf '%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize"}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' > "$BATS_TEST_TMPDIR/in.jsonl"
+}
+
+@test "a workspace folder whose launch named no chat serves with no tools, and says why" {
+  ws_fixture
+  run bash -c "cd '$WORKTREES_WORKSPACES_DIR/$WS_ID' && env -u WORKTREES_WORKSPACE_CHAT '$WT_BIN' mcp --mutations < '$BATS_TEST_TMPDIR/in.jsonl' 2>/dev/null"
+  [ "$status" -eq 0 ]
+  grep -qF '"tools":[]' <<<"$output"
+  grep -qF 'not started as one of its chats' <<<"$output"
+  ! grep -qF '"workspace"' <<<"$output" || false
+
+  # A name the workspace's record does not hold is no better.
+  run bash -c "cd '$WORKTREES_WORKSPACES_DIR/$WS_ID' && WORKTREES_WORKSPACE_CHAT=01JC90A3000000000000000000 '$WT_BIN' mcp --mutations < '$BATS_TEST_TMPDIR/in.jsonl' 2>/dev/null"
+  grep -qF '"tools":[]' <<<"$output"
+  grep -qF "not one of this workspace's chats" <<<"$output"
+}
+
+@test "a named workspace chat gets the workspace tools and nothing that drives a lane" {
+  ws_fixture
+  printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"x"}}}' >> "$BATS_TEST_TMPDIR/in.jsonl"
+  run bash -c "cd '$WORKTREES_WORKSPACES_DIR/$WS_ID' && WORKTREES_WORKSPACE_CHAT='$WS_CONV' '$WT_BIN' mcp --mutations < '$BATS_TEST_TMPDIR/in.jsonl' 2>/dev/null"
+  [ "$status" -eq 0 ]
+  names=$(jq_out 'import sys,json
+for l in sys.stdin:
+    m=json.loads(l)
+    if m.get("id")==2: print(",".join(t["name"] for t in m["result"]["tools"]))')
+  [ "$names" = "workspace,place_status,ideas_list,idea_read,idea_related,plan_propose_work" ]
+  grep -qF 'Workspace mode' <<<"$output"
+  grep -qF 'unknown tool: create_worktree' <<<"$output"
+}
+
 # The setup verbs run OUTSIDE a repository too — they are about this machine's
 # claude, not about a checkout. A git guard here would answer "not a git
 # repository", which reads as a verdict on the MCP setup rather than on the cwd.

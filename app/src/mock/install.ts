@@ -391,8 +391,19 @@ let mockCompanionTab: Window | null = null;
 const mockWsSeed = (): MockWsDef[] => {
   if (new URLSearchParams(location.search).get("workspaces") !== "1") return [];
   const roots = ws.projects.map((p) => p.root);
+  // `?proposed=1`: "Everything" has a plan whose Work holds an item a person
+  // wrote and one a workspace chat proposed (`plan_propose_work`).
+  let plan: string | undefined;
+  if (new URLSearchParams(location.search).get("proposed") === "1" && roots[0]) {
+    plan = "01JC8Z4K3M9QX2T7VB00000904";
+    const name = projectName(roots[0]);
+    mockIdeas.set("plan-everything.md", { id: plan, file: "plan-everything.md", created: "2026-11-20", mtime_ms: Date.now() - 600_000, content:
+      `---\nid: ${plan}\ncreated: 2026-11-20\nplan_of: [01JC8Z4K3M9QX2T7VB00000901]\n---\n\n# Plan: Everything\n\n## Projects\n- ${name} (registered)\n\n## Work\n` +
+      `### Tidy the docs\nproject: ${name}\nbranch: docs-tidy\nbrief: |\n  Tidy the docs folder.\n\n` +
+      `### Release notes for 0.54\nproject: ${name}\nbranch: release-notes\nproposed: Release order · 01JC90A2000000000000000000 · 2026-11-25 10:00\nbrief: |\n  Draft the release notes from the merged PRs.\n\n  Stop and report when the draft is written.\n` });
+  }
   return [
-    { id: mockWsId(), name: "Everything", projects: [...roots.slice(0, 2), "/Users/demo/workspace/unregistered-thing"] },
+    { id: mockWsId(), name: "Everything", projects: [...roots.slice(0, 2), "/Users/demo/workspace/unregistered-thing"], plan },
     { id: mockWsId(), name: "Tools", projects: roots.slice(1, 2) },
   ];
 };
@@ -2342,7 +2353,7 @@ function mockPlanRead(text: string) {
   if (lines[0] === "---") { const e = lines.indexOf("---", 1); start = e > 0 ? e + 1 : 0; }
   type P = { line: number; section: "projects" | "work"; text: string; words: string };
   const problems: P[] = [];
-  type W = { line: number; title: string; project: string | null; branch: string | null; brief: string | null; ai: string | null; model: string | null; started: string | null; place: { project: string; slug: string; at: string } | null };
+  type W = { line: number; title: string; project: string | null; branch: string | null; brief: string | null; ai: string | null; model: string | null; started: string | null; place: { project: string; slug: string; at: string } | null; proposed?: string; proposal?: { by: string; chat: string; at: string } | null };
   let projects: { line: number; name: string; kind: string; url?: string; path?: string }[] | null = null;
   let work: W[] | null = null;
   let sec = "";
@@ -2374,14 +2385,15 @@ function mockPlanRead(text: string) {
       if (!t || /^<!--.*-->$/.test(t)) continue;
       if (!item) { problems.push({ line: n, section: "work", text: l, words: "text before the first work item: each item starts with `### <title>`" }); continue; }
       const kv = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(t);
-      if (!kv) { problems.push({ line: n, section: "work", text: l, words: "not a work item line: expected `project:`, `branch:`, `brief:`, `ai:`, `model:` or `started:`" }); continue; }
+      if (!kv) { problems.push({ line: n, section: "work", text: l, words: "not a work item line: expected `project:`, `branch:`, `brief:`, `ai:`, `model:`, `proposed:` or `started:`" }); continue; }
       const [, k, v] = kv;
       if (k === "project" || k === "branch" || k === "started" || k === "ai" || k === "model") {
         item[k] = v;
         if (k === "started") { const m = /^(.+?) · (\S+) · (.+)$/.exec(v); item.place = m ? { project: m[1], slug: m[2], at: m[3] } : null; }
       }
+      else if (k === "proposed") { const m = /^(.+) · (\S+) · (.+)$/.exec(v); item.proposed = v; item.proposal = m ? { by: m[1], chat: m[2], at: m[3] } : null; }
       else if (k === "brief") { if (v === "|") brief = []; else item.brief = v; }
-      else problems.push({ line: n, section: "work", text: l, words: `unknown key \`${k}:\`: expected \`project:\`, \`branch:\`, \`brief:\`, \`ai:\`, \`model:\` or \`started:\`` });
+      else problems.push({ line: n, section: "work", text: l, words: `unknown key \`${k}:\`: expected \`project:\`, \`branch:\`, \`brief:\`, \`ai:\`, \`model:\`, \`proposed:\` or \`started:\`` });
     }
   }
   close();
