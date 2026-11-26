@@ -137,8 +137,52 @@ pub struct Declared {
     pub note_by: Option<By>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title_by: Option<By>,
+    /// The place whose agent or pane CREATED this one
+    /// (`docs/proposals/lane-children.md` §2). Written once, by `cmd_new`,
+    /// when it creates the worktree; never by a launch, a re-brief, an
+    /// adoption or a removal. A label, never a grant: no code may read it to
+    /// decide what a caller can do. Resolved by `lineage`, which reads a link
+    /// that no longer holds as absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_by: Option<Link>,
+    /// The starter was REMOVED (`cmd_rm`), and this place now hangs from the
+    /// next one up: `{place, at, from}`, `from` the removed slug. Written only
+    /// by a removal, and rewritten only by a later one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handed_to: Option<Link>,
+    /// Where the owner or (main) wants this place DRAWN: `{place, at, by}`,
+    /// `place` `(main)` for the top level. Display only: reports never follow
+    /// it (§6), and a removal never writes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub under: Option<Link>,
     #[serde(flatten)]
     pub extra: Map<String, serde_json::Value>,
+}
+
+/// One lineage link (`started_by`, `handed_to`, `under`). `place` is a slug of
+/// this project, or `(main)`; `at` is when the link was written, which is what
+/// tells a reused slug from the place it once named (`lineage`, rule 2).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Link {
+    pub place: String,
+    pub at: i64,
+    /// `started_by` only: the starter's REGISTRY project name, when it is in
+    /// another project. Such a link is shown, and never nests or routes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// `handed_to` only: the removed place this one hung from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// `under` only: who moved it — `(main)` (its agent) or a principal
+    /// (`owner`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
+}
+
+impl Link {
+    pub fn to(place: &str, at: i64) -> Link {
+        Link { place: place.to_string(), at, project: None, from: None, by: None }
+    }
 }
 
 /// A principal on a device: who set a declared field through serve. The JSON
@@ -551,6 +595,46 @@ mod tests {
         edit(&repo, "alpha", |d| d.title = None).unwrap();
         let raw = fs::read_to_string(t.0.join(STORE_FILE)).unwrap();
         assert!(!raw.contains("title"), "cleared title must not be serialized: {raw}");
+    }
+
+    /// The lineage links (lane-children §2) in the proposal's shape: written
+    /// beside every other field, cleared without a `null`, and readable by a
+    /// binary that predates them — which keeps them as unknown keys and writes
+    /// them back untouched.
+    #[test]
+    fn lineage_links_round_trip_and_survive_an_older_reader() {
+        let t = tmp("lineage");
+        let repo = t.0.to_string_lossy().to_string();
+        fs::write(t.0.join(STORE_FILE), r#"{"version":1,"places":{"kid":{"note":"n","from_the_future":1}}}"#).unwrap();
+        edit(&repo, "kid", |d| {
+            d.started_by = Some(Link { project: Some("other".into()), ..Link::to("starter", 100) });
+            d.handed_to = Some(Link { from: Some("starter".into()), ..Link::to("(main)", 200) });
+            d.under = Some(Link { by: Some("(main)".into()), ..Link::to("x", 300) });
+        })
+        .unwrap();
+        let raw: serde_json::Value = serde_json::from_slice(&fs::read(t.0.join(STORE_FILE)).unwrap()).unwrap();
+        let kid = &raw["places"]["kid"];
+        assert_eq!(kid["started_by"], serde_json::json!({"place": "starter", "at": 100, "project": "other"}));
+        assert_eq!(kid["handed_to"], serde_json::json!({"place": "(main)", "at": 200, "from": "starter"}));
+        assert_eq!(kid["under"], serde_json::json!({"place": "x", "at": 300, "by": "(main)"}));
+        assert_eq!(kid["note"], "n");
+        assert_eq!(kid["from_the_future"], 1);
+
+        // An older binary: its `Declared` has none of the three, so they land in
+        // its flattened `extra` and go back out unchanged.
+        #[derive(Serialize, Deserialize)]
+        struct Old {
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            note: Option<String>,
+            #[serde(flatten)]
+            extra: Map<String, serde_json::Value>,
+        }
+        let old: Old = serde_json::from_value(kid.clone()).expect("an older reader parses it");
+        assert_eq!(serde_json::to_value(&old).unwrap(), *kid);
+
+        edit(&repo, "kid", |d| (d.started_by, d.handed_to, d.under) = (None, None, None)).unwrap();
+        let raw = fs::read_to_string(t.0.join(STORE_FILE)).unwrap();
+        assert!(!raw.contains("started_by") && !raw.contains("handed_to") && !raw.contains("under"), "{raw}");
     }
 
     /// Phase 2's provenance stamps (§7.3, §7.5) ride the same no-version-bump
