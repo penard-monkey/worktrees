@@ -226,6 +226,35 @@ pub fn workspace_chat_start(ctx: &Ctx, id: String) -> Result<Value, String> {
     Ok(json!({ "id": id, "chat": c, "session": session }))
 }
 
+/// `workspace_chat_tidy`: Tidy…, a new chat on the engine's tidy file
+/// (`chats::tidy_text`), launched on the same fixed opener as any chat. No
+/// text of the client's reaches it: the row takes the workspace's id alone.
+/// Refused, before anything is made, with no index, while a chat folds into
+/// the memory (in this engine or by the record), and while another tidy chat
+/// runs; then as any start is (the live-agent limit, a spent window), which
+/// leaves nothing. What it writes is committed as any chat's work is (the
+/// quiet minute), in History, where each commit can be undone.
+pub fn workspace_chat_tidy(ctx: &Ctx, id: String) -> Result<Value, String> {
+    let lock = life_lock(ctx, &id);
+    let _life = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let w = workspace(ctx, &id)?;
+    let reg = chats::policy(&w)?;
+    crate::workspacefolds::ensure(ctx);
+    tidy_may(ctx, &id, &|s| tmux::session_exists(s))?;
+    crate::memory::before_launch(ctx, &w)?;
+    let (c, session) = chats::start_kind_at(ctx.workspaces_dir(), ctx.ideas_dir(), &w, chats::Kind::Tidy, |conv| chats::context_text(&context(ctx, &w, &reg, conv)))?;
+    Ok(json!({ "id": id, "chat": c, "session": session }))
+}
+
+/// Whether Tidy… may start now: the record's rule (`chats::may_tidy_at`) and
+/// this engine's own folds and holds, which the record may not have yet.
+fn tidy_may(ctx: &Ctx, id: &str, live: &dyn Fn(&str) -> bool) -> Result<(), String> {
+    if ctx.memory.is_held(id) || chats::list_at(ctx.workspaces_dir(), id)?.iter().any(|c| ctx.folds.is_folding(&c.id)) {
+        return Err(chats::ERR_TIDY_FOLDING.into());
+    }
+    chats::may_tidy_at(ctx.workspaces_dir(), id, live)
+}
+
 /// `workspace_chat_resume`: rewrite `context.md`, then launch an ended chat
 /// again, `--resume '<its session id>'` under the same tmux name, with no
 /// opener.
@@ -547,6 +576,25 @@ mod tests {
         tick(&ctx, WorkspaceSessions::default(), &mut last);
         assert!(chats::list_at(&dir, &ws).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Tidy… is refused while this engine holds the memory for a fold, even
+    /// before the record says so; and with the record's rule otherwise.
+    #[test]
+    fn a_tidy_is_refused_while_this_engine_holds_the_memory() {
+        let top = std::env::temp_dir().join(format!("wt-wschat-tidy-{}", worktrees_core::ulid::new()));
+        let dir = top.join("workspaces");
+        let ctx = Ctx::new(top.join("cfg"), Arc::new(crate::tests::Recorder::default())).with_workspaces_dir(dir.clone());
+        let ws = worktrees_core::ulid::new();
+        let none = |_: &str| false;
+        assert_eq!(tidy_may(&ctx, &ws, &none).err().as_deref(), Some(chats::ERR_TIDY_NO_INDEX));
+        worktrees_core::memory::init_at(&dir, &ws, "Home").unwrap();
+        assert_eq!(tidy_may(&ctx, &ws, &none), Ok(()));
+        ctx.memory.hold(&ws);
+        assert_eq!(tidy_may(&ctx, &ws, &none).err().as_deref(), Some(chats::ERR_TIDY_FOLDING));
+        ctx.memory.release(&ws);
+        assert_eq!(tidy_may(&ctx, &ws, &none), Ok(()));
+        let _ = std::fs::remove_dir_all(&top);
     }
 
     /// Removing a workspace that is not on the list touches no folder, and one

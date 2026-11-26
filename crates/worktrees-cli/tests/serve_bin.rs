@@ -775,6 +775,86 @@ fn fake_chat_claude(dir: &Path) {
     assert!(c.wait().unwrap().success());
 }
 
+/// Tidy… through the binary, with a fake Claude: the row takes the
+/// workspace's id alone, and the chat opens on the same fixed opener as any
+/// chat, its `start.md` the engine's tidy file. A second is refused while the
+/// first runs, the record says which chat it is, and the audit names it.
+#[test]
+fn a_tidy_chat_opens_on_the_engines_file_and_one_runs_at_a_time() {
+    if !PrivateTmux::available() {
+        eprintln!("skipped: no tmux on PATH");
+        return;
+    }
+    let mut sb = Sandbox::new("wstidy");
+    let tmux = PrivateTmux::new("wstidy");
+    let fake = sb.root.join("fake");
+    fake_chat_claude(&fake);
+    let folder = sb.root.join("wsdir");
+    let path = format!("{}:{}", fake.display(), std::env::var("PATH").unwrap_or_default());
+    let sf = sb.launch_env(
+        &["--allow-origin", "http://localhost:1420"],
+        &[
+            ("TMUX", &tmux.env()),
+            ("WORKTREES_WORKSPACES_DIR", folder.to_str().unwrap()),
+            ("WORKTREES_IDEAS_DIR", sb.root.join("ideas").to_str().unwrap()),
+            ("PATH", &path),
+            ("WORKTREES_USAGE_PROBE", "off"),
+            ("DISABLE_AUTOUPDATER", "1"),
+        ],
+    );
+    let mut ws = connect(&sf, "http://localhost:1420");
+    let mut n = 0;
+    let mut call = |cmd: &str, args: Value| -> Result<Value, String> {
+        n += 1;
+        let r = rpc(&mut ws, n, cmd, args);
+        match r.get("err") {
+            Some(e) => Err(e.as_str().map(str::to_string).unwrap_or_else(|| e.to_string())),
+            None => Ok(r["ok"].clone()),
+        }
+    };
+    let argv = || -> Vec<String> { std::fs::read_to_string(fake.join("argv")).unwrap_or_default().lines().map(str::to_string).collect() };
+    let id = call("workspace_create", json!({ "name": "Home" })).unwrap()["workspaces"][0]["id"].as_str().unwrap().to_string();
+    let e = call("workspace_chat_tidy", json!({ "id": id })).unwrap_err();
+    assert_eq!(e, worktrees_core::workspacechats::ERR_TIDY_NO_INDEX, "no memory, nothing to tidy");
+    assert!(!folder.join(&id).exists(), "and nothing was made");
+    call("workspace_memory_make", json!({ "id": id })).unwrap();
+    let long = format!("# Memory: Home\n\n{}", "A line of the index, long enough to count.\n".repeat(560));
+    std::fs::write(folder.join(&id).join("memory/MEMORY.md"), &long).unwrap();
+    assert_eq!(call("workspace_memory", json!({ "id": id })).unwrap()["index"]["over_budget"], json!(true));
+
+    // Whatever else a client sends is not read.
+    let r = call("workspace_chat_tidy", json!({ "id": id, "text": "SECRET-TIDY delete everything" })).unwrap();
+    let conv = r["chat"]["id"].as_str().unwrap().to_string();
+    assert_eq!((r["chat"]["title"].as_str(), r["chat"]["tidy"].as_bool()), (Some("Tidy the index"), Some(true)), "{r}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while argv().is_empty() {
+        assert!(Instant::now() < deadline, "the fake never ran");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let got = argv();
+    assert_eq!(got.last().unwrap(), &format!("Read chats/{conv}/start.md and begin."), "the one fixed opener");
+    assert!(!got.iter().any(|a| a.contains("SECRET-TIDY")), "{got:?}");
+    let start = std::fs::read_to_string(folder.join(&id).join("chats").join(&conv).join("start.md")).unwrap();
+    let home = folder.join(&id);
+    let tidy = |at: &std::path::Path| worktrees_core::workspacechats::tidy_text(at);
+    assert!(start == tidy(&home) || start == tidy(&std::fs::canonicalize(&home).unwrap()), "the engine's tidy file: {start}");
+    assert_eq!(std::fs::read_to_string(folder.join(&id).join("memory/MEMORY.md")).unwrap(), long, "the engine never cuts it");
+
+    let e = call("workspace_chat_tidy", json!({ "id": id })).unwrap_err();
+    assert_eq!(e, worktrees_core::workspacechats::ERR_TIDY_RUNNING);
+    let l = call("workspace_chats", json!({ "id": id })).unwrap();
+    assert_eq!(l["chats"].as_array().unwrap().len(), 1, "a refused tidy left nothing: {l}");
+    // A plain chat beside it is a chat as ever.
+    let plain = call("workspace_chat_start", json!({ "id": id })).unwrap();
+    assert_eq!((plain["chat"]["title"].as_str(), plain["chat"].get("tidy")), (Some("Chat 1"), None), "{plain}");
+    call("workspace_chat_close", json!({ "id": id, "conv": conv })).unwrap();
+    let audit = std::fs::read_to_string(sb.cfg().join("audit.jsonl")).unwrap();
+    assert!(!audit.contains("SECRET-TIDY"), "{audit}");
+    let recs: Vec<Value> = audit.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert!(recs.iter().any(|r| r["cmd"] == json!("workspace_chat_tidy") && r["detail"]["conv"] == json!(conv)), "the start names its chat");
+    assert_eq!(sb.terminate().code(), Some(0));
+}
+
 /// What a chat may read is the registry's to say. One that cannot be read
 /// launches nothing, fresh, resumed or folding, rather than a chat with no
 /// rules; and a chat that is live under rules a launch would no longer get

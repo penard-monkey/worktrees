@@ -528,7 +528,7 @@ export const CONSOLE_ROWS: readonly string[] = [
   "workspaces_list", "workspace_create", "workspace_rename", "workspace_remove", "workspace_set_projects",
   "workspace_reorder", "workspace_set_color",
   // workspace chats: Claude in a workspace's own folder, desktop only
-  "workspace_chats", "workspace_chat_start", "workspace_chat_resume", "workspace_chat_fold", "workspace_chat_close", "workspace_chat_remove",
+  "workspace_chats", "workspace_chat_start", "workspace_chat_tidy", "workspace_chat_resume", "workspace_chat_fold", "workspace_chat_close", "workspace_chat_remove",
   "workspace_chat_rename", "workspace_turns", "workspace_turn_text", "workspace_tool_call", "workspace_prompt",
   "workspace_answer", "workspace_answer_text", "workspace_answer_many", "workspace_send", "workspace_interrupt",
   "workspace_term_open",

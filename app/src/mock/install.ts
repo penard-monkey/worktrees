@@ -2138,6 +2138,8 @@ type MockFold = { asked: string; asked_ms?: number; left?: number; state: string
 type MockChat = {
   id: string; harness: "claude"; session_id: string; title: string; started: string; last_activity: string; note: string;
   fold?: MockFold; note_exists: boolean; live: boolean; state: "idle" | "busy" | "waiting"; turns: MockConv["turns"]; prompt: MockConv["prompt"];
+  /** Started by Tidy…, on the engine's tidy file. */
+  tidy?: boolean;
 };
 const mockChats = new Map<string, MockChat[]>(); // workspace id → chats
 /** A live chat whose launch's rules are no longer what a launch would get:
@@ -2230,6 +2232,7 @@ function chatReply(c: MockChat, user: string | null, reply: string, engine?: "st
 const chatWs = (c: MockChat) => [...mockChats].find(([, cs]) => cs.includes(c))?.[0] ?? "";
 const mockChatRecord = (c: MockChat) => ({
   id: c.id, harness: c.harness, session_id: c.session_id, title: c.title, started: c.started, last_activity: c.last_activity, note: c.note,
+  ...(c.tidy ? { tidy: true } : {}),
   // A fold's numbers are its commit's, in the memory (./memory.ts).
   ...(c.fold ? { fold: { ...c.fold, ...(c.fold.state === "done" && c.fold.commit ? mockMemory.fold(chatWs(c), c.title, c.fold.commit) : null) } } : {}),
 });
@@ -4913,9 +4916,24 @@ Phase 3: Frontend pane and mock harness
       const w = mockWsGet(args.id);
       const list = mockChats.get(w.id) ?? [];
       mockMemory.beforeLaunch(w.id);
-      const c = mockChatNew(ideaId(), `Chat ${list.length + 1}`, 0, 0, { live: true });
+      // A tidy chat takes no chat's number (core's `next_title`).
+      const c = mockChatNew(ideaId(), `Chat ${list.filter((x) => !x.tidy).length + 1}`, 0, 0, { live: true });
       list.push(c); mockChats.set(w.id, list);
       chatReply(c, mockChatOpeners(w.id, c).start, "I read the memory's index and the list of projects. What would you like to settle?", "start");
+      return { id: w.id, chat: mockChatRecord(c), session: chatSession(c) };
+    }
+    // Tidy…: core's `may_tidy_at` and the start, on the engine's tidy file.
+    case "workspace_chat_tidy": {
+      mockWsView();
+      const w = mockWsGet(args.id);
+      const list = mockChats.get(w.id) ?? [];
+      if (!mockMemory.has(w.id, "MEMORY.md")) throw "this workspace's memory has no index to tidy";
+      if (foldRunning(w.id)) throw "a chat is folding into this memory: Tidy… once it is done";
+      if (list.some((x) => x.tidy && x.live)) throw "a tidy chat of this workspace is running: open it, or close it first";
+      mockMemory.beforeLaunch(w.id);
+      const c = mockChatNew(ideaId(), "Tidy the index", 0, 0, { live: true, tidy: true });
+      list.push(c); mockChats.set(w.id, list);
+      chatReply(c, mockChatOpeners(w.id, c).start, "I read the index and its topics. I will move the long entries into topic files and keep one line and a link for each.", "start");
       return { id: w.id, chat: mockChatRecord(c), session: chatSession(c) };
     }
     case "workspace_chat_resume": {

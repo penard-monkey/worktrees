@@ -19,7 +19,8 @@ export type WsChatsLive = {
   refresh(id: string): Promise<void>;
   /** A workspace whose chat is being started: its row, before there is one. */
   starting: string | null;
-  start(id: string): Promise<{ conv: string } | { refused: string }>;
+  /** `tidy`: Tidy…, a chat on the engine's tidy file (`workspace_chat_tidy`). */
+  start(id: string, tidy?: boolean): Promise<{ conv: string } | { refused: string }>;
   /** Each throws in words. */
   resume(id: string, conv: string): Promise<void>;
   /** End it with no fold; a running one is stopped. The commit, if it left changes. */
@@ -101,10 +102,10 @@ export function useWsChats(on: boolean, ids: readonly string[], also: unknown): 
     error: (id) => errors[id] ?? null,
     rows: (id) => rows[id] ?? [],
     refresh,
-    async start(id) {
+    async start(id, tidy) {
       setStarting(id);
       try {
-        const r = await invoke<{ chat: { id: string } }>("workspace_chat_start", { id });
+        const r = await invoke<{ chat: { id: string } }>(tidy ? "workspace_chat_tidy" : "workspace_chat_start", { id });
         setExpect((x) => ({ ...x, [r.chat.id]: { conv: r.chat.id, live: true } }));
         await refresh(id);
         return { conv: r.chat.id };

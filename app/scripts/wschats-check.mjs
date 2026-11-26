@@ -22,6 +22,23 @@ const iso = (min) => new Date(Date.UTC(2026, 10, 24, 12, 0) - min * 60_000).toIS
 const chat = (id, over = {}) => ({ id, harness: "claude", session_id: "s", title: `Chat ${id}`, started: iso(1000), last_activity: iso(10), note: "", session: `s~${id}`, state: "ended", note_exists: false, ...over });
 const ev = (over = {}) => ({ live: [], busy: [], waiting: [], chat_of: {}, fold: {}, ...over });
 
+// ── Tidy…: when it can start, said before the press (core's `may_tidy_at`) ──
+{
+  const quiet = W.chatRows([chat("a"), chat("t", { tidy: true })], ev());
+  eq("nothing folds and no tidy chat runs: it starts", W.tidyBar(quiet, ev()), { why: null, open: null });
+  const folding = ev({ live: ["s~a"], fold: { "s~a": { state: "folding" } } });
+  eq("a fold runs: it waits, and says so", W.tidyBar(W.chatRows([chat("a")], folding), folding).why, "A chat is folding into this memory. Tidy… once it is done.");
+  const checking = ev({ live: ["s~a"], fold: { "s~a": { state: "checking" } } });
+  eq("a fold being looked at is one that runs", W.tidyBar(W.chatRows([chat("a")], checking), checking).why !== null, true);
+  const failed = ev({ fold: { "s~a": { state: "failed" } } });
+  eq("a fold that failed holds nothing", W.tidyBar(W.chatRows([chat("a")], failed), failed), { why: null, open: null });
+  const live = ev({ live: ["s~t", "s~a"] });
+  eq("a tidy chat runs: open that one", W.tidyBar(W.chatRows([chat("a"), chat("t", { tidy: true })], live), live), { why: "A tidy chat is running.", open: "t" });
+  const plain = ev({ live: ["s~a"] });
+  eq("a plain chat that runs is no bar", W.tidyBar(W.chatRows([chat("a"), chat("t", { tidy: true })], plain), plain), { why: null, open: null });
+  eq("the words say what it does, and that it can be undone", [/topic files/.test(W.TIDY_WHAT), /delete nothing/.test(W.TIDY_WHAT), /History, where you can undo it/.test(W.TIDY_WHAT), /^Tidy/.test(W.TIDY_WHAT)], [true, true, true, true]);
+}
+
 // ── the order, and what the nav keeps ──
 const chats = [
   chat("idle", { last_activity: iso(1) }), chat("busy", { last_activity: iso(500) }), chat("wait", { last_activity: iso(900) }),

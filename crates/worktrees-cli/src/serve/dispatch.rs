@@ -1,4 +1,4 @@
-//! The 320 commands, each with its exposure, capability and objects, in ONE
+//! The 321 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -1485,6 +1485,9 @@ commands! { cx, a;
     // 2026-11-24), audited the same way.
     workspace_chats: HostConsole [console, workspace(id)] => workspacechats::workspace_chats(&cx.ctx, a.get("id")?),
     workspace_chat_start: HostConsole [console, workspace(id)] => workspacechats::workspace_chat_start(&cx.ctx, a.get("id")?),
+    // Tidy…: a chat on the engine's own tidy file. It takes the id alone, so
+    // no client text reaches what the chat is told.
+    workspace_chat_tidy: HostConsole [console, workspace(id)] => workspacechats::workspace_chat_tidy(&cx.ctx, a.get("id")?),
     workspace_chat_resume: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_chat_resume(&cx.ctx, a.get("id")?, a.get("conv")?),
     // Close, as the person means it: what is worth keeping goes to memory
     // first, and the poll ends the chat (`worktrees_api::workspacefolds`).
@@ -1564,7 +1567,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 320 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 321 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1600,7 +1603,7 @@ mod tests {
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 320, "the table has 320 commands");
+        assert_eq!(TABLE.len(), 321, "the table has 321 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -2044,7 +2047,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 72), ("write", 23), ("admin", 42), ("console", 139), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 72), ("write", 23), ("admin", 42), ("console", 140), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7), ("guest", 10),
         ]
         .into();

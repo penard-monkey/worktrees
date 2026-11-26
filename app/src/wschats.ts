@@ -14,6 +14,8 @@ export type FoldNow = { state: string; why: string | null; left?: number | null 
 export type WsChat = {
   id: string; harness: string; session_id: string; title: string; started: string; last_activity: string; note: string;
   fold?: ChatFold; fold_now?: FoldNow | null; session: string; state: ConvState; note_exists: boolean;
+  /** Started by Tidy… (`workspacechats::Chat::tidy`). */
+  tidy?: boolean;
   /** Whether a live chat still has what a launch now would give it. */
   access?: "current" | "stale" | "unknown" | null; access_changes?: AccessChange[];
 };
@@ -170,4 +172,20 @@ export function monthOf(c: WsChat): string {
 export function whenWords(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString([], { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+/** What Tidy… does, as its tooltip and its accessible name say it: checked
+ *  against the engine (`workspacechats::tidy_text`, `workspace_chat_tidy`).
+ *  It starts a chat; the chat is TOLD to delete nothing (an instruction, not a
+ *  rule the engine enforces); its changes are committed like any chat's, and
+ *  each commit can be undone in History. */
+export const TIDY_WHAT = "Tidy the index: start a chat with Claude that moves detail out of MEMORY.md into topic files, keeping one line and a link for each. It is told to delete nothing, and each change it makes is in History, where you can undo it.";
+/** Whether Tidy… can start a chat now, said before the press: the engine's own
+ *  refusals (`may_tidy_at`). `open`: the tidy chat that runs already, to open
+ *  instead of a second. The live-agent limit is not known before the press;
+ *  the start then says it, as any start does. */
+export function tidyBar(rows: readonly ChatRow[], ev: WsSessionsEv | null): { why: string | null; open: string | null } {
+  if (rows.some((r) => foldRuns(foldOf(r.chat, ev)))) return { why: "A chat is folding into this memory. Tidy… once it is done.", open: null };
+  const running = rows.find((r) => r.chat.tidy && r.live);
+  return running ? { why: "A tidy chat is running.", open: running.chat.id } : { why: null, open: null };
 }

@@ -86,7 +86,7 @@ import { useWsMemory } from "./useWsMemory";
 import { fileOf, longIndex, memoryPicks, nameAt, sizeWords, trailStart, trailStep, trailTo, type Trail } from "./wsmemory";
 import { memoryDocs, type MemoryView } from "./doc/memory";
 import { linkTo, memoryLink } from "./doc/memorypath";
-import { navRows, type ChatRow } from "./wschats";
+import { navRows, tidyBar, type ChatRow } from "./wschats";
 import { attentionOf, docChips, LAST_VIEW_KEY, lastView, placeWorkspace, placeWorkspaces, PLACE_WS_KEY, placeWsRead, placeWsSet, rollupOf, tabsWith, tabOr, wsCounts, wsFrameOn, wsTabs, type LastView, type Rollup } from "./wsview";
 import { answer, ask, DOCK, FLOAT, take, windowEnv, type Ask, type HandDoc } from "./doc/handoff";
 import { MainDocument, type MainDocApi } from "./doc/MainDocument";
@@ -4504,7 +4504,7 @@ function App() {
   /** The chat each workspace has in its middle column, while the app runs. */
   const [wsChat, setWsChat] = useState<Record<string, string | null>>({});
   /** A chat being started in a workspace, and why it was refused. */
-  const [wsStart, setWsStart] = useState<{ ws: string; why: string | null } | null>(null);
+  const [wsStart, setWsStart] = useState<{ ws: string; why: string | null; tidy?: boolean } | null>(null);
   /** With room for one side alone, which one. */
   const [wsSide, setWsSide] = useState<"chat" | "docs">("docs");
   const [ideasTick, setIdeasTick] = useState(0);
@@ -6963,7 +6963,8 @@ function App() {
     return false;
   };
   const startingChat = useRef(false);
-  const startChat = async (id: string) => {
+  /** `tidy`: Tidy…, the same start on the engine's tidy file. */
+  const startChat = async (id: string, tidy = false) => {
     if ((wsStart && wsStart.why === null) || startingChat.current) return;
     // One press at a time: what follows may wait for a save.
     startingChat.current = true;
@@ -6972,11 +6973,11 @@ function App() {
       if (!(await showWs(id, wsShown?.id === id ? wsTabNow : "memory", { chat: null }))) return;
     } finally { startingChat.current = false; }
     setWsSide("chat");
-    setWsStart({ ws: id, why: null });
-    const got = await wsChats.start(id);
+    setWsStart({ ws: id, why: null, tidy });
+    const got = await wsChats.start(id, tidy);
     // A workspace's first chat makes its memory.
     void wsMem.refresh(id);
-    if ("refused" in got) { setWsStart({ ws: id, why: got.refused }); return; }
+    if ("refused" in got) { setWsStart({ ws: id, why: got.refused, tidy }); return; }
     setWsStart(null);
     setWsChat((c) => ({ ...c, [id]: got.conv }));
   };
@@ -9311,7 +9312,7 @@ function App() {
   const wsMiddle = !wsShown || !wsChatsOn ? null
     : wsStart?.ws === wsShown.id
       ? (wsStart.why === null ? <StartingChat name={wsShown.name} />
-        : <RefusedStart why={wsStart.why} busy={wsChats.starting !== null} again={() => { setWsStart(null); void startChat(wsShown.id); }} away={() => { setWsStart(null); setWsSide("docs"); }} />)
+        : <RefusedStart why={wsStart.why} busy={wsChats.starting !== null} again={() => { const tidy = wsStart.tidy; setWsStart(null); void startChat(wsShown.id, tidy); }} away={() => { setWsStart(null); setWsSide("docs"); }} />)
     : wsConv && wsChats.of(wsShown.id)
       ? (
         <WorkspaceChatColumn ws={{ id: wsShown.id, name: wsShown.name }} info={wsChats.of(wsShown.id)!} rows={wsChats.rows(wsShown.id)} conv={wsConv} live={wsChats} ago={ago}
@@ -11021,6 +11022,7 @@ function App() {
                       strips: (mode: "edit" | "read") => (
                         <MemoryStrips failing={memView?.commit_error ?? null} mode={mode} long={mainDoc.name === "MEMORY.md" && memView ? longIndex(memView) : null}
                           live={wsChats.rows(mainDoc.ws).filter((x) => x.live).map((x) => x.chat.title)}
+                          tidy={wsChatsOn && mainDoc.name === "MEMORY.md" ? { ...tidyBar(wsChats.rows(mainDoc.ws), wsChats.sessions), busy: wsStart?.ws === mainDoc.ws && wsStart.why === null, run: () => void startChat(mainDoc.ws, true), show: (conv: string) => openChat(mainDoc.ws, conv) } : null}
                           heard={memHeard.has(`${mainDoc.ws}|${mainDoc.name}`)} hear={() => setMemHeard((h) => new Set([...h, `${mainDoc.ws}|${mainDoc.name}`]))}
                           under={memUnder?.ws === mainDoc.ws && memUnder.name === mainDoc.name ? memUnder : null} seen={() => setMemUnder(null)} />
                       ),

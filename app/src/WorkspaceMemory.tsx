@@ -15,7 +15,7 @@ import {
   changeFiles, changedBy, changedUnderWords, changeWords, conflictWords, failingWords, fileGroups, fileName, filesWords, lineDiff, linkText, mayEdit, nameAt, newFilePath, putName,
   revertOf, sizeWords, STATUS_WORDS, titleOf, tooBig, whileLive,
 } from "./wsmemory";
-import { whenWords } from "./wschats";
+import { TIDY_WHAT, whenWords } from "./wschats";
 import "./WorkspaceMemory.css";
 
 /** Of what the list does not show, how many it names. */
@@ -128,6 +128,9 @@ export function MemoryStrips(props: {
   hear(): void;
   under: { before: string; after: string } | null;
   seen(): void;
+  /** Tidy…, beside a long index: `why` it cannot start now, the tidy chat
+   *  that runs already (`open`), or null where chats are off. */
+  tidy?: { why: string | null; open: string | null; busy: boolean; run(): void; show(conv: string): void } | null;
 }) {
   const [diff, setDiff] = useState(false);
   const { under } = props;
@@ -136,7 +139,12 @@ export function MemoryStrips(props: {
   return (
     <>
       <MemoryFailing error={props.failing} />
-      {props.long && <div className="wsm-long" data-testid="memory-long" role="status"><span>{props.long}</span></div>}
+      {props.long && (
+        <div className="wsm-long" data-testid="memory-long" role="status">
+          <span>{props.long}{props.tidy?.why && <> <span className="wsm-change-d" data-testid="memory-tidy-why">{props.tidy.why}</span></>}</span>
+          {props.tidy && <TidyButton {...props.tidy} />}
+        </div>
+      )}
       {may && (
         <div className="wsm-long" data-testid="memory-may-edit" role="status">
           <span>{may} <span className="wsm-change-d">If it does while you have unsaved text, you choose: keep yours, or reload its version.</span></span>
@@ -155,6 +163,14 @@ export function MemoryStrips(props: {
       )}
     </>
   );
+}
+/** Tidy…: starts a chat on the engine's tidy file. Its title and its
+ *  accessible name are what it does ([`TIDY_WHAT`]); with a tidy chat running
+ *  it opens that one instead of refusing. */
+function TidyButton(t: { why: string | null; open: string | null; busy: boolean; run(): void; show(conv: string): void }) {
+  const running = t.open;
+  if (running !== null) return <button className="ctrl sm" data-testid="memory-tidy-open" title="Open the tidy chat that is running" onClick={() => t.show(running)}>Open it</button>;
+  return <button className="ctrl sm" data-testid="memory-tidy" data-track="workspace.memory.tidy" title={TIDY_WHAT} aria-label={TIDY_WHAT} disabled={t.busy || t.why !== null} onClick={t.run}>Tidy…</button>;
 }
 function LineDiff({ before, after }: { before: string; after: string }) {
   const rows = useMemo(() => lineDiff(before, after), [before, after]);
