@@ -1609,6 +1609,7 @@ impl Server {
                 if let Some(rows) = v["places"].as_array_mut() {
                     for r in rows.iter_mut() {
                         r["project"] = name.clone();
+                        self.cut_lineage(r);
                     }
                 }
                 let mut out = text_ok(&serde_json::to_string_pretty(&v).unwrap_or_default());
@@ -1637,6 +1638,7 @@ impl Server {
                         // when no agent runs there — and `activity` is the
                         // same answer with its provider and last completion.
                         let mut v = serde_json::to_value(p).unwrap_or_default();
+                        self.cut_lineage(&mut v);
                         add_agent_status(&mut v, self.proj()?, &p.slug, &p.path);
                         v["plan"] = plan_json(&p.path);
                         add_provenance(&mut v, store::read_lenient(&self.proj()?.main_root).places.get(&p.slug));
@@ -3051,6 +3053,17 @@ impl Server {
         }
     }
 
+    /// A row's lineage as this server may show it: with cross-project reach
+    /// off (a device-launched lane's cap, or the user's setting), a starter in
+    /// another project is cut to `{at, elsewhere}`, as serve cuts it for a
+    /// scoped device (`lineage::cut_foreign_starter`); such a server lists no
+    /// other project, so it must not name one here either.
+    fn cut_lineage(&self, row: &mut serde_json::Value) {
+        if !self.reach.on() {
+            worktrees_core::lineage::cut_foreign_starter(row);
+        }
+    }
+
     /// `cmd_new` in this server's own project, recording this place as the
     /// starter.
     fn run_new_here(&self, args: Vec<String>) -> serde_json::Value {
@@ -3177,9 +3190,9 @@ fn routed_why(me: &str, route: &worktrees_core::lineage::Route) -> String {
     match route.skipped.as_slice() {
         [] => format!("{me} reported with no `to`; you are the lane above it"),
         skipped if route.to == worktrees_core::lineage::MAIN => {
-            format!("{me} reported with no `to`; no lane above it has an agent running ({})", skipped.join(", "))
+            format!("{me} reported with no `to`; no lane above it shows a running agent ({})", skipped.join(", "))
         }
-        skipped => format!("{me} reported with no `to`; {} above it has no agent running, so it came to you", skipped.join(", ")),
+        skipped => format!("{me} reported with no `to`; {} above it shows no running agent, so it came to you", skipped.join(", ")),
     }
 }
 
@@ -4514,11 +4527,11 @@ mod tests {
         let mut kid = server_in(&sc.root, &c, false);
         let r = with_live(&["a"], || call(&mut kid, "report", serde_json::json!({ "text": "one" })));
         assert_eq!(body(&r)["to"], "a");
-        assert!(body(&r)["note"].as_str().unwrap().contains("your starter b has no agent running. Sent to the next lane up, a."));
+        assert!(body(&r)["note"].as_str().unwrap().contains("your starter b shows no running agent. Sent to the next lane up, a."));
         assert!(body(&r)["note"].as_str().unwrap().contains("Pass to: \"(main)\""));
         let r = with_live(&[], || call(&mut kid, "report", serde_json::json!({ "text": "two" })));
         assert_eq!(body(&r)["to"], "(main)", "nothing live on the way up: (main)");
-        assert!(inbox(&sc.root, "(main)")[0]["routed"].as_str().unwrap().contains("no lane above it has an agent running"));
+        assert!(inbox(&sc.root, "(main)")[0]["routed"].as_str().unwrap().contains("no lane above it shows a running agent"));
         // b reopened: its reports come back, nothing was written to undo.
         let r = with_live(&["b"], || call(&mut kid, "report", serde_json::json!({ "text": "three" })));
         assert_eq!(body(&r)["to"], "b");
@@ -5158,6 +5171,31 @@ mod tests {
         };
         Two { sc, alpha, beta, reg }
     }
+    /// Lane children: alpha's lane was started from beta. A server whose
+    /// reach is off (what a device's scoped lane is capped to) names neither
+    /// beta nor its place, in list_places or place_status; one with reach
+    /// `read` sees the starter whole.
+    #[test]
+    fn a_starter_in_another_project_is_cut_for_a_lane_whose_reach_is_off() {
+        let t = two("lineage-cut");
+        let root = t.alpha.to_string_lossy().to_string();
+        let at = worktrees_core::sysclock::now_epoch();
+        store::edit(&root, "lane", |d| d.started_by = Some(store::Link { project: Some("beta".into()), ..store::Link::to("lane", at) })).unwrap();
+        let lane = t.alpha.join(".worktrees/lane");
+        let row = |s: &mut Server| {
+            let l = body(&call(s, "list_places", serde_json::json!({})));
+            let st = body(&call(s, "place_status", serde_json::json!({ "slug": "lane" })));
+            let from_list = l["places"].as_array().unwrap().iter().find(|p| p["slug"] == "lane").unwrap()["lineage"]["starter"].clone();
+            (from_list, st["lineage"]["starter"].clone())
+        };
+        let mut off = t.server(&lane, Level::Off);
+        let cut = serde_json::json!({ "at": at, "elsewhere": true });
+        assert_eq!(row(&mut off), (cut.clone(), cut));
+        let mut read = t.server(&lane, Level::Read);
+        let whole = serde_json::json!({ "place": "lane", "at": at, "project": "beta" });
+        assert_eq!(row(&mut read), (whole.clone(), whole));
+    }
+
     impl Two {
         fn server(&self, here: &std::path::Path, user: Level) -> Server {
             let project = Project::discover(here).expect("a git repo");

@@ -219,7 +219,7 @@ impl<'a> Index<'a> {
     /// chain.
     pub fn lineage(&self, slug: &str, live: &dyn Fn(&str) -> bool) -> Lineage {
         let d = self.decl(slug);
-        let starter = d.and_then(|d| d.started_by.as_ref()).filter(|l| l.place != slug).map(|l| Starter {
+        let starter = d.and_then(|d| d.started_by.as_ref()).filter(|l| l.project.is_some() || l.place != slug).map(|l| Starter {
             place: l.place.clone(),
             at: l.at,
             project: l.project.clone(),
@@ -328,9 +328,44 @@ pub fn live_reader(p: &crate::project::Project) -> impl Fn(&str) -> bool + '_ {
     }
 }
 
+/// Cut a place row's references into ANOTHER project, for a caller that may
+/// not see other projects (a device whose scope is a list, an MCP server whose
+/// cross-project reach is off). The only such reference lineage can make is a
+/// starter in another project: `lineage.starter` and the raw
+/// `declared.started_by` become `{at, elsewhere: true}` — no project name, no
+/// slug. Every other lineage field names places of the row's own project,
+/// which such a caller may list anyway (grants reach projects, not places).
+/// A scope is a list of ROOTS and a starter names a registry NAME, so a
+/// project the caller does see is cut too: the cut never needs the registry.
+pub fn cut_foreign_starter(place: &mut serde_json::Value) {
+    for ptr in ["/lineage/starter", "/declared/started_by"] {
+        if let Some(v) = place.pointer_mut(ptr) {
+            if v.get("project").is_some_and(|p| !p.is_null()) {
+                let at = v.get("at").cloned().unwrap_or(serde_json::Value::Null);
+                *v = serde_json::json!({ "at": at, "elsewhere": true });
+            }
+        }
+    }
+}
+
+/// Whether `place_status`'s answer for a place means an agent runs there,
+/// for the report walk (§6): busy, waiting or idle. NOT `unknown` — a program
+/// that is not a shell and that no harness reports on (an editor, a dev
+/// server) reads no mail, and a report filed there waits silently, where one
+/// sent a place further up is read (§6.1). Not `none`: a pane back at its
+/// shell reads nothing either.
+pub fn counts_as_live(state: crate::activity::State) -> bool {
+    use crate::activity::State;
+    matches!(state, State::Busy | State::Waiting | State::Idle)
+}
+
 /// The reply's words for a default report that `route` sent somewhere other
 /// than plain `(main)`, or `None` when it went to `(main)` with nothing on
-/// the way (today's behaviour, said as today).
+/// the way (today's behaviour, said as today). Each clause says what `live`
+/// READ, which is true when `live` is `counts_as_live` over `place_status`'s
+/// answer: "which has an agent running" only for the place it answered yes
+/// for (busy, waiting or idle); "shows no running agent" for one it answered
+/// no for, which may still run a program, or an agent that reports nothing.
 pub fn route_note(route: &Route, me: &Lineage) -> Option<String> {
     if route.to == MAIN && route.skipped.is_empty() {
         return None;
@@ -346,9 +381,9 @@ pub fn route_note(route: &Route, me: &Lineage) -> Option<String> {
         format!("No `to`: sent to {named}, which has an agent running.")
     } else if route.to == MAIN {
         let rest = if route.skipped.len() > 1 { ", nor does any lane above it" } else { "" };
-        format!("No `to`: {named} has no agent running{rest}. Sent to (main).")
+        format!("No `to`: {named} shows no running agent{rest}. Sent to (main).")
     } else {
-        format!("No `to`: {named} has no agent running. Sent to the next lane up, {}.", route.to)
+        format!("No `to`: {named} shows no running agent. Sent to the next lane up, {}.", route.to)
     })
 }
 
@@ -529,6 +564,12 @@ mod tests {
         assert_eq!(i.route("c", &|_| true).to, MAIN);
         let s = i.lineage("c", &nobody).starter.unwrap();
         assert_eq!((s.project.as_deref(), s.place.as_str(), s.removed), (Some("other"), "design", false));
+        // Two repos' lanes can share a slug: a starter in another project
+        // named like this place is not a self link.
+        let mut w = World::new().place("lane", 30);
+        w.decl.entry("lane".into()).or_default().started_by = Some(Link { project: Some("other".into()), ..Link::to("lane", 25) });
+        let s = w.index().lineage("lane", &nobody).starter.expect("another project's lane is no self link");
+        assert_eq!((s.project.as_deref(), s.place.as_str()), (Some("other"), "lane"));
     }
 
     #[test]
@@ -564,8 +605,8 @@ mod tests {
         let me = i.lineage("c", &nobody);
         let note = |live: &dyn Fn(&str) -> bool| route_note(&i.route("c", live), &me);
         assert_eq!(note(&|s| s == "b").as_deref(), Some("No `to`: sent to your starter b, which has an agent running."));
-        assert_eq!(note(&|s| s == "a").as_deref(), Some("No `to`: your starter b has no agent running. Sent to the next lane up, a."));
-        assert_eq!(note(&nobody).as_deref(), Some("No `to`: your starter b has no agent running, nor does any lane above it. Sent to (main)."));
+        assert_eq!(note(&|s| s == "a").as_deref(), Some("No `to`: your starter b shows no running agent. Sent to the next lane up, a."));
+        assert_eq!(note(&nobody).as_deref(), Some("No `to`: your starter b shows no running agent, nor does any lane above it. Sent to (main)."));
         // A place with no lineage: today's (main), said as today.
         let w = World::new().place("old", 10);
         let i = w.index();
@@ -604,6 +645,18 @@ mod tests {
             std::fs::write(path, serde_json::to_string_pretty(&file).unwrap() + "\n").unwrap();
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// Live means an agent runs and reads mail: busy, waiting, idle. An
+    /// `unknown` program and a bare shell do not.
+    #[test]
+    fn only_a_running_agent_counts_as_live() {
+        use crate::activity::State;
+        assert!(counts_as_live(State::Busy));
+        assert!(counts_as_live(State::Waiting));
+        assert!(counts_as_live(State::Idle));
+        assert!(!counts_as_live(State::Unknown), "a pane running something no harness reports on reads no mail");
+        assert!(!counts_as_live(State::None));
     }
 
     #[test]

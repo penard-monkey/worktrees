@@ -50,7 +50,7 @@ import { StatusBody, StatusSheet, type StatusReport } from "./StatusSheet";
 import { installUsage, setSurface, trackChord } from "./usage";
 import { fileInfo } from "./filekind";
 import { fromDevice, instructionLine, instructionTitle, launchedTitle, deviceLabel, type By, type LaunchedBy, type RemoteInstruction } from "./provenance";
-import type { Lineage, Link } from "./lineage";
+import type { Elsewhere, Lineage, Link } from "./lineage";
 import { canStep as canStepNav, empty as emptyHistory, goTo as goToNav, label as labelNav, locKey, prune as pruneNav, reachable as reachableNav, record as recordNav, type History as NavHistory, type Loc } from "./navHistory";
 import { agentViewFor, applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, lowerFits, lowerFracFor, lowerRange, panelsFor, placeKey, railsMerged, railsWidth, saveSettings, stepMdZoom, stepZoom, upperTab, viewportWidth, withAgentView, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
 import {
@@ -310,7 +310,7 @@ type Declared = {
   title_by?: By;
   /// Lane children (store.rs, ./lineage): read through `Place.lineage`, which
   /// core resolves — never from these links directly.
-  started_by?: Link;
+  started_by?: Link | Elsewhere;
   handed_to?: Link;
   under?: Link;
 } | null;

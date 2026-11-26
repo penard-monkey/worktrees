@@ -397,39 +397,35 @@ lane. **Owner to confirm** all of it.
    place on that walk that exists in this project and is live gets it.
 4. Nothing live on the way up: `(main)`, live or not, as today.
 
-"Live" means `place_status`'s answer for the place is anything but `none`
-(`Project::agent_running`, over `activity::place_answer`). That includes
-`unknown`: a program other than a shell runs in the place's own session and no
-harness reports on it — an agent that has not started reporting yet, or
-something typed into the pane by hand. The first is the reason to count it;
-the second is the worst case, and §6.1 says what it costs. A tmux session
-whose pane is back at the shell is not live: a message there waits for
-nobody. (`(main)`'s wording was "has a session". This is narrower.)
+"Live" means `place_status`'s answer for the place is busy, waiting or idle
+(`lineage::counts_as_live`, over `activity::place_answer`, which
+`Project::agent_running` asks): an agent runs there and reads its mail. Not
+`none` (a pane back at its shell), and not `unknown`: a program other than a
+shell that no harness reports on, such as an editor or a dev server, reads no
+mail either (§6.1). (`(main)`'s wording was "has a session". This is narrower.)
 
 Adoption by menu (§8) does not change the walk. It is display only.
 
-### 6.1 The worst case of counting `unknown` as live
+### 6.1 Why `unknown` is not live
 
-The starter's agent has exited and its pane now runs something else that is
-not a shell and that no harness reports on: an editor, `npm run dev`, a
-`tail -f`, a program the agent left in the foreground. A child's report with
-no `to` is then filed in the starter's inbox, where no agent reads it, and the
-reply tells the child "sent to your starter X, which has an agent running",
-which is false. Nothing wakes: no `wait` returns for it. `(main)` does not
-receive the message and is not told. It can find out only by looking:
-`list_places` shows the child's `lineage.reports_to` naming the starter while
-the starter's `place_status` says `unknown`. The message is not lost: the
-starter's agent reads it with `messages` when it is reopened, and it expires
-with the log like any other. The opposite choice, `unknown` as not live,
-costs a report sent in the seconds before a starting agent writes its first
-probe: it goes one place further up, where an agent does read it. Sent too
-far up is visible; sent to a pane nobody reads is not.
+`unknown` is a place whose own session runs something that is not a shell,
+with no harness reporting on it: an agent in the seconds before it writes its
+first probe, or an editor, `npm run dev`, a `tail -f` left in the starter's
+pane after its agent exited. Counted as live, the second case filed a child's
+report in an inbox nothing reads, told the child "which has an agent
+running", woke no `wait`, and left `(main)` unaware unless it compared
+`list_places`' `reports_to` with the starter's status. Not counted, the first
+case sends one report a place further up, where an agent does read it. Sent
+too far up is visible; sent to a pane nobody reads is not. So the walk skips
+`unknown` (decided by `(main)` on 2026-11-25, as the owner's "living means an
+agent is running"), and the reply says "shows no running agent" for every
+place it skipped: what was read, not a claim that nothing runs there.
 
 The reply tells the sender where it went and why:
 
 ```json
 { "id": "…", "to": "design-workspace-chats",
-  "note": "Your starter design-workspace-view-combined has no agent running. Sent to the next lane up. Pass to: \"(main)\" to reach (main)." }
+  "note": "No `to`: your starter design-workspace-view-combined shows no running agent. Sent to the next lane up, design-workspace-chats. Pass to: \"(main)\" to reach (main)." }
 ```
 
 The stored message gets one optional field, `routed`, with the same reason,
@@ -475,7 +471,7 @@ with the edges listed.
 
 | The starter… | Drawn | Default report | Written |
 |---|---|---|---|
-| has no agent running (closed, crashed, or back at its shell) | Its lanes stay under it. Where it is in another tier, under its ghost. | Skips it, by §6. Goes to the next live lane up. | Nothing |
+| has no agent running (closed, crashed, back at its shell, or running something no harness reports on) | Its lanes stay under it. Where it is in another tier, under its ghost. | Skips it, by §6. Goes to the next live lane up. | Nothing |
 | is reopened | Unchanged | Comes back to it | Nothing |
 | is REMOVED with `rm` (CLI, MCP `remove_worktree`, the app) | Its lanes move under ITS parent, or to top level | The same parent, then up | `handed_to` on each of its lanes |
 | is made again with the same slug | The new place gets nothing back | Unchanged | Nothing. Rule 2 of §2. |
@@ -730,11 +726,12 @@ Changed in this text to match the code, 2026-11-25:
 |---|---|---|
 | §2 rule 3 | A link that leads back to its place fails | The NEWEST link of a hand-made loop fails; a tie voids all. Per place, both links of a two-link loop fell back and an adoption erased the recorded starter. |
 | §2 derived values | `starter`, `parent`, `reports_to` | Also `up`, `under`, `handed_to`, `started`, `lanes`; `under`/`handed_to` only when they hold all three rules |
-| §6 live | An agent is running | `place_status`'s answer is not `none`, so `unknown` counts (§6.1) |
+| §6 live | An agent is running | `place_status`'s answer is busy, waiting or idle; `unknown` and `none` are not (§6.1). The reply names only what it read: "which has an agent running" for a live place, "shows no running agent" for a skipped one. |
 | §7, §9 remove sentence | "It started 3 lanes. They move up to Y." | "3 lanes hang from it (…). They move up to Y; none is closed or removed.", counting handed lanes |
 | §8 `under.by` | Not specified | `(main)` or a principal id |
 | §8 MCP tool | `adopt_place { place, under? }` | Also `reset`; advertised only with `--mutations` |
 | §9 `place_status` | `lineage` and `started: [slugs]` | `started` is inside `lineage` |
+| §9 who sees what | Not specified | A starter in another project is the one cross-project reference a row can make. For a paired device whose scope is a list, and an MCP server whose cross-project reach is `off`, `lineage.starter` and `declared.started_by` are cut to `{at, elsewhere: true}` (`lineage::cut_foreign_starter`; serve's `scope`, MCP `list_places`/`place_status`). The scope is roots and the starter names a registry name, so even a project the device does see is cut. Every other lineage field names places of the row's own project, which such a caller may list anyway; `scope.rs` reads `Lineage` and fails on a field in neither list. |
 
 The mock (`app/src/mock/install.ts`, `?lanes`) carries a second copy of the
 rule, `lineageOf`. `app/scripts/lineage-check.mjs` holds it to core:

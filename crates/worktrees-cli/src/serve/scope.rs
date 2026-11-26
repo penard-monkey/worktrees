@@ -109,10 +109,27 @@ pub fn places(view: &View, mut v: Value) -> Value {
     v
 }
 
+/// `Lineage` fields that name only places of the row's own project.
+pub const LINEAGE_SAME_PROJECT: &[&str] = &["under", "handed_to", "parent", "up", "reports_to", "started", "lanes"];
+/// `Lineage` fields that can name another project, and are cut.
+pub const LINEAGE_CUT: &[&str] = &["starter"];
+
+/// A place row's lineage, as `view.caller` may see it: for any scope but
+/// every project, a starter in another project is cut to `{at, elsewhere}`
+/// (`lineage::cut_foreign_starter`). The console is unchanged.
+fn lineage_cut(view: &View, place: &mut Value) {
+    if !view.projects.is_all() {
+        worktrees_core::lineage::cut_foreign_starter(place);
+    }
+}
+
 fn places_stamps(view: &View, snapshot: &mut Value) {
     if let Some(Value::Array(places)) = snapshot.get_mut("places") {
-        for d in places.iter_mut().filter_map(|p| p.get_mut("declared")) {
-            stamps(view, d);
+        for p in places.iter_mut() {
+            lineage_cut(view, p);
+            if let Some(d) = p.get_mut("declared") {
+                stamps(view, d);
+            }
         }
     }
 }
@@ -589,6 +606,77 @@ mod tests {
         let mut want: Vec<String> = STAMPS.iter().map(|s| s.to_string()).collect();
         want.sort();
         assert_eq!(fields, want);
+    }
+
+    /// Lane children: the one reference a place row can make into another
+    /// project is a starter there (`lineage.starter.project`, and the raw
+    /// `declared.started_by` beside it). A scoped device never learns that
+    /// project's name or the starter's slug; the console, an all-projects
+    /// device and a same-project starter are untouched.
+    #[test]
+    fn a_starter_in_another_project_is_cut_for_a_scoped_device() {
+        let snap = |starter: Value| {
+            json!({ "places": [{
+                "slug": "kid", "path": "/r/a/.worktrees/kid",
+                "declared": { "started_by": starter.clone(), "note": "n" },
+                "lineage": { "starter": starter, "reports_to": "(main)" },
+            }] })
+        };
+        let elsewhere = json!({ "place": "design", "at": 5, "project": "b" });
+        let here = json!({ "place": "a-lane", "at": 5 });
+        let g = scoped(&["/r/a"]);
+        let roots = reg();
+        let me = phone();
+        let v = View { projects: &g.projects, roots: &roots, caller: &me, names: &NoDevices };
+        let cut = json!({ "at": 5, "elsewhere": true });
+
+        let got = places(&v, snap(elsewhere.clone()));
+        assert_eq!(got["places"][0]["lineage"]["starter"], cut, "{got}");
+        assert_eq!(got["places"][0]["declared"]["started_by"], cut, "{got}");
+        assert_eq!(got["places"][0]["declared"]["note"], "n");
+        let ws = workspace(&v, json!({ "projects": [{ "root": "/r/a", "ok": true, "snapshot": snap(elsewhere.clone()) }] }));
+        let row = &ws["projects"][0]["snapshot"]["places"][0];
+        assert_eq!((&row["lineage"]["starter"], &row["declared"]["started_by"]), (&cut, &cut), "{ws}");
+
+        // A starter in the same project names nothing the device cannot list.
+        assert_eq!(places(&v, snap(here.clone())), snap(here));
+        // The console, and a device whose scope is every project, see it whole.
+        let all = Grant::everything();
+        let desk = Caller::console();
+        let whole = View { projects: &all.projects, roots: &roots, caller: &desk, names: &NoDevices };
+        assert_eq!(places(&whole, snap(elsewhere.clone())), snap(elsewhere.clone()));
+        let wide = View { projects: &all.projects, roots: &roots, caller: &me, names: &NoDevices };
+        assert_eq!(places(&wide, snap(elsewhere.clone())), snap(elsewhere));
+    }
+
+    /// Every lineage field is classified: it names only places of the row's
+    /// own project (which a device that sees the row may list anyway), or it
+    /// is cut by [`lineage_cut`]. Read off lineage.rs and store.rs, so a field
+    /// added later fails here until it is placed in one list or the other.
+    #[test]
+    fn every_lineage_field_is_same_project_or_cut() {
+        let fields = |src: &str, name: &str| -> Vec<String> {
+            let src = src.split("\n#[cfg(test)]\nmod tests").next().unwrap();
+            let at = src.find(&format!("pub struct {name} {{")).unwrap_or_else(|| panic!("no struct {name}"));
+            let body = &src[at..];
+            let body = &body[..body.find("\n}").unwrap()];
+            let mut f: Vec<String> = body.lines().filter_map(|l| l.trim().strip_prefix("pub ")?.split_once(':').map(|(n, _)| n.to_string())).collect();
+            f.sort();
+            f
+        };
+        let lineage = include_str!("../../../worktrees-core/src/lineage.rs");
+        let store = include_str!("../../../worktrees-core/src/store.rs");
+        let mut want: Vec<String> = LINEAGE_SAME_PROJECT.iter().chain(LINEAGE_CUT).map(|s| s.to_string()).collect();
+        want.sort();
+        assert_eq!(fields(lineage, "Lineage"), want, "a Lineage field is neither same-project nor cut");
+        // A starter, and a link, name another project by `project` alone.
+        assert_eq!(fields(lineage, "Starter"), ["at", "place", "project", "removed"]);
+        assert_eq!(fields(store, "Link"), ["at", "by", "from", "place", "project"]);
+        // The declared links: only `started_by` may carry `project`.
+        let decl = fields(store, "Declared");
+        for k in ["started_by", "handed_to", "under"] {
+            assert!(decl.contains(&k.to_string()), "Declared lost {k}");
+        }
     }
 
     #[test]

@@ -16,8 +16,15 @@ export type Link = {
   by?: string;
 };
 
-/** `lineage.starter`: the recorded starter, as a header names it. */
-export type Starter = {
+/** What a caller that may not see other projects gets in place of a starter
+ *  in another project (`lineage.starter` and `declared.started_by`): when, and
+ *  that it was elsewhere — no project, no slug (serve's `scope`, an MCP
+ *  server with cross-project reach off; `lineage::cut_foreign_starter`). */
+export type Elsewhere = { at: number; elsewhere: true };
+
+/** `lineage.starter`: the recorded starter, as a header names it, or
+ *  `Elsewhere` when it is in a project the caller may not see. */
+export type Starter = Elsewhere | {
   place: string;
   at: number;
   project?: string;

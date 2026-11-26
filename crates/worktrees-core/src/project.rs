@@ -449,14 +449,13 @@ impl Project {
     }
 
     /// Whether an agent runs in a place, by `place_status`'s reader: its
-    /// answer is anything but `none`. A pane back at its shell is not live —
-    /// a message there waits for nobody (lane-children §6, B).
+    /// answer is busy, waiting or idle (`lineage::counts_as_live`).
     pub fn agent_running(&self, slug: &str, path: &str, probes: &[crate::agent::ClaudeProbe], panes: Option<&tmux::PaneList>) -> bool {
         let scan = crate::harness::Scan { probes, panes };
         let readings = crate::harness::place_activities(self, slug, path, &scan);
         let here = panes.map(|p| self.place_panes(slug, p));
         let answer = crate::activity::place_answer(readings.into_iter().map(|(_, x)| x), here.as_deref(), &self.session_name(slug));
-        answer.state != crate::activity::State::None
+        crate::lineage::counts_as_live(answer.state)
     }
 
     pub fn ls_json(&self) -> String {

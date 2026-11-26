@@ -327,7 +327,7 @@ function lineageOf(places: Place[]): Map<string, Lineage> {
   const out = new Map<string, Lineage>();
   for (const p of places) {
     const s = p.slug, d = p.declared;
-    const sb = d?.started_by && d.started_by.place !== s ? d.started_by : undefined;
+    const sb = d?.started_by && (d.started_by.project || d.started_by.place !== s) ? d.started_by : undefined;
     const l: Lineage = {};
     if (sb) l.starter = { place: sb.place, at: sb.at, ...(sb.project ? { project: sb.project } : { ...(holds(s, "started_by") ? {} : { removed: true }) }) };
     if (effective(s, "under", DRAW)) l.under = d!.under;

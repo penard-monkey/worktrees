@@ -907,6 +907,42 @@
           "reports_to": "d1"
         }
       }
+    },
+    {
+      "name": "a starter in another project with this place's slug",
+      "places": [
+        {
+          "slug": "(main)",
+          "born": 1
+        },
+        {
+          "slug": "lane",
+          "born": 30
+        }
+      ],
+      "declared": {
+        "lane": {
+          "started_by": {
+            "place": "lane",
+            "at": 25,
+            "project": "other"
+          }
+        }
+      },
+      "live": [
+        "lane"
+      ],
+      "expect": {
+        "(main)": {},
+        "lane": {
+          "starter": {
+            "place": "lane",
+            "at": 25,
+            "project": "other"
+          },
+          "reports_to": "(main)"
+        }
+      }
     }
   ]
 }
