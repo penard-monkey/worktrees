@@ -1967,7 +1967,7 @@ mod tests {
     /// `shares_all`, `guests_list`, `guest_remove`, `owner_set_name`) and the
     /// four `guest` rows (`GUEST_ROWS`), the capability's first, the thread's
     /// two `guest` rows (`thread_read`, `thread_post`) and PR C's two
-    /// (`shared_turns`, `shared_tool_call`), then `shared_image`. A row that moves group
+    /// (`shared_turns`, `shared_tool_call`), then `shared_image`; and lane children's `set_place_under` (`write`). A row that moves group
     /// fails here until the count (and the proposal's table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
@@ -1984,7 +1984,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 72), ("write", 23), ("admin", 42), ("console", 113), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 72), ("write", 24), ("admin", 42), ("console", 113), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7), ("guest", 9),
         ]
         .into();

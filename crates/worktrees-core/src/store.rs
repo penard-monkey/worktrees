@@ -1,6 +1,7 @@
 //! The per-repo DECLARED-state sidecar (`.worktrees.places.json`) + lifecycle
-//! reconciliation. Core owns read + write; the CLI's `ls --json` stays live-only
-//! (it never touches this), and the app overlays declared state + reconciles.
+//! reconciliation. Core owns read + write; the CLI's `ls --json` reads it only to
+//! resolve each place's `lineage` (`Project::ls`), and the app overlays declared
+//! state + reconciles.
 //! Moved here from the app in Increment 4 so both consumers share one store.
 
 use serde::{Deserialize, Serialize};
