@@ -45,6 +45,12 @@ pub struct Place {
     /// Reconciled label. The CLI emits live-only (`active`|`closed`); the app
     /// recomputes with declared state merged in.
     pub lifecycle_effective: String,
+    /// Who started this place and where it hangs (lane-children §2),
+    /// resolved by `lineage` from the store so no client re-implements the
+    /// rule. Set on every row `ls` emits; absent on a single-place read
+    /// (`place_one`), which cannot see the other places the rule needs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<crate::lineage::Lineage>,
 }
 
 /// A worktree git registers for this repo that lives OUTSIDE `.worktrees/` —

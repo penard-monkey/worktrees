@@ -91,3 +91,32 @@ ls_json() { LS="$(cd "$REPO" && "$WT_BIN" ls --json)"; }
   [ -d "$REPO/.worktrees/feat-top" ]
   [ "$(decl feat-top started_by)" = - ]
 }
+
+@test "lineage: ls --json resolves parent, starter, started and the report default" {
+  run_wt new a --no-tmux
+  run_wt -C "$REPO/.worktrees/a" new b --no-tmux
+  run_wt -C "$REPO/.worktrees/b" new c --no-tmux
+  run_wt new old --no-tmux
+  ls_json
+  [ "$(lineage c parent)" = b ]
+  [ "$(lineage b parent)" = a ]
+  [ "$(lineage a parent)" = - ]
+  [ "$(lineage c starter)" = b ]
+  [ "$(lineage a started)" = b ]
+  [ "$(lineage a lanes)" = b ]
+  # No agent runs anywhere (--no-tmux), so every default report goes to (main).
+  [ "$(lineage c reports_to)" = "(main)" ]
+  # A place with no record behaves as today: top level, reports to (main).
+  [ "$(lineage old parent)" = - ]
+  [ "$(lineage old reports_to)" = "(main)" ]
+  [ "$(lineage '(main)' reports_to)" = - ]
+}
+
+@test "lineage: MCP place_status carries lineage with the place's started lanes" {
+  run_wt new a --no-tmux
+  run_wt -C "$REPO/.worktrees/a" new b --no-tmux
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"place_status","arguments":{"slug":"a"}}}' > "$BATS_TEST_TMPDIR/in.jsonl"
+  run bash -c "cd '$REPO' && '$WT_BIN' mcp < '$BATS_TEST_TMPDIR/in.jsonl' 2>/dev/null"
+  got="$(printf '%s' "$output" | python3 -c 'import json,sys; r=json.loads(sys.stdin.read()); print(json.loads(r["result"]["content"][0]["text"])["lineage"]["started"])')"
+  [ "$got" = "['b']" ]
+}

@@ -417,6 +417,7 @@ impl Project {
         let mut places = Vec::with_capacity(computed.len() + 1);
         places.push(main);
         places.extend(computed);
+        self.add_lineage(&mut places, panes.as_ref());
         LsJson {
             schema_version: SCHEMA_VERSION,
             repo: self.main_root.clone(),
@@ -425,6 +426,37 @@ impl Project {
             places,
             strays,
         }
+    }
+
+    /// `lineage` on every row (lane-children §2, §6). One store read; an
+    /// agent's liveness is asked only for places on someone's report chain,
+    /// through `place_status`'s own reader (`activity::place_answer`), so a
+    /// repo whose places record no lineage pays nothing here.
+    fn add_lineage(&self, places: &mut [Place], panes: Option<&tmux::PaneList>) {
+        let store = crate::store::read_lenient(&self.main_root);
+        let paths: HashMap<String, String> = places.iter().map(|p| (p.slug.clone(), p.path.clone())).collect();
+        let index = crate::lineage::Index::new(places.iter().map(|p| (p.slug.as_str(), p.created_epoch)), &store.places);
+        let probes = std::cell::OnceCell::new();
+        let live = |slug: &str| -> bool {
+            let Some(path) = paths.get(slug) else { return false };
+            let probes = probes.get_or_init(|| crate::agent::live_probes_in(panes));
+            self.agent_running(slug, path, probes, panes)
+        };
+        let mut all = index.resolve_all(&live);
+        for p in places.iter_mut() {
+            p.lineage = all.remove(&p.slug);
+        }
+    }
+
+    /// Whether an agent runs in a place, by `place_status`'s reader: its
+    /// answer is anything but `none`. A pane back at its shell is not live —
+    /// a message there waits for nobody (lane-children §6, B).
+    pub fn agent_running(&self, slug: &str, path: &str, probes: &[crate::agent::ClaudeProbe], panes: Option<&tmux::PaneList>) -> bool {
+        let scan = crate::harness::Scan { probes, panes };
+        let readings = crate::harness::place_activities(self, slug, path, &scan);
+        let here = panes.map(|p| self.place_panes(slug, p));
+        let answer = crate::activity::place_answer(readings.into_iter().map(|(_, x)| x), here.as_deref(), &self.session_name(slug));
+        answer.state != crate::activity::State::None
     }
 
     pub fn ls_json(&self) -> String {
@@ -487,6 +519,7 @@ impl Project {
             stack: None,
             declared: None,
             lifecycle_effective: life,
+            lineage: None,
         };
 
         if !is_main && !reg.contains(dir) {
