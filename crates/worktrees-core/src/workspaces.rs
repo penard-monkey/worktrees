@@ -27,7 +27,8 @@
 use std::fs;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -43,6 +44,43 @@ pub const NAME_MAX: usize = 80;
 pub const COLORS: &[&str] = &["blue", "purple", "green", "amber", "orange", "red", "teal", "gray"];
 
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+/// What hears a write: the file as it was and as it is now.
+pub type Observer = Arc<dyn Fn(&WorkspacesFile, &WorkspacesFile) + Send + Sync>;
+
+/// Who hears a write, by path: [`watch_writes`]' entries.
+static OBSERVERS: Mutex<Vec<(u64, PathBuf, Observer)>> = Mutex::new(Vec::new());
+static NEXT_OBSERVER: AtomicU64 = AtomicU64::new(0);
+
+/// Holds a [`watch_writes`] registration; dropping it ends it.
+pub struct WriteWatch(u64);
+
+impl Drop for WriteWatch {
+    fn drop(&mut self) {
+        OBSERVERS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(id, _, _)| *id != self.0);
+    }
+}
+
+/// Call `f` after every write [`edit_at`] makes to `p`, with the file before
+/// and after, once the write is on disk and every lock is released. This is
+/// the ONE place every writer shares (create, rename, recolour, reorder,
+/// membership, plan and idea links, delete), so the engine's
+/// `workspaces:changed` lives here and in no caller. A write that changes
+/// nothing is not a write, and is not heard. A hand edit of the file is not
+/// heard either.
+pub fn watch_writes(p: &Path, f: Observer) -> WriteWatch {
+    let id = NEXT_OBSERVER.fetch_add(1, Ordering::SeqCst);
+    OBSERVERS.lock().unwrap_or_else(|e| e.into_inner()).push((id, p.to_path_buf(), f));
+    WriteWatch(id)
+}
+
+fn heard(p: &Path, before: &WorkspacesFile, after: &WorkspacesFile) {
+    let hear: Vec<Observer> =
+        OBSERVERS.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|(_, q, _)| q == p).map(|(_, _, f)| f.clone()).collect();
+    for f in hear {
+        f(before, after);
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct ProjectRef {
@@ -145,12 +183,17 @@ pub fn edit_at<T>(p: &Path, f: impl FnOnce(&mut WorkspacesFile) -> Result<T, Str
     let mut file = read_at(p)?;
     let before = file.clone();
     let out = f(&mut file)?;
-    if file != before {
+    let wrote = file != before;
+    if wrote {
         file.version = file.version.max(VERSION);
         let json = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
         crate::fsx::write_atomic(p, json.as_bytes(), None).map_err(|e| format!("{}: {e}", p.display()))?;
     }
     drop(lock);
+    drop(_serial);
+    if wrote {
+        heard(p, &before, &file);
+    }
     Ok(out)
 }
 
@@ -428,6 +471,55 @@ mod tests {
     }
     fn any(_: &str) -> bool {
         true
+    }
+
+    /// Every writer is heard ONCE per write that changed the file, through
+    /// the one place they share, `edit_at` (the engine's `workspaces:changed`
+    /// hangs on it); a write that changes nothing, a write to another file
+    /// and a write after the watch is dropped are not heard.
+    #[test]
+    fn every_writer_is_heard_once_and_a_write_that_changes_nothing_is_not() {
+        let t = Tmp::new("heard");
+        let other = Tmp::new("heard-other");
+        let n = Arc::new(Mutex::new(Vec::<(usize, usize)>::new()));
+        let rec = n.clone();
+        let watch = watch_writes(&t.file(), Arc::new(move |b: &WorkspacesFile, a: &WorkspacesFile| rec.lock().unwrap().push((b.workspaces.len(), a.workspaces.len()))));
+        let heard = || std::mem::take(&mut *n.lock().unwrap());
+        let a = create_at(&t.file(), "A").unwrap().id;
+        assert_eq!(heard(), [(0, 1)], "create");
+        let b = create_at(&t.file(), "B").unwrap().id;
+        assert_eq!(heard().len(), 1, "create");
+        rename_at(&t.file(), &a, "A2").unwrap();
+        assert_eq!(heard().len(), 1, "rename");
+        rename_at(&t.file(), &a, "A2").unwrap();
+        assert_eq!(heard(), [], "a rename to the same name writes nothing");
+        set_color_at(&t.file(), &a, Some("red")).unwrap();
+        assert_eq!(heard().len(), 1, "recolour");
+        reorder_at(&t.file(), &s(&[&b, &a])).unwrap();
+        assert_eq!(heard().len(), 1, "reorder");
+        set_projects_at(&t.file(), &a, &s(&["/r/a"]), any).unwrap();
+        assert_eq!(heard().len(), 1, "membership");
+        let (plan, idea) = (crate::ulid::new(), crate::ulid::new());
+        set_plan_at(&t.file(), &a, Some(&plan)).unwrap();
+        assert_eq!(heard().len(), 1, "plan");
+        link_idea_at(&t.file(), &a, &idea).unwrap();
+        assert_eq!(heard().len(), 1, "link an idea");
+        unlink_idea_at(&t.file(), &a, &idea).unwrap();
+        assert_eq!(heard().len(), 1, "unlink an idea");
+        let (_, made) = from_plan_at(&t.file(), "From plan", &crate::ulid::new(), &[], &[], any).unwrap();
+        assert!(made);
+        assert_eq!(heard().len(), 1, "from a plan");
+        from_plan_at(&t.file(), "Again", &plan, &[], &[], any).unwrap();
+        assert_eq!(heard(), [], "the plan's workspace exists already: nothing written");
+        assert!(rename_at(&t.file(), "nosuch", "x").is_err());
+        assert_eq!(heard(), [], "a refused write is not heard");
+        remove_at(&t.file(), &b).unwrap();
+        assert_eq!(heard(), [(3, 2)], "delete");
+        create_at(&other.file(), "Elsewhere").unwrap();
+        assert_eq!(heard(), [], "another file's write");
+        drop(watch);
+        create_at(&t.file(), "C").unwrap();
+        assert_eq!(heard(), [], "a dropped watch hears nothing");
     }
 
     #[test]

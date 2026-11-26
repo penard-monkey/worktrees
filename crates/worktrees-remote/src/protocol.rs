@@ -26,6 +26,13 @@ pub const PROTO_MIN: u32 = 1;
 /// security property the client relies on is refused.
 pub const HOST_PROTO_MIN: u32 = 1;
 
+/// What the host's remote `ok` names of named workspaces (`ok.workspaces`,
+/// the iOS workspaces plan §6): one word per part a device may use. Phase 1
+/// is `list` (`workspaces_list`, `workspaces:changed`); later phases add
+/// words here, never a `PROTO` bump. A client ignores words it does not know
+/// and reads an absent key as none.
+pub const WORKSPACES: &[&str] = &["list"];
+
 /// The host's refusal of a proven client below [`PROTO_MIN`] (a 1008 close
 /// reason), and what a client says when the host needs a newer one.
 pub const UPDATE_APP: &str = "Update the app";

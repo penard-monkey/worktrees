@@ -81,8 +81,9 @@ pub fn challenge_frame(sn: &str) -> String {
 /// device can show its own grant and expiry (Phase 2 §4.5, as amended by
 /// (main) 2026-10-22: the remote listener runs handshake v1 unchanged, and
 /// this is its `ok`), `proto` / `proto_min`, the protocol this host speaks and
-/// the oldest a client may (iOS Q10, `worktrees_remote::protocol`), and `push`,
-/// that it has the notification rows. Loopback's has none of these: its client
+/// the oldest a client may (iOS Q10, `worktrees_remote::protocol`), `push`,
+/// that it has the notification rows, and `workspaces`, the parts of named
+/// workspaces a device may use (`protocol::WORKSPACES`). Loopback's has none of these: its client
 /// is this build.
 pub fn auth_reply(proof: &str, device: Option<&Value>) -> String {
     let mut v = json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "proof": proof });
@@ -94,6 +95,8 @@ pub fn auth_reply(proof: &str, device: Option<&Value>) -> String {
         // flag lets a client know without asking. Absent on an older host.
         v["push"] = json!(true);
         v["send_caps"] = worktrees_core::harness::send_caps();
+        // What a device may use of named workspaces (iOS workspaces §6).
+        v["workspaces"] = json!(worktrees_remote::protocol::WORKSPACES);
     }
     v.to_string()
 }
@@ -751,7 +754,7 @@ mod tests {
         let v: Value = serde_json::from_str(&auth_reply("p", Some(&d))).unwrap();
         assert_eq!(
             v,
-            json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "proof": "p", "device": d, "proto": 1, "proto_min": 1, "push": true, "send_caps": worktrees_core::harness::send_caps() }),
+            json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "proof": "p", "device": d, "proto": 1, "proto_min": 1, "push": true, "send_caps": worktrees_core::harness::send_caps(), "workspaces": ["list"] }),
             "a remote session's names its device and the protocol range this host serves"
         );
         let c: Value = serde_json::from_str(&challenge_frame("s")).unwrap();

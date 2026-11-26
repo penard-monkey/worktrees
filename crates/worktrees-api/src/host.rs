@@ -116,9 +116,15 @@ pub fn start(ctx: Ctx, hooks: Hooks) -> std::thread::JoinHandle<()> {
     // documents outside the repo's own gitignore, indexed by Spotlight.
     viewer::cleanup(&ctx.config_dir);
     import_app_projects(&ctx);
+    // `workspaces:changed` on every write of the workspaces file, for the
+    // life of the poll, which is the life of the engine.
+    let ws_watch = crate::workspaces::emit_writes(&ctx, &worktrees_core::workspaces::path());
     std::thread::Builder::new()
         .name("engine-poll".into())
-        .spawn(move || poll(ctx, hooks))
+        .spawn(move || {
+            let _ws_watch = ws_watch;
+            poll(ctx, hooks)
+        })
         .expect("could not spawn the engine's poll thread")
 }
 

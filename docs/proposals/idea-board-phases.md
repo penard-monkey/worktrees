@@ -1023,7 +1023,9 @@ changed.
   forms, the guard.
 - Console-only rows: `workspaces_list`, `workspace_create`,
   `workspace_rename`, `workspace_remove`, `workspace_set_projects`,
-  `workspace_reorder`.
+  `workspace_reorder`. (Since 2026-11-25, iOS workspaces phase 1,
+  `workspaces_list` is also a paired device's `read`, projected by serve's
+  `scope::named_workspaces`; the others stay console-only.)
 - The switch and the grouped nav (§9's sketch), from the same place rows as
   today's nav; the right side unchanged.
 - The phase 2 drags of §6.1 on `navdrag.ts`'s plumbing, each with its menu.
