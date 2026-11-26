@@ -222,12 +222,14 @@ export type Settings = {
   density: "comfortable" | "compact";
   nav_width: number; // 220–460, further capped by the viewport (see fitLayout)
   nav_guides: boolean; // draw the tree plumb lines in the nav (data-guides on <html>)
-  // Settings → Layout → "Show the Everything Else header" (the owner,
-  // 2026-11-25). Off hides the built-in group's HEADER only: its projects stay
-  // in the Workspaces view, below the named workspaces, with no title, card or
-  // count, and always unfolded (no header is left to unfold it). With no named
-  // workspace the header shows either way. Default on; a stored value is kept.
-  nav_ee_header: boolean;
+  // Settings → Layout → "Show Everything Else in Workspaces" (the owner,
+  // 2026-11-25: "All projects holds all projects; the workspaces show only
+  // defined workspaces"). Off, the Workspaces view draws no Everything Else
+  // group, projects included: they are in All projects, and a waiting or
+  // unread place among them marks that side of the switch. With no named
+  // workspace the view is then empty, and says so. Default on; a stored value
+  // is kept.
+  nav_ee_in_workspaces: boolean;
   // ── the afterglow dot's decay ───────────────────────────────────────────
   // How long the purple "Claude finished here" ember stays lit, and in how many
   // discrete brightness steps. The FIRST boundary is not a setting — it is
@@ -587,7 +589,7 @@ export const DEFAULTS: Settings = {
   density: "comfortable",
   nav_width: 300,
   nav_guides: true,
-  nav_ee_header: true,
+  nav_ee_in_workspaces: true,
   done_horizon_secs: 12 * 3600,
   done_steps: 3,
   nav_pinned: false,
@@ -982,7 +984,7 @@ export async function loadSettings(): Promise<Settings> {
     // On by default since 2026-11-25. A stored value is kept: every blob saved
     // since #45 holds one (whole-blob saves), and false there may be a choice.
     s.restore_last = typeof s.restore_last === "boolean" ? s.restore_last : true;
-    s.nav_ee_header = typeof s.nav_ee_header === "boolean" ? s.nav_ee_header : true;
+    s.nav_ee_in_workspaces = typeof s.nav_ee_in_workspaces === "boolean" ? s.nav_ee_in_workspaces : true;
     // Whole-blob settings give every existing install an explicit false. The
     // marker applies the new default once, then leaves later user choices alone.
     const needsChatDefaultMigration = raw?.chat_default_v1 !== true;

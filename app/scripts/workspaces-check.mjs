@@ -224,7 +224,7 @@ ok("…and never unregisters it", !/inWs[^\n]*confirmRemoveProject/.test(hdr));
 {
   const at = app.indexOf('data-testid="ee-group"');
   const card = at < 0 ? "" : app.slice(app.lastIndexOf("everythingElse(wsList", at), app.indexOf("})()}", at));
-  ok("Everything Else is drawn from the derived rule, after the named ones", /everythingElse\(wsList, /.test(app) && app.indexOf("everythingElse(wsList") > app.indexOf("{wsGapAt(null)"));
+  ok("Everything Else is drawn from the derived rule, after the named ones", /everythingElse\(wsList, /.test(app) && app.indexOf("const ee = everythingElse(wsList") > app.indexOf("{wsGapAt(null)"));
   ok("…its card is no drop target and no reorder row (no data-ws-id / data-drop)", card.length > 100 && !/data-ws-id|data-drop/.test(card));
   ok("…it folds under its reserved id", /toggleWs\(ee\.id\)/.test(card) && /settings\.ws_collapsed\?\.\[ee\.id\]/.test(card));
   const head = app.slice(app.indexOf("function EverythingElseHeader"), app.indexOf("function WsGoneRow") > 0 ? app.indexOf("function WsGoneRow") : undefined);
