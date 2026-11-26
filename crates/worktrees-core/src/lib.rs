@@ -23,6 +23,7 @@ pub mod codex_usage;
 pub mod codexmcp;
 pub mod derive;
 pub mod diag;
+pub mod diskusage;
 pub mod docs;
 pub mod error;
 pub mod fetchpolicy;

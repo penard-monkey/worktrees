@@ -98,6 +98,8 @@ import { setSettingsOpener, useDeviceList } from "./remoteStore";
 import { GuestToasts, GuestUnder, SharedWithMe } from "./GuestNav";
 import { GuestSpace } from "./GuestSession";
 import { closeShare, useGuests } from "./guest";
+import { DiskView, useDisk } from "./DiskView";
+import { gb, ownTotal, type DiskScope } from "./diskmodel";
 import logoUrl from "./assets/logo.png";
 import "./tokens.css";
 import "./App.css";
@@ -5260,6 +5262,10 @@ function App() {
   // state: no extra invokes.
   const [busyPaths, setBusyPaths] = useState<Set<string>>(new Set());
   const [waitingPaths, setWaitingPaths] = useState<Set<string>>(new Set());
+  // The Disk view (DiskView.tsx): which scope is open over the main area, and the
+  // engine's scans, held here so the nav's size badges read them too.
+  const [diskOpen, setDiskOpen] = useState<DiskScope | null>(null);
+  const disk = useDisk(fail, busyPaths);
   // The same waiting set, per harness (`waiting_by`): the nav drag refuses a
   // drop only when the agent it would paste INTO is the one stopped on a
   // person, which is how `drop_reference` decides. Absent from an older
@@ -7015,6 +7021,19 @@ function App() {
     setWsChat((c) => ({ ...c, [id]: got.conv }));
   };
   useEffect(() => { if (sel) setWsOpen(null); }, [sel]);
+  // A place's Disk view follows the nav to another place; any other scope
+  // gives way to a place the nav selects.
+  useEffect(() => {
+    setDiskOpen((d) => !d ? d : d.kind === "place" ? (sel ? { kind: "place", repo: sel.repo, slug: sel.slug } : null) : sel ? null : d);
+  }, [sel?.repo, sel?.slug]);
+  useEffect(() => { if (wsOpen) setDiskOpen(null); }, [wsOpen]);
+  const openDisk = (s: DiskScope) => {
+    closeShare();
+    closeCtx();
+    if (s.kind === "place") setSel({ repo: s.repo, slug: s.slug });
+    else { setSel(null); setWsOpen(null); }
+    setDiskOpen(s);
+  };
   useEffect(() => { if (!viewOn) setWsOpen(null); }, [viewOn]);
   // A workspace's plan, or its first idea, arrives or goes while its tab is up.
   const planHere = wsShown?.plan ?? null;
@@ -7236,6 +7255,8 @@ function App() {
   useEffect(() => { setWorkReview(null); setWorkPick(null); }, [wsOpen]);
   const ovHere = wsOv && wsOv.id === wsOpen ? wsOv.ov : null;
   const activity = { busy: busyPaths, waiting: waitingPaths };
+  const diskRoots = (ws?.projects ?? []).filter((p) => p.ok).map((p) => p.root).join("\n");
+  useEffect(() => { if (diskRoots) disk.peek(diskRoots.split("\n")); }, [diskRoots, disk.peek]);
   // `refresh` drops a read only for a newer one's, so afterwards the list on
   // screen is newer than the ask; a failed one (`false`) settles nothing.
   const gonePlaces = useGone(ovHere ? missingPlaces(ovHere.work, ovHere.work_states, ws) : [],
@@ -8936,7 +8957,7 @@ function App() {
         e.preventDefault();
         // ⌘1 deliberately leaves the sidebar alone: Home is a destination in the
         // main pane, and a chord that also moved a panel would be two acts.
-        if (target === "home") { setSel(null); setWsOpen(null); setMenu(null); closeCtx(); }
+        if (target === "home") { setSel(null); setWsOpen(null); setDiskOpen(null); setMenu(null); closeCtx(); }
         else focusPlaces();
       } else if (e.metaKey && k === "e") {
         // ⌘E — open the selected place in the editor (no-op when nothing selected).
@@ -9820,6 +9841,10 @@ function App() {
             : <span className="rollup broken" title="repo gone">⊘</span>}
           <span className="pname" title={pv.root} onClick={toggle}>{basename(pv.root)}</span>
           {pv.ok ? <span className="pcount">{places.length}</span> : <span className="pgone">repo gone</span>}
+          {pv.ok && disk.usage[pv.root] && (() => {
+            const own = disk.usage[pv.root].places.reduce((a, x) => a + ownTotal(x.own), 0);
+            return own >= 1e8 ? <span className="nav-disk" title="what this project's places hold on disk (Disk view)">{gb(own)}</span> : null;
+          })()}
           {/* An unreadable .worktrees.toml is a PROJECT-level fact — no row can
               carry it, and the row glyphs are deliberately frozen at their last
               measurement while doctor can't run. Without this the nav's only
@@ -10340,7 +10365,7 @@ function App() {
         onPointerEnter={() => navPointer("nav", true)}
         onPointerLeave={() => navPointer("nav", false)}
       >
-        <button className={"home-item" + (sel || guestOpen || wsShown ? "" : " on")} onClick={() => { closeShare(); setSel(null); setWsOpen(null); setMenu(null); closeCtx(); hideNav(); }}>
+        <button className={"home-item" + (sel || guestOpen || wsShown || diskOpen ? "" : " on")} onClick={() => { closeShare(); setSel(null); setWsOpen(null); setDiskOpen(null); setMenu(null); closeCtx(); hideNav(); }}>
           <HomeIcon /> Home
         </button>
         <div className="nav-head">
@@ -10727,7 +10752,23 @@ function App() {
             dock for free, instead of needing a negative inline offset. */}
         <div className="space-body" ref={spaceRef}>
           <main className="main">
-            {selected && sel ? (
+            {diskOpen && (diskOpen.kind !== "place" || (sel && selected)) ? (
+              <DiskView
+                key={JSON.stringify(diskOpen)}
+                scope={diskOpen}
+                projects={(ws?.projects ?? []).filter((p) => p.ok && p.snapshot).map((p) => ({
+                  root: p.root, name: p.name ?? basename(p.root),
+                  places: p.snapshot!.places.map((x) => ({ slug: x.slug, path: x.path, last_commit_epoch: x.last_commit_epoch })),
+                }))}
+                workspaces={wsList ? wsList.workspaces.map((w) => ({ id: w.id, name: w.name, projects: w.projects.map((x) => ({ root: x.root })) })) : null}
+                byWorkspace={navView === "workspaces"}
+                busy={busyPaths}
+                disk={disk}
+                open={openDisk}
+                close={() => setDiskOpen(null)}
+                onError={fail}
+              />
+            ) : selected && sel ? (
               <>
                 {liveHere.length === 0 && (
                   <div className="agent-actions" aria-label="Agents in this place">
@@ -10920,6 +10961,9 @@ function App() {
                     </button>
                     <button className="ctrl home-import with-icon" data-testid="hubs-open-home" onClick={openHubs}>
                       <Icons.HardDrive size={13} /> Hubs…
+                    </button>
+                    <button className="ctrl home-import with-icon" data-testid="disk-open-home" onClick={() => openDisk({ kind: "all" })}>
+                      <Icons.ChartColumn size={13} /> Disk…
                     </button>
                     {/* The guest's way in (S4, F5): the link a host's Share… sent. */}
                     {groupChatOn && (
@@ -11921,6 +11965,7 @@ function App() {
         <CtxMenu x={ctx.x} y={ctx.y} onClose={closeCtx}>
           <div className="pop-hint">{ctxPlace.is_main ? "◆ main" : ctxPlace.slug}</div>
           <button className="pop-item" onClick={() => { if (ctxCard.current !== undefined) fromWs(ctx.repo, ctxPlace.slug, ctxCard.current); enterPlace(ctx.repo, ctxPlace); }}>Enter <Icons.ChevronRight size={12} /></button>
+          <button className="pop-item" data-testid="ctx-disk" onClick={() => openDisk({ kind: "place", repo: ctx.repo, slug: ctxPlace.slug })}>Disk usage</button>
           {groupChatOn && shareStart(ctx.repo, ctxPlace.slug) && (
             <button className="pop-item" data-testid="ctx-share" onClick={() => { const r = ctx.repo, sl = ctxPlace.slug; closeCtx(); openShareDialog(r, sl); }}>Share this session…</button>
           )}
@@ -12042,6 +12087,7 @@ function App() {
             <div className="pop-hint">{basename(ctx.root)}</div>
             {pv && <button className="pop-item" onClick={() => { closeCtx(); openNewForm(ctx.root, ""); }}>New worktree…</button>}
             {main && <button className="pop-item" onClick={() => enterPlace(ctx.root, main)}>Enter main ▸</button>}
+            {pv?.ok && <button className="pop-item" data-testid="proj-disk" onClick={() => openDisk({ kind: "project", root: ctx.root })}>Disk usage</button>}
             {pv?.ok && (
               <button className="pop-item" onClick={() => { closeCtx(); mutate(invoke("fetch_origin", { root: ctx.root })); }}>Fetch origin</button>
             )}
@@ -12182,6 +12228,9 @@ function App() {
                 footer's three acts with this workspace as their continuation
                 (`wsArrive`). Hubs… stays in the footer: a hub import is not
                 one project. */}
+            {w.projects.length > 0 && (
+              <button className="pop-item" data-testid="ws-disk" onClick={() => openDisk({ kind: "workspace", id: w.id })}>Disk usage</button>
+            )}
             <SubMenu label="Add project" testId="ws-add-project" track="nav.workspace.add">
               <div className="pop-hint">add to {w.name}</div>
               {addable.map((root) => (

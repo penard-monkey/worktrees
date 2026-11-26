@@ -377,6 +377,57 @@ const mockPlanProjects = new Map<string, { level: string | null; plan_path: stri
 const mockPrivate = new Set((new URLSearchParams(location.search).get("private") ?? "").split(",").filter(Boolean));
 const projectName = (root: string) => root.split("/").filter(Boolean).pop() ?? root;
 
+// ── disk usage (core `diskusage`, api `disk.rs`): made-up but stable sizes per
+// place, from its name, so the Disk view draws the same picture every load.
+// `disk_delete` refuses what the engine refuses for a tracked tree (`src`,
+// `.git`) and takes anything else off the place's numbers. `?diskslow=<ms>`
+// makes every scan that slow, as a real one is seconds.
+const mockDiskGone = new Set<string>();
+const mockDiskSeed = (s: string) => { let h = 2166136261; for (const c of s) h = Math.imul(h ^ c.charCodeAt(0), 16777619); return (h >>> 0) / 4294967296; };
+const mockDiskDirs = (repo: string, slug: string) => {
+  const r = mockDiskSeed(repo + slug);
+  const all = [
+    { path: "target", cat: "build", own: Math.round((slug === "(main)" ? 5.8e9 : 0.3e9 + r * 9e9)), shared: 0, files: 21000 },
+    { path: "node_modules", cat: "deps", own: Math.round(r > 0.5 ? 1.4e9 * r : 4e7), shared: Math.round(r > 0.5 ? 0 : 1.5e9), files: 90000 },
+    { path: ".next", cat: "build", own: Math.round(r * 1.6e9), shared: 0, files: 3000 },
+  ];
+  return all.filter((d) => !mockDiskGone.has(`${repo}|${slug}|${d.path}`)).map((d, i) => ({ ...d, id: `16777233:${1000 + i}` }));
+};
+const mockDiskPlace = (repo: string, pl: { slug: string; path: string; is_main: boolean }) => {
+  const dirs = mockDiskDirs(repo, pl.slug);
+  const own = { build: 0, deps: 0, source: pl.is_main ? 3.1e8 : 4.2e7, git: pl.is_main ? 2.0e8 : 0 };
+  let shared = 0;
+  for (const d of dirs) { own[d.cat as "build" | "deps"] += d.own; shared += d.shared; }
+  return { slug: pl.slug, path: pl.path, is_main: pl.is_main, own, shared, alloc: own.build + own.deps + own.source + own.git + shared, files: 120000, errors: 0, cleanable: dirs.filter((d) => d.own + d.shared > 0) };
+};
+const mockDiskUsage = (repo: string) => {
+  const pv = ws.projects.find((p) => p.root === repo);
+  if (!pv?.snapshot) throw `not a registered project: ${repo}`;
+  const places = pv.snapshot.places.map((p) => mockDiskPlace(repo, p));
+  const unique = places.reduce((a, p) => a + p.own.build + p.own.deps + p.own.source + p.own.git, 0) + 1.5e9;
+  return { root: repo, scanned_epoch: Math.floor(Date.now() / 1000), scan_ms: 2400, places, unique, volume: { free: 741e9, total: 2.0e12, snapshots: 4 } };
+};
+const mockDiskTree = (repo: string, slug: string) => {
+  const pv = ws.projects.find((p) => p.root === repo);
+  const pl = pv?.snapshot?.places.find((p) => p.slug === slug);
+  if (!pl) throw `no place ${slug}`;
+  const usage = mockDiskPlace(repo, pl);
+  const leaf = (n: string, p: string, own: number, c: string, sh = 0) => ({ n, p, own, shared: sh, files: 1, c, id: `16777233:${p.length}` });
+  const kids = usage.cleanable.map((d) => ({
+    n: d.path, p: d.path, own: d.own, shared: d.shared, files: d.files, c: d.cat, dir: true, id: d.id,
+    k: d.path === "target" ? [
+      { n: "debug", p: "target/debug", own: d.own * 0.85, shared: 0, files: 18000, c: "build", dir: true, id: "16777233:2001",
+        k: [leaf("incremental", "target/debug/incremental", d.own * 0.5, "build"), leaf("deps", "target/debug/deps", d.own * 0.35, "build")] },
+      leaf("release", "target/release", d.own * 0.15, "build"),
+    ] : [{ n: "", own: d.own, shared: d.shared, files: d.files, c: d.cat }],
+  }));
+  kids.push({ n: "src", p: "src", own: usage.own.source, shared: 0, files: 800, c: "source", dir: true, id: "16777233:3001", k: [{ n: "", own: usage.own.source, shared: 0, files: 800, c: "source" }] });
+  if (usage.own.git) kids.push({ n: ".git", p: ".git", own: usage.own.git, shared: 0, files: 4000, c: "git", dir: true, id: "16777233:3002", k: [{ n: "", own: usage.own.git, shared: 0, files: 4000, c: "git" }] });
+  const tot = kids.reduce((a, k) => a + k.own, 0), sh = kids.reduce((a, k) => a + k.shared, 0);
+  return { usage, tree: { n: "", own: tot, shared: sh, files: usage.files, c: "source", dir: true, id: "16777233:1", k: kids }, scanned_epoch: Math.floor(Date.now() / 1000), scan_ms: 900, volume: { free: 741e9, total: 2.0e12, snapshots: 4 } };
+};
+const mockDiskSlow = () => { const m = /diskslow=(\d+)/.exec(location.search); return m ? new Promise((r) => setTimeout(r, Number(m[1]))) : Promise.resolve(); };
+
 // ── named workspaces (idea board phase 2): `workspaces.json`, the core store's
 // shape. Empty unless `?workspaces=1`, which seeds two workspaces sharing a
 // project plus one reference to a root that is not registered.
@@ -3167,6 +3218,24 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "workspace_memory_revert":
       return mockMemory.call(cmd, args);
     // ── named workspaces (core `workspaces`, api `workspaces.rs`) ──
+    // ── disk usage (api `disk.rs`) ──
+    case "disk_usage": {
+      if (args.cached) return null;
+      await mockDiskSlow();
+      return mockDiskUsage(String(args.repo));
+    }
+    case "disk_place_tree":
+      await mockDiskSlow();
+      return mockDiskTree(String(args.repo), String(args.slug));
+    case "disk_delete": {
+      const path = String(args.path ?? "");
+      const first = path.split("/")[0];
+      if (!path || path.startsWith("/") || path.split("/").includes("..")) throw `not a path inside the place: "${path}"`;
+      if (first === ".git") throw "git's own folder is never deleted here";
+      if (first === "src") throw `git tracks files in ${path}; change them with git, not here`;
+      mockDiskGone.add(`${args.repo}|${args.slug}|${first}`);
+      return { path, bytes: 4.2e9, files: 21000, dir: true };
+    }
     case "workspaces_list":
       return mockWsView();
     case "workspace_create": {
