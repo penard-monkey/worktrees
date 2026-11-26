@@ -228,6 +228,7 @@ export const SECTIONS: readonly SectionDef[] = [
   { id: "nav-tiers", page: "layout", tier: "advanced", label: "Nav tiers", keywords: ["hide idle places", "hide dormant places", "nav groups", "sidebar sections"], keys: ["hidden_tiers"] },
   { id: "dock-lower", page: "layout", tier: "advanced", label: "Terminal placement", keywords: ["terminal position", "terminal below", "split terminal", "reference column"], keys: ["dock_lower"] },
   { id: "usage-meter", page: "layout", tier: "advanced", label: "Usage meter", keywords: ["usage", "quota meter", "plan meter", "rate limit", "status bar"], keys: ["usage_place"] },
+  { id: "ee-header", page: "layout", tier: "advanced", label: "Everything Else header", keywords: ["everything else", "ungrouped projects", "workspace header", "other projects", "workspaces view"], keys: ["nav_ee_header"] },
   { id: "tree-guides", page: "layout", tier: "expert", label: "Tree guide lines", keywords: ["indent guides", "tree lines", "nav lines", "outline"], keys: ["nav_guides"] },
   { id: "afterglow", page: "layout", tier: "expert", label: "Afterglow", keywords: ["done ring", "finished dot", "fade", "unread", "decay"], keys: ["done_horizon_secs", "done_steps"] },
   // ── Terminal

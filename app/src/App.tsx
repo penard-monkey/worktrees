@@ -10060,12 +10060,17 @@ function App() {
           // folded like any card under its reserved id.
           const ee = everythingElse(wsList, (ws?.projects ?? []).map((v) => v.root));
           if (!ee) return null;
-          const open = !settings.ws_collapsed?.[ee.id];
+          // Settings → Layout: off hides the header only. With no named
+          // workspace it is the view's one title, so it stays; hidden, the
+          // group is open whatever fold it stored (nothing is left to unfold
+          // it), and the stored fold is back when the header is.
+          const eeHeader = settings.nav_ee_header || list.length === 0;
+          const open = !eeHeader || !settings.ws_collapsed?.[ee.id];
           const places = ee.projects.flatMap((p) => (pvOf(p.root)?.snapshot?.places ?? []).filter(visiblePlace));
           const rollup = rollupOf(places, activityOf, (p) => doneOf(p) === 1);
           return (
-            <div className="ws-group ee" data-ee data-testid="ee-group">
-              <EverythingElseHeader w={ee} open={open} rollup={rollup} onToggle={() => toggleWs(ee.id)} />
+            <div className={"ws-group ee" + (eeHeader ? "" : " bare")} data-ee data-testid="ee-group">
+              {eeHeader && <EverythingElseHeader w={ee} open={open} rollup={rollup} onToggle={() => toggleWs(ee.id)} />}
               {open && (
                 <div className="ws-kids">
                   {ee.projects.map((p) => {

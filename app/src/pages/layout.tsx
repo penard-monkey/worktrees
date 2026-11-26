@@ -215,6 +215,20 @@ export function LayoutPage() {
       </section>
     </Sec>
 
+    {/* The Workspaces view's built-in last group. Off hides its header only;
+        its projects stay, loose, below the named workspaces. */}
+    <Sec id="ee-header">
+      <section className="setting">
+        <label>Everything Else header</label>
+        <label className="tier-toggle setting-check">
+          <input type="checkbox" checked={settings.nav_ee_header}
+            onChange={(e) => onChange({ nav_ee_header: e.currentTarget.checked })} />
+          Show the Everything Else header
+        </label>
+        <div className="hint">In the Workspaces view, the title over the projects that are in no workspace. Off, they are listed below your workspaces with no title, always open. With no workspace yet, the title always shows.</div>
+      </section>
+    </Sec>
+
     <Sec id="tree-guides">
       <section className="setting">
         <label>Tree guide lines</label>

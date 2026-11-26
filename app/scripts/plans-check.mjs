@@ -205,7 +205,7 @@ check(/if \(target\.kind === "ws-idea"\) \{ void wsCall\(linkIdeaCall\(target\.i
   "an idea dropped on a workspace and the overview's Link an idea ▸ end in the same call");
 check(/planOntoWorkspace\(item\.id, onto, all\)/.test(app) && /ideaOntoWorkspace\(item\.id, onto\)/.test(app), "the main window's drop resolves through plans.ts's rules");
 const eeHead = app.slice(app.indexOf("function EverythingElseHeader("), app.indexOf("function WsGoneRow("));
-const eeGroup = app.slice(app.indexOf('className="ws-group ee"'), app.indexOf("})()}", app.indexOf('className="ws-group ee"')));
+const eeGroup = app.slice(app.indexOf('"ws-group ee"'), app.indexOf("})()}", app.indexOf('"ws-group ee"')));
 check(eeHead.length > 100 && !/onOpen|openWsOverview|onMenu/.test(eeHead) && eeGroup.length > 100 && !/openWsOverview|onOpen|data-ws-id/.test(eeGroup),
   "Everything Else has no overview to open, no menu, and no data-ws-id a drop could find");
 check(/const wsLite = \(\) => \(wsList\?\.workspaces \?\? \[\]\)\.map/.test(app) && /invoke<\{ workspaces: WsOption\[\] \}>\("workspaces_list"\)/.test(comp),

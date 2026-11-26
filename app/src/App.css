@@ -3986,6 +3986,12 @@ body.dragging .grip { cursor: grabbing; }
    is the default accent card's gray. */
 .ws-group.ee { --ws-hue: var(--hue-gray); }
 .ws-h.fixed { cursor: default; }
+/* …with its header hidden (Settings → Layout, `nav_ee_header`): no card, no
+   rule under a title that is not there, and its projects' headers stick at
+   the top as in All projects. */
+.ws-group.ee.bare { border: 0; border-radius: 0; background: transparent; margin-left: 0; margin-right: 0; }
+.ws-group.ee.bare > .ws-kids { border-top: 0; }
+.ws-group.ee.bare .project-h { top: 0; }
 /* A drop onto it lights the whole card: its title is tinted already. */
 .ws-group.drop-on {
   border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent);
