@@ -4,7 +4,11 @@ title: "Proposal: lanes started by a lane show under it"
 
 # Proposal: lanes started by a lane show under it
 
-**Status:** design, revision 2, 2026-11-25. Nothing built. The owner answered
+**Status:** design, revision 2, 2026-11-25. **The engine half is built**
+(§11 steps 1 to 7, branch `feat/lane-children`, 2026-11-25); the nav, the
+header lines and the remove dialog wait for the workspace view. Where the
+build departs from revision 2, this text now says what the code does, and
+§14 lists each change. The owner answered
 the twelve choices of revision 1 on 2026-11-25 (§12). Items marked **owner to
 confirm** are proposals he has not seen yet. They are listed in §12.
 
@@ -117,7 +121,11 @@ A link (any of the three) holds only when:
 1. The named place exists in the snapshot, or is `(main)`.
 2. The named place's `created_epoch` is not later than the link's `at`. A
    slug that was removed and made again is a different place.
-3. Following links upward never returns to the place itself.
+3. Following links upward never returns to the place itself. When it does,
+   the loop can only be a hand edit's (every writer refuses one), and the
+   link read as absent is the NEWEST link in that loop, the one that closed
+   it; a tie voids every link in it. Read per place, rule 3 voided both links
+   of a two-link loop, so a later adoption erased the recorded starter.
 
 A link that fails is read as absent. Nothing rewrites the store to fix it.
 
@@ -129,7 +137,16 @@ puts them in the snapshot (`Place`, `ls --json`, MCP `list_places`, the app's
 |---|---|
 | `lineage.starter` | `started_by`, when it holds. For the header. |
 | `lineage.parent` | The drawn parent: the first that holds of `under`, `handed_to`, `started_by`. Absent means top level. |
-| `lineage.reports_to` | The default recipient today (§6). |
+| `lineage.reports_to` | The default recipient today (§6). Absent only for `(main)`. |
+| `lineage.up` | The next place up by `handed_to`, else `started_by`: where a removal of this place sends its lanes (§7), and the first step of the report walk. Absent: `(main)`. |
+| `lineage.under`, `lineage.handed_to` | The link, when it holds all three rules (a link a loop voids is not shown, or a header would name a move that draws nothing). |
+| `lineage.started` | The places whose starter (holding) is this one. |
+| `lineage.lanes` | The places that hang from this one by `handed_to` or `started_by`: exactly the ones a removal moves up. |
+
+`lineage` is on every row `ls` emits (`Project::ls`, which reads the store
+once for it), so `ls --json`, MCP `list_places`, `place_status` and the app
+read the same value. `lineage.starter` carries `removed: true` when the place
+it names is gone; a starter in another project carries `project`.
 
 The nav builds its tree from `lineage.parent` alone. It re-implements no
 rule, so it needs no drift check like `dnd-check.mjs`.
@@ -380,12 +397,33 @@ lane. **Owner to confirm** all of it.
    place on that walk that exists in this project and is live gets it.
 4. Nothing live on the way up: `(main)`, live or not, as today.
 
-"Live" means an agent is running in the place, by the one reader
-`place_status` uses. A tmux session whose pane is back at the shell is not
-live: a message there waits for nobody. (`(main)`'s wording was "has a
-session". This is narrower.)
+"Live" means `place_status`'s answer for the place is anything but `none`
+(`Project::agent_running`, over `activity::place_answer`). That includes
+`unknown`: a program other than a shell runs in the place's own session and no
+harness reports on it — an agent that has not started reporting yet, or
+something typed into the pane by hand. The first is the reason to count it;
+the second is the worst case, and §6.1 says what it costs. A tmux session
+whose pane is back at the shell is not live: a message there waits for
+nobody. (`(main)`'s wording was "has a session". This is narrower.)
 
 Adoption by menu (§8) does not change the walk. It is display only.
+
+### 6.1 The worst case of counting `unknown` as live
+
+The starter's agent has exited and its pane now runs something else that is
+not a shell and that no harness reports on: an editor, `npm run dev`, a
+`tail -f`, a program the agent left in the foreground. A child's report with
+no `to` is then filed in the starter's inbox, where no agent reads it, and the
+reply tells the child "sent to your starter X, which has an agent running",
+which is false. Nothing wakes: no `wait` returns for it. `(main)` does not
+receive the message and is not told. It can find out only by looking:
+`list_places` shows the child's `lineage.reports_to` naming the starter while
+the starter's `place_status` says `unknown`. The message is not lost: the
+starter's agent reads it with `messages` when it is reopened, and it expires
+with the log like any other. The opposite choice, `unknown` as not live,
+costs a report sent in the seconds before a starting agent writes its first
+probe: it goes one place further up, where an agent does read it. Sent too
+far up is visible; sent to a pane nobody reads is not.
 
 The reply tells the sender where it went and why:
 
@@ -464,9 +502,12 @@ Edges:
 
 - A lane can be drawn under a closed starter while it reports two levels up.
   The header says both: "started by X (closed) · reports to Y".
-- The remove dialog must say what will happen before it happens: "It started
-  3 lanes. They move up to design-workspace-chats." That sentence is phase 1,
-  because removal now writes.
+- The remove dialog must say what will happen before it happens: "3 lanes
+  hang from it (a, b, c). They move up to design-workspace-chats; none is
+  closed or removed." The count is `lineage.lanes` (lanes handed to it count
+  too) and the target is `lineage.up`, else `(main)`. `rm` prints that line at
+  its prompt and "moved up to Y: a, b, c" after the removal. That sentence is
+  phase 1, because removal now writes.
 - A reopened starter whose agent starts blank will receive reports from lanes
   it does not remember. `open` resumes the conversation by default, which is
   the normal case. Not tested.
@@ -483,12 +524,14 @@ comes with it, because its lanes still point at it.
 | Door | Who | What |
 |---|---|---|
 | Nav menu on a place row | The owner | "Move to top level", "Move under…" (a picker of this project's places), "Back to its starter" when `under` is set |
-| MCP `adopt_place { place, under? }` | `(main)`'s agent only. Any other caller is refused in words that name the rule. | `under` defaults to `(main)`, which means top level |
+| MCP `adopt_place { place, under?, reset? }` | `(main)`'s agent only, on a server started with `--mutations`. Any other caller is refused in words that name the rule. | `under` defaults to `(main)`, which means top level; `reset: true` clears it |
 | CLI `worktrees place under <slug> <target \| --top \| --reset>` | The owner at a terminal. Refused when the cwd is inside a lane. | The same row |
 | Serve row `set_place_under: Engine [write, place(repo, slug)]` | The app and a phone | The same core call |
 
-All four go through one core function, which applies §2's validity rules and
-refuses a cycle at write time.
+All four go through one core function (`ops::set_under`), which applies §2's
+validity rules and refuses a cycle at write time. It records `under.by`:
+`(main)` for the MCP tool, the caller's principal (`owner` at the console and
+the CLI) for the others.
 
 Two honest limits. The CLI's cwd check is a courtesy, not a boundary: an
 agent with a shell can `cd` out, as it can already start an unscoped lane
@@ -525,8 +568,8 @@ The header lines, in general:
 |---|---|---|
 | Place header | The lines of §8 | 1 |
 | `worktrees ls --json`, MCP `list_places` | The three fields and `lineage` on each row | 1 |
-| MCP `place_status` | `lineage`, and `started: [slugs]` for the place asked about, so an orchestrating lane can list ITS lanes | 1 |
-| Remove dialog, `rm` output | "It started 3 lanes. They move up to Y." | 1 |
+| MCP `place_status` | `lineage`, whose `started` lists the place's lanes, so an orchestrating lane can list ITS lanes | 1 |
+| Remove dialog, `rm` output | "3 lanes hang from it (a, b, c). They move up to Y; none is closed or removed." before; "moved up to Y: a, b, c" after. The count is `lineage.lanes`, which includes lanes handed to it, so "It started 3 lanes" would be wrong for those. | 1 |
 | `worktrees ls` (text) | `--tree` to indent, a `↳ starter` suffix | 2 |
 | `doctor` | Lanes whose starter vanished without `rm` | 2 |
 | iOS list | The same indent, pill and ghost, from `lineage.parent` | 2 |
@@ -669,10 +712,32 @@ To confirm:
 - **Why the six live children carry no `launched_by`.** Not traced. It does
   not change the design.
 - **Birth time on Linux.** Rule 2 in §2 relies on `stat_birth`. If it can be
-  absent, rule 2 must pass rather than fail.
+  absent, rule 2 must pass rather than fail. The build passes rule 2 when the birth
+  time is absent or 0 (a unit test pins it); Linux itself was not measured.
 - **The iOS list.** Its repository was not read.
 - **Depth beyond 1 in real use.** One live tree was looked at. It has depth 1.
   Depth 3 to 5 here is fixture data.
 - **Cross-project children.** No live example exists on this machine.
-- **Whether CLI `new` can always tell its place from its cwd.** The MCP
-  server does it with `place_containing`. The CLI path was not traced.
+- ~~Whether CLI `new` can always tell its place from its cwd.~~ Settled by
+  the build: `Project::place_containing` (now in core) answers for the CLI
+  and the MCP server alike, from any subdirectory of a lane.
+
+## 14. Where the build departs from revision 2
+
+Changed in this text to match the code, 2026-11-25:
+
+| Where | Revision 2 said | The build does |
+|---|---|---|
+| §2 rule 3 | A link that leads back to its place fails | The NEWEST link of a hand-made loop fails; a tie voids all. Per place, both links of a two-link loop fell back and an adoption erased the recorded starter. |
+| §2 derived values | `starter`, `parent`, `reports_to` | Also `up`, `under`, `handed_to`, `started`, `lanes`; `under`/`handed_to` only when they hold all three rules |
+| §6 live | An agent is running | `place_status`'s answer is not `none`, so `unknown` counts (§6.1) |
+| §7, §9 remove sentence | "It started 3 lanes. They move up to Y." | "3 lanes hang from it (…). They move up to Y; none is closed or removed.", counting handed lanes |
+| §8 `under.by` | Not specified | `(main)` or a principal id |
+| §8 MCP tool | `adopt_place { place, under? }` | Also `reset`; advertised only with `--mutations` |
+| §9 `place_status` | `lineage` and `started: [slugs]` | `started` is inside `lineage` |
+
+The mock (`app/src/mock/install.ts`, `?lanes`) carries a second copy of the
+rule, `lineageOf`. `app/scripts/lineage-check.mjs` holds it to core:
+both judge `crates/worktrees-core/tests/fixtures/lineage/cases.json`, whose
+`expect` is core's answer (core's test fails when the rule moves; re-bless
+with `WT_BLESS_LINEAGE=1`).
