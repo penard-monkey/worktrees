@@ -241,7 +241,7 @@ async function states(page, tag) {
   // ── a long index ──
   await page.evaluate((id) => window.__mock.memoryEdit(id, "MEMORY.md", "# Memory\n\n" + "A line of the index, long enough to count.\n".repeat(560)), ws);
   await tab(page, "memory");
-  ok(await until(page, () => /The index is long \(\d+ KB\)\. Every chat reads all of it\./.test(document.querySelector("[data-testid=memory-long]")?.textContent ?? "")) && await page.locator("[data-testid=memory-long] button").count() === 0, `${tag} a long index says so; Tidy… is not here yet`);
+  ok(await until(page, () => /The index is long \(\d+ KB\)\. Every chat reads all of it\./.test(document.querySelector("[data-testid=memory-long]")?.textContent ?? "")) && await page.locator("[data-testid=memory-long] [data-testid=memory-tidy]").count() === 1, `${tag} a long index says so, with Tidy…`);
   // ── two hundred files ──
   await page.evaluate((id) => { for (let i = 0; i < 200; i++) window.__mock.memoryEdit(id, `notes/2026-${String(1 + (i % 10)).padStart(2, "0")}-${String(1 + (i % 28)).padStart(2, "0")}-n${i}.md`, `# Note ${i}\n`); }, ws);
   ok(await until(page, () => document.querySelectorAll("[data-testid=memory-group]").length === 10, null, 10000), `${tag} 200 notes fold by month`);

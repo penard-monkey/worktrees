@@ -225,6 +225,10 @@ pub struct Chat {
     /// transcript for good ([`openers`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attempts: Vec<String>,
+    /// Started by Tidy… on the engine's tidy file ([`tidy_text`]), not on
+    /// `start.md`'s chat template. Absent from a record before it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tidy: bool,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -438,12 +442,31 @@ pub fn remove_at(root: &Path, ws: &str, conv: &str) -> Result<(), String> {
 /// `context.md` (`context` is given the chat's id) and its record entry with
 /// the session id Claude will be given. Nothing is launched.
 pub fn prepare_at(root: &Path, ws: &str, context: impl FnOnce(&str) -> String) -> Result<Chat, String> {
+    prepare_kind_at(root, ws, Kind::Chat, context)
+}
+
+/// What a chat is started for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// A chat, on `start.md`'s chat template ([`start_text`]).
+    Chat,
+    /// Tidy…: a chat whose `start.md` is the tidy template ([`tidy_text`]).
+    Tidy,
+}
+
+/// [`prepare_at`] for a chat of `kind`. Either opens on the same fixed opener
+/// ([`opener`]); only what the engine writes in `start.md` differs.
+pub fn prepare_kind_at(root: &Path, ws: &str, kind: Kind, context: impl FnOnce(&str) -> String) -> Result<Chat, String> {
     let dir = make_at(root, ws)?;
     let desk = ws_desk(root, ws)?;
     desk.read::<Chat>()?;
     let conv = crate::ulid::new();
     let own = desk.make_conv_dir(&conv)?;
-    crate::ideas::create_new(&own.join(START), start_text(&dir, &conv).as_bytes()).map_err(|e| format!("{START}: {e}"))?;
+    let text = match kind {
+        Kind::Chat => start_text(&dir, &conv),
+        Kind::Tidy => tidy_text(&dir),
+    };
+    crate::ideas::create_new(&own.join(START), text.as_bytes()).map_err(|e| format!("{START}: {e}"))?;
     write_context_at(root, ws, &conv, &context(&conv))?;
     let started = desk::now_iso();
     desk.edit(|rec: &mut Record| {
@@ -452,12 +475,13 @@ pub fn prepare_at(root: &Path, ws: &str, context: impl FnOnce(&str) -> String) -
             id: conv,
             harness: crate::provider::CLAUDE.id.to_string(),
             session_id: desk::new_uuid(),
-            title: next_title(rec),
+            title: if kind == Kind::Tidy { TIDY_TITLE.to_string() } else { next_title(rec) },
             last_activity: started.clone(),
             started,
             access: None,
             fold: None,
             attempts: Vec::new(),
+            tidy: kind == Kind::Tidy,
             extra: Map::new(),
         };
         rec.conversations.push(c.clone());
@@ -469,7 +493,9 @@ pub fn prepare_at(root: &Path, ws: &str, context: impl FnOnce(&str) -> String) -
 /// removed chat's number does not come back while a later one has it.
 fn next_title(rec: &Record) -> String {
     let highest = rec.conversations.iter().filter_map(|c| c.title.strip_prefix("Chat ")?.parse::<usize>().ok()).max().unwrap_or(0);
-    format!("Chat {}", highest.max(rec.conversations.len()) + 1)
+    // A tidy chat has a name of its own and takes no chat's number.
+    let chats = rec.conversations.iter().filter(|c| !c.tidy).count();
+    format!("Chat {}", highest.max(chats) + 1)
 }
 
 /// Write chat `conv`'s `context.md`, whole.
@@ -1082,19 +1108,79 @@ pub fn fold_text(folder: &Path, c: &Chat) -> String {
             \n\
             `## Asked` — `## Decided` — `## Done` — `## Open`\n\
          2. Update `{memory}/{MEMORY_INDEX}`: one line and a link for each durable fact, and correct a line\n\
-            that is no longer true. Keep it short: move anything long to a file in `{memory}/topics/` and\n\
-            link to it. Links are relative to the file they are in. A link's words say what it leads to:\n\
-            this note is `[the note's heading](notes/…)`, with its own heading there, and a topic its own.\n\
-            A link's words are never a path or a file name, and neither is what you say to the person.\n\
+            that is no longer true. {rule}\n\
+            This note's link is `[the note's heading](notes/…)`, with its own heading there.\n\
          3. Write nowhere else. Do not commit: the app does. Start no new work and ask no question.\n\
          4. Then say in two lines what you changed.\n\
          \n\
          If there is nothing to write, because nothing in this chat is worth keeping or because the note and\n\
          the index already say all of it, change no file at all. Your reply must then END with this line, on\n\
          its own: `{NOTHING}` The app waits for a new note or for that line, and nothing else ends a fold.\n",
+        rule = index_rule(&memory),
         memory = memory.display(),
         note = note.display(),
     )
+}
+
+/// How the index is kept, in the words the fold and Tidy… both give: one
+/// source, so the two never say it differently.
+pub fn index_rule(memory: &Path) -> String {
+    format!(
+        "Keep it short: move anything long to a file in `{memory}/topics/` and link to it. Links are \
+         relative to the file they are in. A link's words say what it leads to, a topic by its own \
+         heading; they are never a path or a file name, and neither is what you say to the person.",
+        memory = memory.display(),
+    )
+}
+
+/// A tidy chat's title in the record, until the person renames it.
+pub const TIDY_TITLE: &str = "Tidy the index";
+
+/// What a tidy chat's `start.md` says: the fixed template, filled with the
+/// workspace's folder alone. No text a person or an agent wrote is in it.
+pub fn tidy_text(folder: &Path) -> String {
+    let memory = folder.join(MEMORY_DIR);
+    format!(
+        "# Tidy the workspace's memory index\n\
+         \n\
+         The person pressed Tidy… because the memory's index is long, and every chat of this workspace\n\
+         reads all of it when it starts. The memory is the folder `{memory}`,\n\
+         which is NOT Claude Code's own auto memory: use these absolute paths. Your working directory is\n\
+         `{folder}`.\n\
+         \n\
+         1. Read `{memory}/{MEMORY_INDEX}` whole, and the files under `{memory}/topics/` its lines link to.\n\
+         2. Make the index short. {rule}\n\
+            Each fact keeps one line in the index, with a link to the topic that holds its detail.\n\
+         3. Delete nothing. Every fact the index holds now is, when you are done, in the index or in a\n\
+            topic one of its lines links to, in the same words where they fit. Add to a topic that is\n\
+            already there rather than making a second one on the same thing. Remove and rename no file.\n\
+         4. Write only `{memory}/{MEMORY_INDEX}` and files under `{memory}/topics/`. Do not commit: the app\n\
+            does, and the person can read each change in History and undo it there.\n\
+         5. Then say in a few lines what you moved and where, and stop. The person may ask for more here.\n",
+        rule = index_rule(&memory),
+        folder = folder.display(),
+        memory = memory.display(),
+    )
+}
+
+pub const ERR_TIDY_NO_INDEX: &str = "this workspace's memory has no index to tidy";
+pub const ERR_TIDY_FOLDING: &str = "a chat is folding into this memory: Tidy… once it is done";
+pub const ERR_TIDY_RUNNING: &str = "a tidy chat of this workspace is running: open it, or close it first";
+
+/// Whether Tidy… may start a chat in workspace `ws` now: its memory has an
+/// index, no fold holds the memory (by the record, any engine's), and no
+/// other tidy chat's session is `live`. A plain chat that is live is no bar.
+pub fn may_tidy_at(root: &Path, ws: &str, live: &dyn Fn(&str) -> bool) -> Result<(), String> {
+    if crate::memory::index_at(root, ws)?.is_none() {
+        return Err(ERR_TIDY_NO_INDEX.into());
+    }
+    if folding_at(root, ws)?.is_some() {
+        return Err(ERR_TIDY_FOLDING.into());
+    }
+    if list_at(root, ws)?.iter().any(|c| c.tidy && live(&session_name(&c.id))) {
+        return Err(ERR_TIDY_RUNNING.into());
+    }
+    Ok(())
 }
 
 /// The fold's fixed opener: the absolute path of a file the engine wrote, and
@@ -1262,11 +1348,16 @@ pub fn may_relaunch_at(root: &Path, ideas: &Path, w: &crate::workspaces::Workspa
 /// the chat back out (record entry and folder), so a refusal leaves nothing of
 /// it, and no folder at all when it would have been the workspace's first.
 pub fn start_at(root: &Path, ideas: &Path, w: &crate::workspaces::Workspace, context: impl FnOnce(&str) -> String) -> Result<(Chat, String), String> {
+    start_kind_at(root, ideas, w, Kind::Chat, context)
+}
+
+/// [`start_at`] for a chat of `kind`.
+pub fn start_kind_at(root: &Path, ideas: &Path, w: &crate::workspaces::Workspace, kind: Kind, context: impl FnOnce(&str) -> String) -> Result<(Chat, String), String> {
     let ws = w.id.as_str();
     let dir = folder_at(root, ws)?;
     check_root(root, &policy(w)?.roots())?;
     let had_folder = fs::symlink_metadata(&dir).is_ok();
-    let c = prepare_at(root, ws, context)?;
+    let c = prepare_kind_at(root, ws, kind, context)?;
     match launch_at(root, ideas, w, &c.id, Start::Fresh, None) {
         Ok(session) => Ok((c, session)),
         Err(e) => {
@@ -1371,6 +1462,7 @@ mod tests {
             access: None,
             fold: None,
             attempts: Vec::new(),
+            tidy: false,
             extra: Map::new(),
         }
     }
@@ -2212,6 +2304,61 @@ mod tests {
         assert_eq!(fs::read_to_string(&elsewhere).unwrap(), "keep");
         assert_eq!(fs::read_to_string(&p).unwrap(), t);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A tidy chat opens on the same fixed opener as any chat, and its
+    /// `start.md` is the engine's tidy template: the index's rule in the very
+    /// words the fold gives it, delete nothing, and no text of anyone's.
+    #[test]
+    fn a_tidy_chat_opens_on_the_engines_tidy_file() {
+        let root = tmp("tidy").join("workspaces");
+        let ws = crate::ulid::new();
+        let plain = prepare_at(&root, &ws, |_| String::new()).unwrap();
+        let c = prepare_kind_at(&root, &ws, Kind::Tidy, |_| String::new()).unwrap();
+        assert!(c.tidy && !plain.tidy, "the record says which");
+        assert_eq!(c.title, TIDY_TITLE);
+        assert_eq!(openers(&folder_at(&root, &ws).unwrap(), &c)[0].text, opener(&c.id), "the same fixed opener");
+        let folder = root.join(&ws);
+        let memory = folder.join(MEMORY_DIR);
+        let t = fs::read_to_string(folder.join(CHATS_DIR).join(&c.id).join(START)).unwrap();
+        assert_eq!(t, tidy_text(&folder), "written whole, from the template");
+        let rule = index_rule(&memory);
+        assert!(t.contains(&rule), "the index's rule: {t}");
+        let n = update_at(&root, &ws, &plain.id, |c| name_note(c, "2026-11-24")).unwrap();
+        assert!(fold_text(&folder, &n).contains(&rule), "the fold says it in the same words");
+        for said in ["Delete nothing", "Do not commit", "NOT Claude Code's own auto memory", "topics/", "undo"] {
+            assert!(t.contains(said), "{said}: {t}");
+        }
+        assert!(t.contains(&format!("`{}/{MEMORY_INDEX}`", memory.display())), "{t}");
+        // Its number is not a chat's: the next plain chat is Chat 2.
+        assert_eq!(prepare_at(&root, &ws, |_| String::new()).unwrap().title, "Chat 2");
+        // A record from before the field is no tidy chat.
+        let v: Chat = serde_json::from_value(serde_json::json!({"id": c.id, "harness": "claude", "session_id": c.session_id, "title": "x", "started": "2026-11-24T10:00:00Z"})).unwrap();
+        assert!(!v.tidy && !serde_json::to_string(&plain).unwrap().contains("tidy"));
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// When a tidy may start: an index to tidy, no fold holding the memory,
+    /// and no other tidy chat live. Each refusal says why, in words.
+    #[test]
+    fn a_tidy_waits_for_a_fold_and_for_another_tidy() {
+        let root = tmp("tidywhen").join("workspaces");
+        let ws = crate::ulid::new();
+        let none = |_: &str| false;
+        assert_eq!(may_tidy_at(&root, &ws, &none).err().as_deref(), Some(ERR_TIDY_NO_INDEX));
+        crate::memory::init_at(&root, &ws, "Home").unwrap();
+        assert_eq!(may_tidy_at(&root, &ws, &none), Ok(()));
+        let c = prepare_at(&root, &ws, |_| String::new()).unwrap();
+        update_at(&root, &ws, &c.id, |c| c.fold = Some(Fold { state: FOLDING.into(), ..Fold::default() })).unwrap();
+        assert_eq!(may_tidy_at(&root, &ws, &none).err().as_deref(), Some(ERR_TIDY_FOLDING));
+        update_at(&root, &ws, &c.id, |c| c.fold = Some(Fold { state: FOLDED.into(), ..Fold::default() })).unwrap();
+        let t = prepare_kind_at(&root, &ws, Kind::Tidy, |_| String::new()).unwrap();
+        assert_eq!(may_tidy_at(&root, &ws, &none), Ok(()), "an ended tidy chat is no bar");
+        let s = session_name(&t.id);
+        assert_eq!(may_tidy_at(&root, &ws, &|x: &str| x == s).err().as_deref(), Some(ERR_TIDY_RUNNING));
+        let cs = session_name(&c.id);
+        assert_eq!(may_tidy_at(&root, &ws, &|x: &str| x == cs), Ok(()), "a plain chat that is live is no bar");
+        let _ = fs::remove_dir_all(root.parent().unwrap());
     }
 
     /// A refused launch leaves nothing: not the chat, and not the folder it

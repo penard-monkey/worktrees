@@ -2300,7 +2300,7 @@ impl ConnAudit {
         }
         // A chat that started: which, by the id the engine made (the workspace
         // is the record's object). Inside `RESERVE_SLACK`, and only a ULID.
-        if let (true, Outcome::Ok(v)) = (p.cmd == "workspace_chat_start", &outcome) {
+        if let (true, Outcome::Ok(v)) = (["workspace_chat_start", "workspace_chat_tidy"].contains(&p.cmd), &outcome) {
             if let Some(c) = v.pointer("/chat/id").and_then(Value::as_str).filter(|c| worktrees_core::ulid::is_valid(c)) {
                 detail.insert("conv".into(), json!(c));
             }
