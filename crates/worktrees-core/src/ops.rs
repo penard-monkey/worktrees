@@ -1096,6 +1096,46 @@ fn write_plan_pointer(p: &Project, ui: &mut dyn Ui, wt: &str, topic: &str) {
     ui.info(&format!("plan: {PLANNING_DIR}/{topic}/ (owned planning)"));
 }
 
+/// `started_by` for a place `cmd_new` just created, from `Ui::started_from`
+/// (`(main)` is no starter), with `handed_to` and `under` cleared: the store
+/// never forgets, and a reused slug must not inherit its namesake's links.
+/// Writes nothing when there is nothing to record or clear, so a repo whose
+/// places have no lineage gets no store write from `new`.
+pub fn record_origin(p: &Project, ui: &mut dyn Ui, slug: &str) {
+    use crate::ui::StartedFrom;
+    let now = crate::sysclock::now_epoch();
+    let starter = match ui.started_from() {
+        StartedFrom::Nobody => None,
+        StartedFrom::Cwd => std::env::current_dir()
+            .ok()
+            .and_then(|d| p.place_containing(&d).ok())
+            .filter(|r| !r.is_main && r.slug != slug)
+            .map(|r| crate::store::Link::to(&r.slug, now)),
+        StartedFrom::Place { slug: from, project } => (from != crate::lineage::MAIN && (project.is_some() || from != slug))
+            .then(|| crate::store::Link { project, ..crate::store::Link::to(&from, now) }),
+    };
+    let stale = crate::store::read_lenient(&p.main_root)
+        .places
+        .get(slug)
+        .is_some_and(|d| d.started_by.is_some() || d.handed_to.is_some() || d.under.is_some());
+    if starter.is_none() && !stale {
+        return;
+    }
+    let said = starter.as_ref().map(|l| match &l.project {
+        Some(pn) => format!("{pn}:{}", l.place),
+        None => l.place.clone(),
+    });
+    if let Err(e) = crate::store::edit(&p.main_root, slug, |d| {
+        d.started_by = starter;
+        d.handed_to = None;
+        d.under = None;
+    }) {
+        ui.warn(&format!("could not record who started '{slug}': {e}"));
+    } else if let Some(s) = said {
+        ui.info(&format!("started by: {s}"));
+    }
+}
+
 pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let (mut do_install, mut do_tmux, mut do_attach, mut do_fetch, mut resume) = (true, true, true, true, false);
     let (mut branch, mut base, mut name, mut ai_flag) = (String::new(), String::new(), None::<String>, None::<String>);
@@ -1323,6 +1363,12 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
                 return 1;
             }
         }
+    }
+
+    // Origin (lane-children §2): only a `new` that CREATED the worktree
+    // records who started it, and it clears whatever a dead namesake left.
+    if !already {
+        record_origin(p, ui, &slug);
     }
 
     // Materialize the declared files and allocate the port slot here — after the

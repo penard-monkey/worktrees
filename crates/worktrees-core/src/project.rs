@@ -552,6 +552,20 @@ impl Project {
         out
     }
 
+    /// The place `here` lies in — the deepest, since places nest under the
+    /// main checkout. `.worktrees/` itself is the container, not a place.
+    pub fn place_containing(&self, here: &Path) -> std::result::Result<PlaceRef, String> {
+        let here = std::fs::canonicalize(here).unwrap_or_else(|_| here.to_path_buf());
+        let found = self.place_index().into_iter().filter(|p| here.starts_with(&p.path)).max_by_key(|p| p.path.len());
+        match found {
+            Some(p) if p.is_main && here.starts_with(self.wt_root_dir()) => {
+                Err(format!("{} is not inside any place of this project", here.display()))
+            }
+            Some(p) => Ok(p),
+            None => Err(format!("{} is not inside any place of this project", here.display())),
+        }
+    }
+
     /// Every place, named and located, for ONE `git worktree list --porcelain`
     /// plus one `read_dir` — no per-place git, no tmux, no session probing.
     ///

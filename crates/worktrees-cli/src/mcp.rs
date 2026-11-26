@@ -84,7 +84,7 @@ use std::io::{BufRead, Read, Write};
 
 use worktrees_core::mention::uri_map;
 use worktrees_core::model::PlaceRef;
-use worktrees_core::{activity, agent, harness, ideas, messages, ops, store, tmux, ui::CaptureUi, Project};
+use worktrees_core::{activity, agent, harness, ideas, messages, ops, store, tmux, ui::{CaptureUi, StartedFrom}, Project};
 use worktrees_core::harness::SendOutcome;
 use worktrees_core::argv::{branch_arg, safe_arg};
 
@@ -1995,11 +1995,12 @@ impl Server {
                 // server's --mutations; never a hub copy. The target's own
                 // config and the USER's AI command decide the launch — nothing
                 // from this repo picks it (ADR 0001).
+                // Origin (lane-children §2): the place this server runs in is
+                // the new place's starter, unless it is (main), which starts
+                // nothing. Derived, never an argument.
                 match a.get("project") {
-                    None | Some(serde_json::Value::Null) => Ok(self.run_op(move |p, ui| ops::cmd_new(p, ui, &args))),
-                    Some(serde_json::Value::String(pn)) if Some(pn.trim()) == self.reach.my_name() => {
-                        Ok(self.run_op(move |p, ui| ops::cmd_new(p, ui, &args)))
-                    }
+                    None | Some(serde_json::Value::Null) => Ok(self.run_new_here(args)),
+                    Some(serde_json::Value::String(pn)) if Some(pn.trim()) == self.reach.my_name() => Ok(self.run_new_here(args)),
                     Some(serde_json::Value::String(pn)) => {
                         let pn = pn.trim();
                         let target = match self.foreign_project(pn) {
@@ -2022,7 +2023,12 @@ impl Server {
                                 *b = format!("{}{b}", self.brief_provenance(pn));
                             }
                         }
-                        let mut out = run_op_on(&target, self.launched_by.clone(), move |p, ui| ops::cmd_new(p, ui, &args));
+                        let from = match self.my_name_now() {
+                            Some(me) => self.started_from(Some(me)),
+                            None => StartedFrom::Nobody,
+                        };
+                        let mut out =
+                            run_op_full(&target, self.launched_by.clone(), from, CREATE_REFUSED_NOTE, move |p, ui| ops::cmd_new(p, ui, &args));
                         if reused {
                             if let Some(c) = out["content"].as_array_mut() {
                                 c.push(serde_json::json!({ "type": "text", "text": format!(
@@ -2952,6 +2958,25 @@ impl Server {
         run_op_on(project, self.launched_by.clone(), f)
     }
 
+    /// Who this server starts a place as (lane-children §2): its own place,
+    /// unless that is (main) or unknown. `project` names this project when
+    /// the new place is in another one.
+    fn started_from(&self, project: Option<String>) -> StartedFrom {
+        match self.caller_place() {
+            Ok(me) if !me.is_main => StartedFrom::Place { slug: me.slug, project },
+            _ => StartedFrom::Nobody,
+        }
+    }
+
+    /// `cmd_new` in this server's own project, recording this place as the
+    /// starter.
+    fn run_new_here(&self, args: Vec<String>) -> serde_json::Value {
+        let Ok(project) = self.proj() else { return text_err(NO_PROJECT) };
+        run_op_full(project, self.launched_by.clone(), self.started_from(None), CREATE_REFUSED_NOTE, move |p, ui| {
+            ops::cmd_new(p, ui, &args)
+        })
+    }
+
 }
 
 /// A mutation's target project: this server's own (borrowed), or another
@@ -3048,23 +3073,10 @@ fn strip_paths(v: &mut serde_json::Value, roots: &[&str]) {
     }
 }
 
-/// The place of `project` that `here` lies in — the deepest, since places nest
-/// under the main checkout. `.worktrees/` itself is the container, not a place.
+/// The place of `project` that `here` lies in (`Project::place_containing`,
+/// which the CLI's `new` asks too).
 fn place_containing(project: &Project, here: &std::path::Path) -> Result<PlaceRef, String> {
-    let here = std::fs::canonicalize(here).unwrap_or_else(|_| here.to_path_buf());
-    let found = project
-        .place_index()
-        .into_iter()
-        .filter(|p| here.starts_with(&p.path))
-        .max_by_key(|p| p.path.len());
-    match found {
-        Some(p) if p.is_main && here.starts_with(project.wt_root_dir()) => Err(format!(
-            "{} is not inside any place of this project",
-            here.display()
-        )),
-        Some(p) => Ok(p),
-        None => Err(format!("{} is not inside any place of this project", here.display())),
-    }
+    project.place_containing(here)
 }
 
 /// The `launched_by` of the place `here` lies in. Honoured from any store, a
@@ -3128,7 +3140,18 @@ fn run_op_with<F: FnOnce(&Project, &mut CaptureUi) -> i32>(
     refused: &str,
     f: F,
 ) -> serde_json::Value {
-    let mut ui = CaptureUi { launched_by, ..CaptureUi::default() };
+    run_op_full(project, launched_by, StartedFrom::Nobody, refused, f)
+}
+
+/// `run_op_with`, naming the place that starts any place the op creates.
+fn run_op_full<F: FnOnce(&Project, &mut CaptureUi) -> i32>(
+    project: &Project,
+    launched_by: Option<worktrees_core::store::LaunchedBy>,
+    started_from: StartedFrom,
+    refused: &str,
+    f: F,
+) -> serde_json::Value {
+    let mut ui = CaptureUi { launched_by, started_from, ..CaptureUi::default() };
     let rc = f(project, &mut ui);
     let body = ui.lines.join("\n");
     if rc == 0 {
