@@ -1170,16 +1170,19 @@ impl Server {
                 "Post a message to another place's agent in this project — Claude or Codex. \
                  Call it when you FINISH a task another place handed you (say what changed and \
                  where: branch, files, tests), when you are BLOCKED, or when you need an answer. \
-                 `to` defaults to (main), where the coordinating session usually sits; it must \
-                 name an existing place. To answer a message, pass its id as `reply_to` so the \
-                 question and its answer stay threaded. Your own place is filled in as the \
+                 With no `to`, an answer (`reply_to` set) goes to whoever sent the message it \
+                 answers; anything else goes to the nearest place ABOVE yours with an agent \
+                 running — the lane that started you, else the next one up — and to (main) when \
+                 none is, or when no lane started you. The reply says where it went. Name `to` \
+                 to reach a place directly; it must name an existing place. To answer a message, \
+                 pass its id as `reply_to` so the question and its answer stay threaded. Your own place is filled in as the \
                  sender automatically. The recipient reads it with `messages` or `wait`. \
                  Plain text, up to 8 KB.",
                 serde_json::json!({
                     "type": "object",
                     "properties": {
                         "text": { "type": "string", "description": "The message. Up to 8 KB." },
-                        "to": { "type": "string", "description": "Place slug to send to. Default (main)." },
+                        "to": { "type": "string", "description": "Place slug to send to. Default: the asker of reply_to, else the nearest live lane above yours, else (main)." },
                         "reply_to": { "type": "string", "description": "The id of the message this answers. Optional." }
                     },
                     "required": ["text"],
@@ -1799,8 +1802,32 @@ impl Server {
                     Err(e) => return Ok(text_err(&e)),
                 };
                 let to_raw = s("to");
-                let to = if to_raw.trim().is_empty() { "(main)".to_string() } else { to_raw };
                 let own_log = messages::dir(std::path::Path::new(&project.git_common));
+                let reply_to = s("reply_to");
+                let reply_to = (!reply_to.trim().is_empty()).then_some(reply_to.trim());
+                // Lane-children §6: an explicit `to` is unchanged; an answer
+                // with none goes to its asker; anything else to the nearest
+                // live place above this one (`lineage::route_in`), else
+                // (main). `routed` tells the recipient why; `note` the sender.
+                let (to, routed, routed_note) = if !to_raw.trim().is_empty() {
+                    (to_raw, None, None)
+                } else if let Some(asker) = reply_to.and_then(|r| messages::sender_of(&own_log, r)).filter(|a| *a != me.slug) {
+                    (
+                        asker.clone(),
+                        Some(format!("{} answered your message with no `to`, so it came back to you", me.slug)),
+                        Some(format!("No `to`: sent to {asker}, who sent the message you answer.")),
+                    )
+                } else {
+                    let live = report_live(project);
+                    let (route, mine) = worktrees_core::lineage::route_in(project, &me.slug, &live);
+                    match worktrees_core::lineage::route_note(&route, &mine) {
+                        None => (route.to, None, None),
+                        Some(note) => {
+                            let why = routed_why(&me.slug, &route);
+                            (route.to, Some(why), Some(format!("{note} Pass to: \"(main)\" to reach (main).")))
+                        }
+                    }
+                };
                 // Where the message is FILED, as whom, and to whom. A place in
                 // another registered project (reach `read` or above — the
                 // proposal's §5.1 table) gets it in ITS repo's log, `to` bare
@@ -1812,7 +1839,7 @@ impl Server {
                     Ok(Target::Local(t)) => {
                         if t == me.slug {
                             return Ok(text_err(&format!(
-                                "you are in {t}; a report goes to ANOTHER place (to defaults to (main))"
+                                "you are in {t}; a report goes to ANOTHER place (with no `to`, the nearest live lane above yours, else (main))"
                             )));
                         }
                         (own_log.clone(), me.slug.clone(), t, None)
@@ -1836,9 +1863,7 @@ impl Server {
                     }
                     Err(e) => return Ok(text_err(&e)),
                 };
-                let reply_to = s("reply_to");
-                let reply_to = (!reply_to.trim().is_empty()).then_some(reply_to.trim());
-                match messages::post_into(&dir, &own_log, &from, &to, &s("text"), reply_to, None, messages::now_ms()) {
+                match messages::post_routed(&dir, &own_log, &from, &to, &s("text"), reply_to, None, routed.as_deref(), messages::now_ms()) {
                     Ok(m) if foreign.is_some() => Ok(text_ok(
                         &serde_json::to_string_pretty(&serde_json::json!({
                             "id": m.id,
@@ -1876,7 +1901,7 @@ impl Server {
                             "to": m.to,
                             "created": m.created,
                             "reply_to": m.reply_to,
-                            "note": "Filed. The recipient sees it with messages, or wakes from wait.",
+                            "note": routed_note.as_deref().unwrap_or("Filed. The recipient sees it with messages, or wakes from wait."),
                         }))
                         .unwrap_or_default(),
                     )),
@@ -3070,6 +3095,33 @@ fn strip_paths(v: &mut serde_json::Value, roots: &[&str]) {
             }
         }
         _ => {}
+    }
+}
+
+/// Whether an agent runs in a place, for the `report` default — the core
+/// reader, or a test's fixed answer (`TEST_LIVE`): no unit test can start a
+/// real agent.
+fn report_live(project: &Project) -> Box<dyn Fn(&str) -> bool + '_> {
+    #[cfg(test)]
+    if let Some(v) = TEST_LIVE.with(|t| t.borrow().clone()) {
+        return Box::new(move |s: &str| v.iter().any(|x| x == s));
+    }
+    Box::new(worktrees_core::lineage::live_reader(project))
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_LIVE: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The stored message's `routed`: why it was filed with its recipient.
+fn routed_why(me: &str, route: &worktrees_core::lineage::Route) -> String {
+    match route.skipped.as_slice() {
+        [] => format!("{me} reported with no `to`; you are the lane above it"),
+        skipped if route.to == worktrees_core::lineage::MAIN => {
+            format!("{me} reported with no `to`; no lane above it has an agent running ({})", skipped.join(", "))
+        }
+        skipped => format!("{me} reported with no `to`; {} above it has no agent running, so it came to you", skipped.join(", ")),
     }
 }
 
@@ -4311,6 +4363,107 @@ mod tests {
 
     fn call(s: &mut Server, name: &str, args: serde_json::Value) -> serde_json::Value {
         s.call(&serde_json::json!({ "name": name, "arguments": args })).unwrap()
+    }
+
+    /// A family for the report default (lane-children §6): `a` started `b`,
+    /// `b` started `c`; `feat` (from `repo_with_worktree`) has no record.
+    /// Returns c's path. The links are dated after every birth.
+    fn family(sc: &Scratch) -> std::path::PathBuf {
+        repo_with_worktree(sc);
+        for b in ["a", "b", "c"] {
+            let wt = sc.root.join(".worktrees").join(b);
+            assert!(std::process::Command::new("git")
+                .args(["-C"])
+                .arg(&sc.root)
+                .args(["worktree", "add", "-q", "-b", b, wt.to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success());
+        }
+        let root = sc.root.to_string_lossy().to_string();
+        let at = worktrees_core::sysclock::now_epoch() + 5;
+        store::edit(&root, "b", |d| d.started_by = Some(store::Link::to("a", at))).unwrap();
+        store::edit(&root, "c", |d| d.started_by = Some(store::Link::to("b", at))).unwrap();
+        std::fs::canonicalize(sc.root.join(".worktrees/c")).unwrap()
+    }
+
+    fn with_live<T>(live: &[&str], f: impl FnOnce() -> T) -> T {
+        TEST_LIVE.with(|t| *t.borrow_mut() = Some(live.iter().map(|s| s.to_string()).collect()));
+        let out = f();
+        TEST_LIVE.with(|t| *t.borrow_mut() = None);
+        out
+    }
+
+    fn inbox(root: &std::path::Path, place: &str) -> Vec<serde_json::Value> {
+        let here = if place == "(main)" { root.to_path_buf() } else { root.join(".worktrees").join(place) };
+        let mut s = server_in(root, &here, false);
+        body(&call(&mut s, "messages", serde_json::json!({})))["messages"].as_array().cloned().unwrap_or_default()
+    }
+
+    #[test]
+    fn a_default_report_goes_to_a_live_starter_and_says_so() {
+        let sc = scratch("route-live");
+        let c = family(&sc);
+        let mut kid = server_in(&sc.root, &c, false);
+        let r = with_live(&["b", "a"], || call(&mut kid, "report", serde_json::json!({ "text": "done" })));
+        assert_eq!(body(&r)["to"], "b", "{}", r["content"][0]["text"]);
+        assert!(body(&r)["note"].as_str().unwrap().contains("your starter b, which has an agent running"), "{}", body(&r)["note"]);
+        let got = inbox(&sc.root, "b");
+        assert_eq!(got.len(), 1);
+        assert!(got[0]["routed"].as_str().unwrap().contains("you are the lane above it"), "{}", got[0]);
+        assert!(inbox(&sc.root, "(main)").is_empty());
+    }
+
+    #[test]
+    fn a_default_report_skips_a_starter_with_no_agent_and_comes_back_when_it_reopens() {
+        let sc = scratch("route-dead");
+        let c = family(&sc);
+        let mut kid = server_in(&sc.root, &c, false);
+        let r = with_live(&["a"], || call(&mut kid, "report", serde_json::json!({ "text": "one" })));
+        assert_eq!(body(&r)["to"], "a");
+        assert!(body(&r)["note"].as_str().unwrap().contains("your starter b has no agent running. Sent to the next lane up, a."));
+        assert!(body(&r)["note"].as_str().unwrap().contains("Pass to: \"(main)\""));
+        let r = with_live(&[], || call(&mut kid, "report", serde_json::json!({ "text": "two" })));
+        assert_eq!(body(&r)["to"], "(main)", "nothing live on the way up: (main)");
+        assert!(inbox(&sc.root, "(main)")[0]["routed"].as_str().unwrap().contains("no lane above it has an agent running"));
+        // b reopened: its reports come back, nothing was written to undo.
+        let r = with_live(&["b"], || call(&mut kid, "report", serde_json::json!({ "text": "three" })));
+        assert_eq!(body(&r)["to"], "b");
+    }
+
+    #[test]
+    fn a_removed_starters_lane_reports_where_it_was_handed() {
+        let sc = scratch("route-removed");
+        let c = family(&sc);
+        let root = sc.root.to_string_lossy().to_string();
+        let at = worktrees_core::sysclock::now_epoch() + 6;
+        store::edit(&root, "c", |d| d.handed_to = Some(store::Link { from: Some("b".into()), ..store::Link::to("a", at) })).unwrap();
+        let mut kid = server_in(&sc.root, &c, false);
+        let r = with_live(&["a", "b"], || call(&mut kid, "report", serde_json::json!({ "text": "done" })));
+        assert_eq!(body(&r)["to"], "a", "handed_to outranks the recorded starter");
+        assert!(body(&r)["note"].as_str().unwrap().contains("a, the lane above you"), "{}", body(&r)["note"]);
+    }
+
+    #[test]
+    fn an_explicit_to_and_a_reply_ignore_the_lineage() {
+        let sc = scratch("route-explicit");
+        let c = family(&sc);
+        let mut kid = server_in(&sc.root, &c, false);
+        let r = with_live(&["b"], || call(&mut kid, "report", serde_json::json!({ "text": "hi", "to": "(main)" })));
+        assert_eq!(body(&r)["to"], "(main)");
+        assert_eq!(body(&r)["note"], "Filed. The recipient sees it with messages, or wakes from wait.");
+        // (main) asks c; c answers with reply_to and no `to`: back to (main), not to b.
+        let mut main = server_in(&sc.root, &sc.root, false);
+        let q = call(&mut main, "report", serde_json::json!({ "text": "status?", "to": "c" }));
+        let id = body(&q)["id"].as_str().unwrap().to_string();
+        let r = with_live(&["b"], || call(&mut kid, "report", serde_json::json!({ "text": "fine", "reply_to": id })));
+        assert_eq!(body(&r)["to"], "(main)", "{}", r["content"][0]["text"]);
+        assert!(body(&r)["note"].as_str().unwrap().contains("who sent the message you answer"));
+        // A place with no lineage: (main), worded as before, live places or not.
+        let mut feat = server_in(&sc.root, &sc.root.join(".worktrees/feat"), false);
+        let r = with_live(&["a", "b", "c"], || call(&mut feat, "report", serde_json::json!({ "text": "done" })));
+        assert_eq!(body(&r)["to"], "(main)");
+        assert_eq!(body(&r)["note"], "Filed. The recipient sees it with messages, or wakes from wait.");
     }
 
     /// `from` is the place the SERVER resolved itself to, never an argument:

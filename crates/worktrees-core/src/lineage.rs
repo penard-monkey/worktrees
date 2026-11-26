@@ -299,6 +299,57 @@ impl<'a> Index<'a> {
     }
 }
 
+/// Where `slug`'s report with no `to` goes in `p` now (§6 rules 3-4), and its
+/// lineage for the reply's wording. For a caller with no snapshot in hand —
+/// the MCP `report` arm: one `git worktree list`, a stat per place, one store
+/// read, and `live` asked only up the chain.
+pub fn route_in(p: &crate::project::Project, slug: &str, live: &dyn Fn(&str) -> bool) -> (Route, Lineage) {
+    let store = crate::store::read_lenient(&p.main_root);
+    let births = p.place_births();
+    let index = Index::new(births.iter().map(|(s, b)| (s.as_str(), *b)), &store.places);
+    (index.route(slug, live), index.lineage(slug, &|_| false))
+}
+
+/// `Project::agent_running` for any place of `p`, fetching the panes and the
+/// Claude probes once, on the first question.
+pub fn live_reader(p: &crate::project::Project) -> impl Fn(&str) -> bool + '_ {
+    let state: std::cell::OnceCell<(HashMap<String, String>, Option<crate::tmux::PaneList>, Vec<crate::agent::ClaudeProbe>)> =
+        std::cell::OnceCell::new();
+    move |slug: &str| {
+        let (paths, panes, probes) = state.get_or_init(|| {
+            let paths = p.place_index().into_iter().map(|r| (r.slug, r.path)).collect();
+            let panes = crate::tmux::PaneList::fetch();
+            let probes = crate::agent::live_probes_in(panes.as_ref());
+            (paths, panes, probes)
+        });
+        paths.get(slug).is_some_and(|path| p.agent_running(slug, path, probes, panes.as_ref()))
+    }
+}
+
+/// The reply's words for a default report that `route` sent somewhere other
+/// than plain `(main)`, or `None` when it went to `(main)` with nothing on
+/// the way (today's behaviour, said as today).
+pub fn route_note(route: &Route, me: &Lineage) -> Option<String> {
+    if route.to == MAIN && route.skipped.is_empty() {
+        return None;
+    }
+    let first = route.skipped.first().unwrap_or(&route.to);
+    let starter = me.starter.as_ref().filter(|s| s.project.is_none() && !s.removed).map(|s| s.place.as_str());
+    let named = if starter == Some(first.as_str()) {
+        format!("your starter {first}")
+    } else {
+        format!("{first}, the lane above you")
+    };
+    Some(if route.skipped.is_empty() {
+        format!("No `to`: sent to {named}, which has an agent running.")
+    } else if route.to == MAIN {
+        let rest = if route.skipped.len() > 1 { ", nor does any lane above it" } else { "" };
+        format!("No `to`: {named} has no agent running{rest}. Sent to (main).")
+    } else {
+        format!("No `to`: {named} has no agent running. Sent to the next lane up, {}.", route.to)
+    })
+}
+
 /// A set used by walks to stop on a loop a hand edit made.
 type Seen = HashSet<String>;
 
@@ -502,6 +553,21 @@ mod tests {
         // Removing a top-level starter hands to (main).
         assert_eq!(i.handoff("a"), (vec!["b".to_string()], MAIN.to_string()));
         assert_eq!(i.handoff("c"), (vec![], "b".to_string()));
+    }
+
+    #[test]
+    fn the_route_note_names_the_starter_and_what_was_skipped() {
+        let w = family();
+        let i = w.index();
+        let me = i.lineage("c", &nobody);
+        let note = |live: &dyn Fn(&str) -> bool| route_note(&i.route("c", live), &me);
+        assert_eq!(note(&|s| s == "b").as_deref(), Some("No `to`: sent to your starter b, which has an agent running."));
+        assert_eq!(note(&|s| s == "a").as_deref(), Some("No `to`: your starter b has no agent running. Sent to the next lane up, a."));
+        assert_eq!(note(&nobody).as_deref(), Some("No `to`: your starter b has no agent running, nor does any lane above it. Sent to (main)."));
+        // A place with no lineage: today's (main), said as today.
+        let w = World::new().place("old", 10);
+        let i = w.index();
+        assert_eq!(route_note(&i.route("old", &nobody), &i.lineage("old", &nobody)), None);
     }
 
     #[test]

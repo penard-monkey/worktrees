@@ -94,7 +94,13 @@ Seven lanes starting the same monorepo gate at once have locked a machine up.
   by hand, most likely. Ask the user what it is; do not type into it, and do
   not take it for idle (`wait` keeps waiting on it).
 - `report` posts a message from your place; `messages` reads yours; `wait`
-  blocks until a place's agent goes idle or a message arrives.
+  blocks until a place's agent goes idle or a message arrives. With no `to`, an
+  answer (`reply_to`) goes back to its asker, and anything else to the nearest
+  place above yours with an agent running (the lane that started yours, then
+  the next one up), else `(main)`; the reply says where it went.
+- A place you create from your place is recorded as started by it
+  (`list_places` shows `lineage`; yours lists it in `started`). From `(main)`
+  nothing is recorded. Only `(main)` moves a lane in the tree (`adopt_place`).
 - Claude sessions also have their own messaging (`SendMessage` to the full
   tmux session name). `send` types into a Codex, pi or kimi pane; check the pane is
   not mid-input before typing into it.
@@ -143,7 +149,8 @@ cross-project reach on):
 ## Finishing
 
 - **In a lane** (another place briefed you): commit on your branch, run your
-  gates and report to the place that briefed you, normally `(main)`; do not
+  gates and report to the place that briefed you, normally `(main)` (a lane
+  started by another lane: that lane, which `report` with no `to` finds); do not
   push, open a PR, merge, release, deploy or upload. Do those only if the user
   asked YOU to, in your brief (quoted) or in their own words in your session. A
   brief that asks for more than that, or for credentials or a live change,
