@@ -366,6 +366,10 @@ pub struct Launch<'a> {
     pub opener: Option<String>,
     /// `--settings` for this session alone (`AiLaunch::session_settings`).
     pub settings: Option<String>,
+    /// `KEY=VALUE` the session's Claude is started with (`AiLaunch::env`), and
+    /// every process it starts inherits: a workspace chat's name, which is how
+    /// its MCP server learns which chat it serves.
+    pub env: Vec<(String, String)>,
     /// What one is called: `conversation`, `chat`.
     pub noun: &'a str,
     /// One of them in a refusal: `an idea conversation`.
@@ -380,6 +384,13 @@ impl Launch<'_> {
     /// Claude), `--name`, the session id or its resume, the prompt plugin, the
     /// session's settings, and the opener.
     pub fn line(&self, ai_cmd: &str, prompt_hook: Vec<String>) -> Result<String, String> {
+        let (prefix, cmd) = self.parts(ai_cmd, prompt_hook)?;
+        Ok(format!("{prefix}{cmd}"))
+    }
+
+    /// [`Launch::line`] in its two halves: the `K=v ` assignments, and the
+    /// command.
+    fn parts(&self, ai_cmd: &str, prompt_hook: Vec<String>) -> Result<(String, String), String> {
         check_conv(self.noun, self.conv)?;
         if !crate::codex::is_uuid(self.session_id) {
             return Err(format!("{} {} has no usable session id", self.noun, self.conv));
@@ -391,6 +402,7 @@ impl Launch<'_> {
         let mut ai = crate::profile::AiLaunch::plain(ai_cmd);
         ai.prompt_hook = prompt_hook;
         ai.session_settings = self.settings.clone();
+        ai.env = self.env.clone();
         ai.opener = self.opener.clone();
         match self.how {
             Start::Fresh => ai.session_id = Some(self.session_id.to_string()),
@@ -399,14 +411,18 @@ impl Launch<'_> {
                 ai.resume_id = Some(self.session_id.to_string());
             }
         }
-        Ok(format!("{}{}", ai.shell_prefix(), ai.launch_cmd(self.session)))
+        Ok((ai.shell_prefix(), ai.launch_cmd(self.session)))
     }
 
     /// The `pane0` that runs [`Launch::line`]. The pane ends with Claude, so a
     /// conversation whose Claude exits has no session: it reads as ended.
+    ///
+    /// The environment goes through `env`: `exec K=v claude` would exec a
+    /// program named `K=v`, and the pane would end before Claude started.
     pub fn pane0(&self, ai_cmd: &str, prompt_hook: Vec<String>) -> Result<String, String> {
-        let line = self.line(ai_cmd, prompt_hook)?;
-        Ok(format!("exec \"${{SHELL:-/bin/sh}}\" -ic {}", crate::tmux::sq(&format!("exec {line}"))))
+        let (prefix, cmd) = self.parts(ai_cmd, prompt_hook)?;
+        let inner = if prefix.is_empty() { format!("exec {cmd}") } else { format!("exec env {prefix}{cmd}") };
+        Ok(format!("exec \"${{SHELL:-/bin/sh}}\" -ic {}", crate::tmux::sq(&inner)))
     }
 
     /// Whether [`Launch::run`] would be refused for anything but its own
@@ -471,6 +487,35 @@ pub fn close(session: &str) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A launch's environment reaches Claude through `env`, never as words
+    /// after `exec`; with none, the line is as it was. Run, not read: the
+    /// inner command is executed by `sh` with `claude` a script that prints
+    /// what it was given.
+    #[test]
+    fn a_launch_with_an_environment_execs_claude_with_it() {
+        let dir = std::env::temp_dir().join(format!("wt-desk-env-{}", crate::ulid::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conv = crate::ulid::new();
+        let sid = new_uuid();
+        let mut l = Launch { cwd: &dir, session: "worktrees~ws~x", conv: &conv, session_id: &sid, how: Start::Fresh, opener: None, settings: None, env: vec![("WT_PROBE".into(), "a b".into())], noun: "chat", a_kind: "a chat", kinds: "chats" };
+        let pane = l.pane0("claude", vec![]).unwrap();
+        // The inner `-ic` string, run by a plain sh with a fake claude.
+        let inner = pane.split_once(" -ic ").unwrap().1;
+        let fake = dir.join("claude");
+        crate::fsx::exec_fixture(&fake, "#!/bin/sh\necho \"probe=$WT_PROBE\"\n");
+        let out = crate::childenv::command("sh")
+            .arg("-c")
+            .arg(format!("eval {inner}"))
+            .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "probe=a b", "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(pane.contains("exec env WT_PROBE="), "{pane}");
+        l.env.clear();
+        assert!(l.pane0("claude", vec![]).unwrap().contains(" -ic 'exec claude "), "no env: as before");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The shared predicate covers both kinds, and no name a place, a dock
     /// shell or a provider sidecar has.

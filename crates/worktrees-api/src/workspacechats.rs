@@ -20,14 +20,13 @@
 //! a resume, a close, a delete and the workspace's removal hold one lock, so
 //! a chat is never launched into a folder that is being moved away.
 
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use worktrees_core::workspacechats::{self as chats, Chat, Context, DocRead, PlaceLine, ProjectContext, ProjectRead, Reads, Start};
+use worktrees_core::workspacechats::{self as chats, Chat, Context, DocRead, ProjectContext, ProjectRead, Reads, Start};
 use worktrees_core::workspaces::{self as store, Workspace};
-use worktrees_core::{activity, agent, desksessions, harness, registry, store as declared, sysclock, tmux, turns, wsfolder, Project};
+use worktrees_core::{activity, agent, desksessions, registry, tmux, turns, wsfolder};
 
 use crate::agents::{self, Locus};
 use crate::watch::WorkspaceSessions;
@@ -149,44 +148,6 @@ pub fn workspace_chats(ctx: &Ctx, id: String) -> Result<Chats, String> {
 
 // ── context.md ──────────────────────────────────────────────────────────────
 
-/// What the agents of a place are doing, in words: `claude busy`.
-fn agent_words(readings: Vec<(&'static dyn harness::Adapter, activity::Activity)>) -> String {
-    let words: Vec<String> = readings
-        .into_iter()
-        .filter(|(_, a)| a.state != activity::State::None)
-        .map(|(h, a)| format!("{} {}", h.provider().id, format!("{:?}", a.state).to_lowercase()))
-        .collect();
-    words.join(", ")
-}
-
-/// The places of the project at `root`: names, branches and declared notes,
-/// with what their agents are doing. One `git worktree list`, and no git call
-/// per place.
-fn places(root: &str, panes: Option<&tmux::PaneList>, probes: &[agent::ClaudeProbe]) -> Result<Vec<PlaceLine>, String> {
-    if !Path::new(root).is_dir() {
-        return Err("its folder is not there".into());
-    }
-    let project = Project::discover(Path::new(root)).map_err(|e| e.msg)?;
-    let decls = declared::read_lenient(&project.main_root);
-    let (now, word) = (sysclock::now_epoch(), worktrees_core::project::adopt_ai_word());
-    let scan = harness::Scan { probes, panes };
-    Ok(project
-        .place_index()
-        .into_iter()
-        .map(|p| {
-            let d = decls.places.get(&p.slug);
-            let up = panes.is_some_and(|ps| project.live_session_in(&p.slug, &p.path, &project.place_panes(&p.slug, ps), &word).is_some());
-            PlaceLine {
-                branch: p.branch.unwrap_or_else(|| "(detached)".into()),
-                lifecycle: declared::reconcile(d, up, now),
-                note: d.and_then(|d| d.note.clone()).unwrap_or_default(),
-                agent: agent_words(harness::place_activities(&project, &p.slug, &p.path, &scan)),
-                slug: p.slug,
-            }
-        })
-        .collect())
-}
-
 /// The workspace as its chat `conv` is told it (`context.md`). A project that
 /// is not read is named, and nothing more is said of it.
 pub(crate) fn context(ctx: &Ctx, w: &Workspace, reg: &registry::Registry, conv: &str) -> Context {
@@ -195,7 +156,7 @@ pub(crate) fn context(ctx: &Ctx, w: &Workspace, reg: &registry::Registry, conv: 
     let projects = chats::project_reads(w, reg)
         .into_iter()
         .map(|read| {
-            let places = if read.reads == Reads::No { Ok(Vec::new()) } else { places(&read.root, panes.as_ref(), &probes) };
+            let places = if read.reads == Reads::No { Ok(Vec::new()) } else { chats::places(&read.root, panes.as_ref(), &probes) };
             ProjectContext { read, places }
         })
         .collect();
@@ -449,6 +410,7 @@ pub fn workspace_term_open(ctx: &Ctx, id: String, conv: String, cols: u16, rows:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use worktrees_core::harness;
 
     /// The snapshot's agent rows never list a workspace chat as a place's
     /// agent, even with its pane inside the place.

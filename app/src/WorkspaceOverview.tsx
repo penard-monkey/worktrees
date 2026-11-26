@@ -151,7 +151,7 @@ export function WorkList(props: Pick<WsParts, "snap" | "activity" | "gone" | "wo
                 <span className="ws-ov-name">{w.title || "(no title)"}</span>
                 <span className="ws-ov-detail">{[w.project, w.branch].filter(Boolean).join(" · ")}</span>
               </button>
-              <span className={`ws-ov-state at-${at.kind}`} title={w.started ?? undefined}>{workStatus(w, at)}</span>
+              <span className={`ws-ov-state at-${at.kind}`} data-proposed={w.proposal && at.kind === "none" ? "" : undefined} title={w.started ?? (w.proposal ? `Proposed by the workspace chat “${w.proposal.by}” on ${w.proposal.at}. Nothing has started: Review… reads its brief, then Start.` : undefined)}>{workStatus(w, at)}</span>
               {at.place && at.root && (
                 <button className="ctrl sm" data-testid="ws-ov-show-place" onClick={() => props.showPlace(at.root!, at.place!.slug)}>Show ▸</button>
               )}

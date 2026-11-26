@@ -663,7 +663,7 @@ pub fn policy(w: &crate::workspaces::Workspace) -> Result<crate::registry::Regis
     policy_at(&crate::registry::path(), w)
 }
 
-fn policy_at(p: &Path, w: &crate::workspaces::Workspace) -> Result<crate::registry::Registry, String> {
+pub fn policy_at(p: &Path, w: &crate::workspaces::Workspace) -> Result<crate::registry::Registry, String> {
     let refuse = |why: String| Err(format!("the list of projects {why}, and what a chat may read comes from it: no chat is started"));
     match fs::read(p) {
         Err(e) if e.kind() == io::ErrorKind::NotFound && !w.projects.is_empty() => return refuse(format!("is missing ({})", p.display())),
@@ -937,6 +937,44 @@ pub struct PlaceLine {
 pub struct ProjectContext {
     pub read: ProjectRead,
     pub places: Result<Vec<PlaceLine>, String>,
+}
+
+/// What the agents of a place are doing, in words: `claude busy`.
+pub fn agent_words(readings: Vec<(&'static dyn crate::harness::Adapter, crate::activity::Activity)>) -> String {
+    let words: Vec<String> = readings
+        .into_iter()
+        .filter(|(_, a)| a.state != crate::activity::State::None)
+        .map(|(h, a)| format!("{} {}", h.provider().id, format!("{:?}", a.state).to_lowercase()))
+        .collect();
+    words.join(", ")
+}
+
+/// The places of the project at `root`: names, branches and declared notes,
+/// with what their agents are doing. One `git worktree list`, and no git call
+/// per place.
+pub fn places(root: &str, panes: Option<&crate::tmux::PaneList>, probes: &[crate::agent::ClaudeProbe]) -> Result<Vec<PlaceLine>, String> {
+    if !Path::new(root).is_dir() {
+        return Err("its folder is not there".into());
+    }
+    let project = crate::Project::discover(Path::new(root)).map_err(|e| e.msg)?;
+    let decls = crate::store::read_lenient(&project.main_root);
+    let (now, word) = (crate::sysclock::now_epoch(), crate::project::adopt_ai_word());
+    let scan = crate::harness::Scan { probes, panes };
+    Ok(project
+        .place_index()
+        .into_iter()
+        .map(|p| {
+            let d = decls.places.get(&p.slug);
+            let up = panes.is_some_and(|ps| project.live_session_in(&p.slug, &p.path, &project.place_panes(&p.slug, ps), &word).is_some());
+            PlaceLine {
+                branch: p.branch.unwrap_or_else(|| "(detached)".into()),
+                lifecycle: crate::store::reconcile(d, up, now),
+                note: d.and_then(|d| d.note.clone()).unwrap_or_default(),
+                agent: agent_words(crate::harness::place_activities(&project, &p.slug, &p.path, &scan)),
+                slug: p.slug,
+            }
+        })
+        .collect())
 }
 
 /// Everything `context.md` says.
@@ -1290,6 +1328,84 @@ pub fn earlier_notes(root: &Path, ws: &str, except: Option<&str>) -> Vec<(String
     v.into_iter().filter(|c| Some(c.id.as_str()) != except && note_exists(root, ws, c)).map(|c| (c.started, c.title, c.note)).collect()
 }
 
+// ── the MCP server's workspace mode (§5.4) ──────────────────────────────────
+
+/// The variable a chat's Claude is started with, naming the chat: what its
+/// `worktrees mcp` pins ([`pin_at`]). Never read from anything a model wrote.
+pub const CHAT_ENV: &str = "WORKTREES_WORKSPACE_CHAT";
+
+/// The environment a chat is launched with: its name, and the two folders the
+/// engine that launched it used, so its MCP server reads the same record and
+/// the same plan whatever its own environment would have said.
+pub fn chat_env(root: &Path, ideas: &Path, conv: &str) -> Vec<(String, String)> {
+    let s = |p: &Path| p.to_string_lossy().into_owned();
+    vec![(CHAT_ENV.into(), conv.into()), (OVERRIDE_ENV.into(), s(root)), (crate::ideas::OVERRIDE_ENV.into(), s(ideas))]
+}
+
+/// The workspace whose own folder `dir` is (`<root>/<id>`, through links),
+/// else `None`: a server started there is a workspace chat's, or nobody's.
+pub fn workspace_of_folder(root: &Path, dir: &Path) -> Option<String> {
+    let dir = crate::wsfolder::resolved(dir);
+    let id = dir.file_name()?.to_str()?;
+    (crate::ulid::is_valid(id) && dir.parent()? == crate::wsfolder::resolved(root)).then(|| id.to_string())
+}
+
+/// What a workspace-mode server pins: the workspace and the chat its launch
+/// named. Refused, in words, for no name, a name that is not a chat id, a chat
+/// the workspace's record does not hold, and a workspace that is gone.
+pub fn pin_at(root: &Path, ws_file: &Path, ws: &str, conv: Option<&str>) -> Result<(crate::workspaces::Workspace, Chat), String> {
+    let Some(conv) = conv.filter(|c| !c.is_empty()) else {
+        return Err(format!(
+            "this server is in a workspace's folder but was not started as one of its chats (its launch named none in {CHAT_ENV}): \
+             a chat started by an earlier build, or a session opened here by hand. Resume the chat from the app"
+        ));
+    };
+    if check_conv(conv).is_err() {
+        return Err(format!("the launch named {conv:?}, which is not a chat id"));
+    }
+    let w = crate::workspaces::read_at(ws_file)?
+        .workspaces
+        .into_iter()
+        .find(|w| w.id == ws)
+        .ok_or_else(|| format!("the workspace {ws} is no longer in the app's list of workspaces"))?;
+    let c = find_at(root, ws, conv).map_err(|_| format!("chat {conv} is not one of this workspace's chats (its record does not hold it)"))?;
+    Ok((w, c))
+}
+
+/// One of the workspace's projects as a workspace-mode server answers for
+/// it: whether it does, and why not.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct Answered {
+    #[serde(flatten)]
+    pub read: ProjectRead,
+    /// It is answered for: read now, and read by this chat's launch.
+    pub answered: bool,
+    /// Why not, in words.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_answered: Option<String>,
+}
+
+/// The rule: a project is answered for only when a launch now would read it
+/// AND this chat's launch did. What the chat's own rules cannot read, its
+/// server does not tell it either; what a launch would no longer read is not
+/// told, whatever the chat's rules still allow.
+pub fn answered(now: Vec<ProjectRead>, given: Option<&Access>) -> Vec<Answered> {
+    now.into_iter()
+        .map(|read| {
+            let why = match (read.reads, given) {
+                (Reads::No, _) => Some(read.why.unwrap_or("not read").to_string()),
+                (Reads::Yes, None) => Some("this chat was launched by an earlier build, which kept no record of what it reads: resume it".into()),
+                (Reads::Yes, Some(g)) => match g.projects.iter().find(|p| p.root == read.root) {
+                    Some(p) if p.read => None,
+                    Some(p) => Some(format!("not read when this chat was launched ({}): resume the chat to read it", p.why.as_deref().unwrap_or("no"))),
+                    None => Some("added to the workspace after this chat was launched: resume the chat to read it".into()),
+                },
+            };
+            Answered { answered: why.is_none(), not_answered: why, read }
+        })
+        .collect()
+}
+
 // ── launching ───────────────────────────────────────────────────────────────
 
 fn launch<'a>(cwd: &'a Path, c: &'a Chat, session: &'a str, how: Start, opener: Option<String>, settings: String) -> Launch<'a> {
@@ -1301,6 +1417,7 @@ fn launch<'a>(cwd: &'a Path, c: &'a Chat, session: &'a str, how: Start, opener: 
         how,
         opener,
         settings: Some(settings),
+        env: Vec::new(),
         noun: NOUN,
         a_kind: "a workspace chat",
         kinds: "workspace chats",
@@ -1328,7 +1445,9 @@ pub fn launch_at(root: &Path, ideas: &Path, w: &crate::workspaces::Workspace, co
     // Recorded before it runs: a chat is never live under rules its record
     // does not name.
     update_at(root, &w.id, conv, |c| c.access = Some(given))?;
-    launch(&cwd, &c, &session, how, opener, settings).run()?;
+    let mut l = launch(&cwd, &c, &session, how, opener, settings);
+    l.env = chat_env(root, ideas, &c.id);
+    l.run()?;
     Ok(session)
 }
 
@@ -2006,6 +2125,73 @@ mod tests {
         assert!(folds.ends_with(&format!(" 'Read chats/{}/fold.md and do what it says.'", c.id)), "{folds}");
         assert!(launch(Path::new("/w"), &c, &s, Start::Fresh, None, rules).pane0("codex", vec![]).unwrap_err().contains("workspace chats run Claude"), "Claude only");
         let _ = fs::remove_dir_all(&top);
+    }
+
+    /// The launch names the chat and the two folders, and nothing else; the
+    /// line carries them before Claude, as assignments.
+    #[test]
+    fn a_chat_is_launched_with_its_name_for_its_mcp_server() {
+        let c = chat(&desk::new_uuid());
+        let env = chat_env(Path::new("/r/ws"), Path::new("/r/ideas"), &c.id);
+        assert_eq!(env, vec![
+            (CHAT_ENV.to_string(), c.id.clone()),
+            (crate::wsfolder::OVERRIDE_ENV.to_string(), "/r/ws".to_string()),
+            (crate::ideas::OVERRIDE_ENV.to_string(), "/r/ideas".to_string()),
+        ]);
+        let s = session_name(&c.id);
+        let mut l = launch(Path::new("/w"), &c, &s, Start::Fresh, Some(opener(&c.id)), "{}".into());
+        l.env = env;
+        let line = l.line("claude", vec![]).unwrap();
+        assert!(line.starts_with(&format!("{CHAT_ENV}='{}' WORKTREES_WORKSPACES_DIR='/r/ws' WORKTREES_IDEAS_DIR='/r/ideas' claude --name ", c.id)), "{line}");
+    }
+
+    /// The pin: a workspace's own folder, a chat its record holds, a
+    /// workspace that is there. Every other case is said.
+    #[test]
+    fn a_server_pins_the_chat_its_launch_named_and_nothing_else() {
+        let top = fs::canonicalize(tmp("pin")).unwrap();
+        let root = top.join("workspaces");
+        let wsf = top.join("workspaces.json");
+        let w = crate::workspaces::create_at(&wsf, "Home").unwrap();
+        let c = prepare_at(&root, &w.id, |_| String::new()).unwrap();
+        let folder = folder_at(&root, &w.id).unwrap();
+        assert_eq!(workspace_of_folder(&root, &folder).as_deref(), Some(w.id.as_str()));
+        let link = top.join("via");
+        std::os::unix::fs::symlink(&folder, &link).unwrap();
+        assert_eq!(workspace_of_folder(&root, &link).as_deref(), Some(w.id.as_str()), "through a link");
+        for not in [top.clone(), root.clone(), folder.join("memory"), folder.join(CHATS_DIR), root.join(crate::wsfolder::ENGINE_DIR), root.join("not-an-id")] {
+            assert_eq!(workspace_of_folder(&root, &not), None, "{}", not.display());
+        }
+        let (pw, pc) = pin_at(&root, &wsf, &w.id, Some(&c.id)).unwrap();
+        assert_eq!((pw.id.as_str(), pc.id.as_str()), (w.id.as_str(), c.id.as_str()));
+        assert!(pin_at(&root, &wsf, &w.id, None).unwrap_err().contains("not started as one of its chats"));
+        assert!(pin_at(&root, &wsf, &w.id, Some("../x")).unwrap_err().contains("not a chat id"));
+        assert!(pin_at(&root, &wsf, &w.id, Some(&crate::ulid::new())).unwrap_err().contains("not one of this workspace's chats"));
+        let other = crate::workspaces::create_at(&wsf, "Other").unwrap();
+        let theirs = prepare_at(&root, &other.id, |_| String::new()).unwrap();
+        assert!(pin_at(&root, &wsf, &w.id, Some(&theirs.id)).unwrap_err().contains("not one of this workspace's chats"), "another workspace's chat");
+        crate::workspaces::remove_at(&wsf, &w.id).unwrap();
+        assert!(pin_at(&root, &wsf, &w.id, Some(&c.id)).unwrap_err().contains("no longer"));
+        let _ = fs::remove_dir_all(&top);
+    }
+
+    /// Answered only for what a launch now reads AND this chat's did.
+    #[test]
+    fn a_project_is_answered_for_only_when_both_launches_read_it() {
+        let pr = |root: &str, yes: bool, why: Option<&'static str>| ProjectRead { root: root.into(), name: Some(root.trim_start_matches('/').into()), registered: true, private: why == Some(WHY_PRIVATE), reads: if yes { Reads::Yes } else { Reads::No }, why };
+        let ap = |root: &str, read: bool| AccessProject { root: root.into(), name: root.trim_start_matches('/').into(), read, why: None };
+        let given = Access { projects: vec![ap("/a", true), ap("/p", true), ap("/n", false), ap("/gone", true)], ..Default::default() };
+        let now = vec![pr("/a", true, None), pr("/p", false, Some(WHY_PRIVATE)), pr("/n", true, None), pr("/new", true, None)];
+        let got = answered(now.clone(), Some(&given));
+        let by = |r: &str| got.iter().find(|a| a.read.root == r).unwrap().clone();
+        assert!(by("/a").answered && by("/a").not_answered.is_none());
+        assert!(!by("/p").answered && by("/p").not_answered.as_deref() == Some(WHY_PRIVATE), "private now: not told, whatever the chat's rules say");
+        assert!(!by("/n").answered && by("/n").not_answered.unwrap().contains("resume"), "readable now, not by this chat's rules");
+        assert!(!by("/new").answered && by("/new").not_answered.unwrap().contains("added"), "added since the launch");
+        assert_eq!(got.len(), 4, "a project taken out of the workspace is not named at all");
+        let old = answered(now, None);
+        assert!(old.iter().all(|a| !a.answered), "no record: nothing is answered for");
+        assert!(old.iter().filter(|a| a.read.reads == Reads::Yes).all(|a| a.not_answered.as_deref().is_some_and(|w| w.contains("earlier build"))));
     }
 
     /// A private project of the workspace is DENIED, not only unlisted: in

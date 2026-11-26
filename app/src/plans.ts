@@ -24,7 +24,12 @@ export type WorkItem = {
   ai: string | null; model: string | null;
   /** The `started:` line as written, and as read (null when it is neither). */
   started: string | null; place: Started | null;
+  /** The `proposed:` line a workspace chat wrote (`plan_propose_work`), as
+   *  written and as read; absent for an item a person wrote. */
+  proposed?: string | null; proposal?: Proposed | null;
 };
+/** Core's `Proposed`: which workspace chat proposed an item, its title then. */
+export type Proposed = { by: string; chat: string; at: string };
 /** A work item judged against the registry (core's answer, one per item):
  *  where its place would go, and the root of the place it has. */
 export type WorkState = { line: number; project_state: ProjectState["state"] | null; root?: string; place_root?: string };
@@ -292,7 +297,7 @@ export function planSources(open: DocRow | null, selected: readonly string[], ro
 export function workStatus(w: WorkItem, at: ItemPlace): string {
   const when = w.place ? `started ${w.place.at}` : "";
   switch (at.kind) {
-    case "none": return "not started";
+    case "none": return w.proposal ? `proposed by ${w.proposal.by} · not started` : "not started";
     case "unreadable": return `started: ${w.started}`;
     case "unknown": return when;
     case "unregistered": return `${when} · its project is not registered`;

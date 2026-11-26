@@ -144,6 +144,11 @@ const key = `${R}|nope|2026-11-12 09:30`;
 const at = (i, s, sn = snap, act = { busy: none, waiting: none }, gone = new Set([key])) => P.itemPlace(i, s, sn, act, gone);
 const done = st({ place_root: R });
 check(at(it(), st()).kind === "none" && P.workStatus(it(), at(it(), st())) === "not started", "an item with no started: line is not started");
+{
+  const prop = it({ proposed: "Chat 2 · 01JC90A1000000000000000000 · 2026-11-25 10:00", proposal: { by: "Chat 2", chat: "01JC90A1000000000000000000", at: "2026-11-25 10:00" } });
+  check(P.workStatus(prop, at(prop, st())) === "proposed by Chat 2 · not started", "a chat's proposal says who proposed it, and that nothing started");
+  check(P.itemFree(at(prop, st())), "a proposal has Review… and Start like any item not started");
+}
 check(at(started("role"), done).kind === "there" && P.workStatus(started("role"), at(started("role"), done)) === "started 2026-11-12 09:30 · there", "its place is there");
 check(at(started("role"), done, snap, { busy: new Set([`${R}/.worktrees/role`]), waiting: none }).kind === "busy", "…busy, from the same activity the nav dots use");
 check(at(started("role"), done, snap, { busy: none, waiting: new Set([`${R}/.worktrees/role`]) }).kind === "waiting", "…or waiting");
