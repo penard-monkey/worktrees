@@ -131,8 +131,17 @@ const ipc = read("../src/ipc.ts");
 const consoleRows = ipc.match(/export const CONSOLE_ROWS[^=]*=\s*\[([\s\S]*?)\];/)?.[1] ?? "";
 const mock = read("../src/mock/install.ts");
 for (const r of ROWS) {
-  ok(`${r} is a bare HostConsole row`, new RegExp(`^\\s+${r}: HostConsole => workspaces::${r}\\(`, "m").test(dispatch));
-  ok(`${r} is in CONSOLE_ROWS`, consoleRows.includes(`"${r}"`));
+  if (r === "workspaces_list") {
+    // iOS workspaces phase 1 (the owner, 2026-11-25): a device reads it,
+    // projected by serve; a remote window still does not ask (CONSOLE_SHAPED).
+    ok(`${r} is a device's read, filtered by named_workspaces`, new RegExp(`^\\s+${r}: Engine \\[read, filtered\\(named_workspaces\\)\\] => workspaces::${r}\\(`, "m").test(dispatch));
+    ok(`${r} is not in CONSOLE_ROWS`, !consoleRows.includes(`"${r}"`));
+    const shaped = ipc.match(/export const CONSOLE_SHAPED[^=]*=\s*\[([\s\S]*?)\];/)?.[1] ?? "";
+    ok(`${r} is in CONSOLE_SHAPED, so a remote window does not ask`, shaped.includes(`"${r}"`) && /if \(CONSOLE_SHAPED\.includes\(cmd\)\) return `/.test(ipc));
+  } else {
+    ok(`${r} is a bare HostConsole row`, new RegExp(`^\\s+${r}: HostConsole => workspaces::${r}\\(`, "m").test(dispatch));
+    ok(`${r} is in CONSOLE_ROWS`, consoleRows.includes(`"${r}"`));
+  }
   ok(`the mock answers ${r}`, mock.includes(`case "${r}":`));
 }
 const mcp = read("../../crates/worktrees-cli/src/mcp.rs");

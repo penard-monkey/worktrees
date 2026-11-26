@@ -3,7 +3,10 @@
 //! "every registered project on this host" (`list_workspace`).
 //!
 //! Desktop only, by the owner's decision (2026-11-08): every row here is
-//! `HostConsole` in serve's table, and there is no MCP tool. Every row answers
+//! `HostConsole` in serve's table, and there is no MCP tool — save
+//! `workspaces_list`, which a paired device reads PROJECTED since the owner's
+//! lift of 2026-11-25 (serve's `scope::named_workspaces`), and
+//! `workspaces:changed` ([`emit_writes`]). Every row answers
 //! with the whole list, each project joined with the registry so the nav can
 //! say "not registered" without a second call.
 //!
@@ -105,6 +108,38 @@ pub fn reorder_in(ws: &Path, reg: &Path, ids: &[String]) -> Result<Workspaces, S
 pub fn set_color_in(ws: &Path, reg: &Path, id: &str, color: Option<&str>) -> Result<Workspaces, String> {
     store::set_color_at(ws, id, color)?;
     view(ws, reg)
+}
+
+/// The event a write of the workspaces file is (iOS workspaces phase 1).
+pub const CHANGED: &str = "workspaces:changed";
+
+/// What [`CHANGED`] carries inside serve: each workspace's id, name, colour
+/// and member roots, before and after. Serve's projection reads it to judge
+/// whether a device's answer moved, and sends every socket `null`.
+fn states(f: &store::WorkspacesFile) -> serde_json::Value {
+    serde_json::Value::Array(
+        f.workspaces
+            .iter()
+            .map(|w| serde_json::json!({
+                "id": w.id,
+                "name": w.name,
+                "color": w.color,
+                "projects": w.projects.iter().map(|p| serde_json::json!({ "root": p.root })).collect::<Vec<_>>(),
+            }))
+            .collect(),
+    )
+}
+
+/// Emit [`CHANGED`] on `ctx` after every write to `path`, for as long as the
+/// returned watch lives. Installed once, by `host::start` for the real file:
+/// the store's `edit_at` is the one place every writer shares, so no row
+/// emits it itself.
+pub fn emit_writes(ctx: &crate::Ctx, path: &Path) -> store::WriteWatch {
+    let ctx = ctx.clone();
+    store::watch_writes(
+        path,
+        std::sync::Arc::new(move |before, after| ctx.emit(CHANGED, serde_json::json!({ "before": states(before), "after": states(after) }))),
+    )
 }
 
 fn paths() -> (std::path::PathBuf, std::path::PathBuf) {
@@ -223,6 +258,50 @@ mod tests {
         assert_ne!(before, before2);
         let _ = fs::remove_dir_all(d);
     }
+    /// `emit_writes` turns a write of the file into ONE `workspaces:changed`
+    /// carrying what serve's projection needs, before and after, and nothing
+    /// else (no plan, no ideas); a write that changes nothing emits nothing.
+    #[test]
+    fn a_write_of_the_file_emits_workspaces_changed_once() {
+        let d = tmp("emit");
+        let (ws, reg) = (d.join("workspaces.json"), d.join("projects.json"));
+        fs::write(&reg, r#"{"version":1,"projects":[{"root":"/r/a","name":"a"}]}"#).unwrap();
+        let rec = std::sync::Arc::new(crate::tests::Recorder::default());
+        let ctx = crate::Ctx::new(d.clone(), rec.clone());
+        let watch = emit_writes(&ctx, &ws);
+        let id = create_in(&ws, &reg, "One").unwrap().workspaces[0].id.clone();
+        set_projects_in(&ws, &reg, &id, &["/r/a".into()]).unwrap();
+        rename_in(&ws, &reg, &id, "One").unwrap();
+        let events = std::mem::take(&mut *rec.events.lock().unwrap());
+        assert_eq!(events.len(), 2, "two writes, and a rename to the same name is none: {events:?}");
+        assert!(events.iter().all(|(n, _)| n == CHANGED));
+        assert_eq!(
+            events[1].1,
+            serde_json::json!({
+                "before": [{ "id": id, "name": "One", "color": null, "projects": [] }],
+                "after": [{ "id": id, "name": "One", "color": null, "projects": [{ "root": "/r/a" }] }],
+            })
+        );
+        drop(watch);
+        let _ = fs::remove_dir_all(d);
+    }
+
+    /// The console's answer keeps the shape the desktop reads (iOS phase 1
+    /// opened the row to devices through serve's projection, never here).
+    #[test]
+    fn the_console_shape_is_unchanged() {
+        let d = tmp("shape");
+        let (ws, reg) = (d.join("workspaces.json"), d.join("projects.json"));
+        fs::write(&reg, r#"{"version":1,"projects":[{"root":"/r/a","name":"a"}]}"#).unwrap();
+        let id = create_in(&ws, &reg, "One").unwrap().workspaces[0].id.clone();
+        let v = set_projects_in(&ws, &reg, &id, &["/r/a".into()]).unwrap();
+        assert_eq!(
+            serde_json::to_string(&v).unwrap(),
+            format!(r#"{{"workspaces":[{{"id":"{id}","name":"One","projects":[{{"root":"/r/a","name":"a","registered":true}}],"color":null,"plan":null,"ideas":[]}}]}}"#)
+        );
+        let _ = fs::remove_dir_all(d);
+    }
+
     /// A color is answered with its workspace; one the palette does not have
     /// (a hand edit of the file) is answered as none.
     #[test]

@@ -59,6 +59,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   where a lane is drawn — `worktrees place under <slug> <target|--top|--reset>` (refused inside a lane), MCP `adopt_place`
   (refused from any place but `(main)`), and serve's `set_place_under` for the app's menu — which never changes who started it
   or where its reports go. The nested nav that draws all this comes next; the mock (`?lanes`) carries a tree to build it on.
+- **A paired phone can read your named workspaces (the host half of iOS workspaces, phase 1).** `workspaces_list` now
+  answers a paired device too: only the workspaces whose every project its pairing covers (a pairing with all projects
+  sees them all, empty ones included; a narrower one never sees an empty workspace, nor anything of one that holds a
+  project outside it, not even its name), and of each only its id, name, colour, position and project roots, never its
+  plan or linked ideas. A new event, `workspaces:changed`, tells a device that declared it to re-read, and only when a
+  write changed what that device is shown. The remote handshake's `ok` names `workspaces: ["list"]`. Nothing else about
+  workspaces reaches a device, and nothing at all reaches an agent. The desktop app's own answer is unchanged, and a
+  desktop window driving another host still shows no workspaces.
 
 ### Changed
 

@@ -6752,8 +6752,8 @@ function App() {
   // Re-read whenever the registry's roots change: "not registered" is the
   // registry's answer, joined in by the row.
   const wsRegKey = (ws?.projects ?? []).map((pv) => pv.root).join("\n");
-  // Always fetched: a window that cannot reach the row (a remote one: it is
-  // console-only) gets null, which takes the switch and every workspace menu
+  // Always fetched: a window that does not ask the row (a remote one: its
+  // device answer is the phone's projection, `CONSOLE_SHAPED`) gets null, which takes the switch and every workspace menu
   // item with it.
   useEffect(() => {
     let alive = true;

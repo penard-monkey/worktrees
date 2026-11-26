@@ -1452,10 +1452,15 @@ commands! { cx, a;
     // The addresses `remote_enable` would take now: the host app's picker.
     remote_candidates: HostConsole => remote(cx)?.candidates(),
     remote_advertise: HostConsole => remote(cx)?.set_advertise(a.get("on")?),
-    // ── named workspaces (idea board phase 2, `workspaces.json`): desktop only ──
+    // ── named workspaces (idea board phase 2, `workspaces.json`) ──
     // Lists of references to registered projects. Console, by the owner's
-    // decision of 2026-11-08: nothing a paired device or an agent reaches.
-    workspaces_list: HostConsole => workspaces::workspaces_list(),
+    // decision of 2026-11-08: nothing a paired device or an agent reaches —
+    // save the list itself, which he opened to paired devices on 2026-11-25
+    // (iOS workspaces phase 1): a device reads it projected
+    // (`scope::named_workspaces`: only workspaces whose every member it
+    // covers, without plan or ideas); the console's answer is unchanged.
+    // Every other workspace row stays console-only, and no MCP tool has any.
+    workspaces_list: Engine [read, filtered(named_workspaces)] => workspaces::workspaces_list(),
     workspace_create: HostConsole => workspaces::workspace_create(a.get("name")?),
     workspace_rename: HostConsole => workspaces::workspace_rename(a.get("id")?, a.get("name")?),
     workspace_remove: HostConsole => workspaces::workspace_remove(&cx.ctx, a.get("id")?),
@@ -1592,7 +1597,8 @@ mod tests {
     /// two (`agent_commands`, `agent_command`), notifications' nine (the
     /// `push_*` rows), and Settings → Agent policy's four (`limits_settings`,
     /// `set_limits`, `policy_preset_status`, `apply_policy_preset`), and the
-    /// named workspaces' seven console rows (`workspaces_list`, `workspace_*`), and the
+    /// named workspaces' seven rows (six console `workspace_*`, and `workspaces_list`, a
+    /// device's `read` since iOS phase 1), and the
     /// idea board's seven console rows (`ideas_list`, `idea_read`,
     /// `idea_create`, `idea_write`, `idea_rename`, `idea_remove`,
     /// `idea_adopt`) and phase 3's seven (`idea_relate`, `idea_merge`,
@@ -2038,7 +2044,7 @@ mod tests {
     /// `push_allow_security`); Settings → Agent policy → Limits'
     /// `limits_settings` (`read`) and `set_limits` (`admin`); and the policy
     /// presets' `policy_preset_status` (`read`) and `apply_policy_preset`
-    /// (console); the named workspaces' seven (console); and the idea board's seven and phase 3's seven (console); phase 4's ten and phase 5's three (console); phase S's sixteen idea-session rows (console); the workspace chats' sixteen and a workspace's memory's nine (console); `read_place_image` and `agent_call_image` are `read`; the host's sleep hold's `get_keep_awake` (`read`) and `set_keep_awake` (`admin`); disk usage's `disk_usage` and `disk_place_tree` (`read`) and `disk_delete` (`write`); and group chat's
+    /// (console); the named workspaces' six (console) and `workspaces_list` (`read`, a device's since iOS phase 1, projected); and the idea board's seven and phase 3's seven (console); phase 4's ten and phase 5's three (console); phase S's sixteen idea-session rows (console); the workspace chats' sixteen and a workspace's memory's nine (console); `read_place_image` and `agent_call_image` are `read`; the host's sleep hold's `get_keep_awake` (`read`) and `set_keep_awake` (`admin`); disk usage's `disk_usage` and `disk_place_tree` (`read`) and `disk_delete` (`write`); and group chat's
     /// shares: fourteen console rows (`share_*` for the owner, `share_used`, `share_check`, `guest_places_hide`,
     /// `shares_all`, `guests_list`, `guest_remove`, `owner_set_name`) and the
     /// four `guest` rows (`GUEST_ROWS`), the capability's first, the thread's
@@ -2060,7 +2066,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 74), ("write", 25), ("admin", 42), ("console", 140), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 75), ("write", 25), ("admin", 42), ("console", 139), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7), ("guest", 10),
         ]
         .into();
