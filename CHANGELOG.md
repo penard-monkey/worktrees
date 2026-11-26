@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.54.0] - 2026-11-26
+
 ### Added
 
 - **Workspaces can show only your workspaces.** Settings → Layout → **Show Everything Else in Workspaces**, on by default. Off, the Workspaces view has no Everything Else: the projects that are in no workspace are in All projects, which still lists every project, and when a place among them waits for you or has work you have not seen, **All projects** in the switch has a dot. A project taken out of its last workspace leaves the view, and its Undo says it is now only in All projects. With no workspace yet the view is empty, with **New workspace** and **All projects**.
