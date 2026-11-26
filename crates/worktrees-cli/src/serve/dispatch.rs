@@ -1,4 +1,4 @@
-//! The 293 commands, each with its exposure, capability and objects, in ONE
+//! The 297 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -39,7 +39,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::sync::Arc;
-use worktrees_api::{agents, config, files, hostenv, ideas, ideasessions, keepawake, macprivacy, meta, ops, plans, prefs, presets, profiles, project, status, term, viewer, workspace, workspaces, Ctx};
+use worktrees_api::{agents, config, disk, files, hostenv, ideas, ideasessions, keepawake, macprivacy, meta, ops, plans, prefs, presets, profiles, project, status, term, viewer, workspace, workspaces, Ctx};
 use worktrees_core::authz::{self, Caller, Capability, Caps, DeviceId, Grant, Projects, Registry};
 use worktrees_core::fetchpolicy::Fetcher;
 
@@ -934,6 +934,15 @@ commands! { cx, a;
         &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("del_branch")?, a.get("force")?, &cx.ctx.shells,
     ),
 
+    // ── disk usage (worktrees_core::diskusage) ───────────────────────────
+    // A scan walks every file of the project's places (seconds to a minute) on
+    // the blocking pool, and is cached in the engine until `refresh`. A delete
+    // takes only a path git ignores in the place (`delete_refusal`); `path` is
+    // resolved under the PLACE's root by the body, like `read_place_image`'s.
+    disk_usage: Engine [read, project(repo)] => disk::disk_usage(&cx.ctx, a.get("repo")?, a.get("refresh")?, a.get("cached")?),
+    disk_place_tree: Engine [read, place(repo, slug)] => disk::disk_place_tree(&cx.ctx, a.get("repo")?, a.get("slug")?),
+    disk_delete: Engine [write, place(repo, slug)] => disk::disk_delete(&cx.ctx, a.get("repo")?, a.get("slug")?, a.get("path")?, a.get("scanned")?),
+
     // ── usage, service status, releases (status) ─────────────────────────
     claude_usage: Engine [read, global] => status::claude_usage(),
     codex_usage: Engine [read, global] => status::codex_usage(),
@@ -1515,7 +1524,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 293 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 297 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1543,13 +1552,14 @@ mod tests {
     /// chat's eighteen share rows (fourteen console with PR D's `share_used` and `share_check`, four
     /// `guest`), its thread's two (`thread_read`, `thread_post`, `guest`) and PR C's
     /// two `guest` history rows (`shared_turns`, `shared_tool_call`), the guest's `shared_image` and `shared_call_image`, and the host's sleep
-    /// hold (`get_keep_awake`, `set_keep_awake`); the check scripts
+    /// hold (`get_keep_awake`, `set_keep_awake`), and disk usage's three (`disk_usage`,
+    /// `disk_place_tree`, `disk_delete`); the check scripts
     /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 294, "the table has 294 commands");
+        assert_eq!(TABLE.len(), 297, "the table has 297 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1890,6 +1900,7 @@ mod tests {
         ("workspace_link_idea", "id", "a named workspace's id (a console act)"),
         ("workspace_unlink_idea", "id", "a named workspace's id (a console act); `idea` may name an idea that is gone"),
         ("workspace_overview", "id", "a named workspace's id (a console act)"),
+        ("disk_delete", "path", "a path in the PLACE, relative to its root: the body refuses anything but a plain relative path, then lstats every component and resolves it under `place(repo, slug)`'s own root (`diskusage::delete_refusal`), which is not a `file(path)` judged against every project"),
         ("read_place_image", "path", "a path in the PLACE (relative to its root, or absolute under it): the body resolves it under `place(repo, slug)`'s own root by `safepath::place_image`, which is not a `file(path)` judged against every project"),
         ("shared_image", "path", "a path the shared SESSION shows: the body refuses one its turn does not draw, then resolves it under the share's own place (`share(share)`) by the same `safepath::place_image`; a guest names no repo or slug"),
     ];
@@ -1966,7 +1977,7 @@ mod tests {
     /// `push_allow_security`); Settings → Agent policy → Limits'
     /// `limits_settings` (`read`) and `set_limits` (`admin`); and the policy
     /// presets' `policy_preset_status` (`read`) and `apply_policy_preset`
-    /// (console); the named workspaces' seven (console); and the idea board's seven and phase 3's seven (console); phase 4's ten and phase 5's three (console); phase S's sixteen idea-session rows (console); `read_place_image` and `agent_call_image` are `read`; the host's sleep hold's `get_keep_awake` (`read`) and `set_keep_awake` (`admin`); and group chat's
+    /// (console); the named workspaces' seven (console); and the idea board's seven and phase 3's seven (console); phase 4's ten and phase 5's three (console); phase S's sixteen idea-session rows (console); `read_place_image` and `agent_call_image` are `read`; the host's sleep hold's `get_keep_awake` (`read`) and `set_keep_awake` (`admin`); disk usage's `disk_usage` and `disk_place_tree` (`read`) and `disk_delete` (`write`); and group chat's
     /// shares: fourteen console rows (`share_*` for the owner, `share_used`, `share_check`, `guest_places_hide`,
     /// `shares_all`, `guests_list`, `guest_remove`, `owner_set_name`) and the
     /// four `guest` rows (`GUEST_ROWS`), the capability's first, the thread's
@@ -1988,7 +1999,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 72), ("write", 23), ("admin", 42), ("console", 113), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 74), ("write", 24), ("admin", 42), ("console", 113), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7), ("guest", 10),
         ]
         .into();
