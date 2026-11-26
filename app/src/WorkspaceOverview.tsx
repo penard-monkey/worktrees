@@ -32,6 +32,8 @@ export type WsParts = {
   /** A plan from the linked ideas, made this workspace's. `null`: none linked. */
   makePlan: (() => void) | null;
   linkIdea(id: string): void;
+  /** A new idea, linked here and opened in Edit. */
+  newIdea(): void;
   unlinkIdea(id: string): void;
   arm(e: React.PointerEvent, d: DocLite): void;
   snap: Snap;
@@ -80,12 +82,13 @@ export function NoPlan(props: Pick<WsParts, "freePlans" | "arm" | "setPlan" | "m
   );
 }
 
-/** "Link an idea ▸" and its list. */
-export function LinkIdea(props: Pick<WsParts, "linkable" | "arm" | "linkIdea">) {
+/** "Link an idea ▸" and its list, and New idea beside it. */
+export function LinkIdea(props: Pick<WsParts, "linkable" | "arm" | "linkIdea" | "newIdea">) {
   const [pick, setPick] = useState(false);
   return (
     <>
       <button className="ctrl sm" data-testid="ws-ov-link-idea" onClick={() => setPick((p) => !p)}>Link an idea ▸</button>
+      <button className="ctrl sm" data-testid="ws-ov-new-idea" title="Make a new idea and link it to this workspace" onClick={() => { setPick(false); props.newIdea(); }}>New idea</button>
       {pick && (
         <ul className="ws-ov-pick" data-testid="ws-ov-idea-pick">
           {props.linkable.length === 0 && <li className="empty small">No other idea to link.</li>}

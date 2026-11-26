@@ -389,6 +389,40 @@ async function elsewhere(page, tag) {
   await other.close();
 }
 
+/** New idea: made, linked to this workspace, open in Edit with its title
+ *  selected; a link that fails leaves it made and open, and says so. */
+async function newIdea(page, tag) {
+  await boot(page, ["beta_ideas"]);
+  await pickWs(page);
+  await page.waitForSelector("[data-testid=ws-overview]");
+  const ov = page.locator("[data-testid=ws-ov-card-ideas] [data-testid=ws-ov-new-idea]");
+  ok(await ov.count() === 1, `${tag} the Overview's ideas have New idea beside Link an idea`);
+  ok(/new idea/i.test(await ov.getAttribute("title") ?? "") && /link/i.test(await ov.getAttribute("title") ?? "") && /workspace/i.test(await ov.getAttribute("title") ?? ""),
+    `${tag} …its tooltip says it makes a new idea and links it to this workspace`);
+  await tab(page, "ideas");
+  const empty = page.locator("[data-testid=ws-no-ideas] [data-testid=ws-ov-new-idea]");
+  ok(await until(page, () => !!document.querySelector("[data-testid=ws-no-ideas] [data-testid=ws-ov-new-idea]")), `${tag} a workspace with no ideas offers New idea`);
+  const before = new Set((await call(page, "ideas_list", {})).ideas.map((i) => i.id));
+  await empty.click();
+  const opened = () => page.evaluate(() => { const d = document.querySelector("[data-testid=main-doc]"); return d && !d.hidden ? d.dataset.doc ?? null : null; });
+  ok(await until(page, (b) => { const d = document.querySelector("[data-testid=main-doc]"); return !!d && !d.hidden && !!d.dataset.doc && !b.includes(d.dataset.doc); }, [...before]), `${tag} New idea opens a new idea here`);
+  const id = await opened();
+  const linked = async (x) => (await call(page, "workspaces_list", {})).workspaces.find((w) => w.name.startsWith("Everything")).ideas?.includes(x) ?? false;
+  ok(await linked(id), `${tag} …linked to this workspace`);
+  ok(await until(page, () => { const e = document.querySelector("[data-testid=ideas-editor]"); return !!e && !e.hidden && !!document.activeElement?.closest(".cm-editor"); }), `${tag} …in Edit, the cursor in it`);
+  await page.keyboard.type("Garden plan");
+  ok(await until(page, (x) => /^# Garden plan$/m.test(window.__mock.ideaFile(x)?.content ?? ""), id, 6000), `${tag} …its title selected: what is typed is its heading`);
+  // The link fails: the idea is made, stays open, and the window says so.
+  await page.evaluate(() => window.__mock.wsFailLink("the workspaces file is busy"));
+  await page.locator("[data-testid=ws-ov-new-idea]:visible").first().click();
+  ok(await until(page, (x) => { const d = document.querySelector("[data-testid=main-doc]"); return !!d && !d.hidden && !!d.dataset.doc && d.dataset.doc !== x; }, id), `${tag} a failed link: the new idea is open all the same`);
+  const id2 = await opened();
+  ok(!!id2 && !!(await page.evaluate((x) => window.__mock.ideaFile(x), id2)) && !(await linked(id2)), `${tag} …it exists and is not linked`);
+  ok(await until(page, () => /could not link it to this workspace/i.test(document.querySelector(".err-float .float-text")?.textContent ?? "")), `${tag} …and the window says it could not link it`);
+  ok(await until(page, (x) => !!document.querySelector(`[data-testid=ws-idea-row][data-idea='${x}'][data-unlinked] [data-testid=ws-idea-link]`), id2), `${tag} …with Link beside it in the list`);
+  await page.evaluate(() => window.__mock.wsFailLink(null));
+}
+
 /** Quit on a workspace's tab, and opened again. */
 async function relaunch(page, tag) {
   for (const [on, want] of [[true, "ideas"], [false, null]]) {
@@ -484,7 +518,7 @@ async function themes(page, tag, name) {
 const only = process.env.ONLY?.split(",");
 for (const [engine, name] of [[chromium, "chromium"], [webkit, "webkit"]]) {
   const browser = await engine.launch();
-  for (const part of [gates, frame, history, life, removed, orphan, elsewhere, relaunch, layout, themes]) {
+  for (const part of [gates, frame, history, life, removed, orphan, elsewhere, newIdea, relaunch, layout, themes]) {
     if (only && !only.includes(part.name)) continue;
     const page = await (await browser.newContext({ viewport: { width: 1440, height: 900 } })).newPage();
     const errors = [];

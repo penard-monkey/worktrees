@@ -2324,6 +2324,7 @@ const mockIdeaHistory: { id: string; content: string }[] = [];
  *  newest last (`__mock.ideaVersions()`). */
 let mockIdeaWriteMs = 0;
 let mockIdeaWriteFails: string | null = null;
+let mockLinkFails: string | null = null;
 const mockIdeaVersions: { id: string; version: string; at: string; content: string }[] = [];
 let mockVersionSeq = 0;
 function ideaKeep(id: string, content: string) {
@@ -4780,6 +4781,7 @@ Phase 3: Frontend pane and mock harness
       return mockWsView();
     }
     case "workspace_link_idea": {
+      if (mockLinkFails) throw mockLinkFails;
       mockWsView();
       const w = mockWsGet(args.id);
       const d = ideaLookup(args.idea as string).d;
@@ -7299,6 +7301,8 @@ let mockNotifyGranted = new URLSearchParams(location.search).get("notify") === "
   ideaSlowWrites(ms: number) { mockIdeaWriteMs = ms; },
   /** Every `idea_write` fails with this, until it is called with `null`. */
   ideaFailWrites(msg: string | null) { mockIdeaWriteFails = msg; },
+  /** Every `workspace_link_idea` fails with this, until it is called with `null`. */
+  wsFailLink(msg: string | null) { mockLinkFails = msg; },
   /** Phase S: what `idea_send` sent, and each idea's conversations. */
   ideaSends: () => mockIdeaSends.slice(),
   ideaConvs: (id: string) => (mockConvs.get(id) ?? []).map(mockConvRow),

@@ -176,7 +176,7 @@ ok(/const tabs = docChips\(\{ ideas: ideasOn, chats: wsChatsOn \}\);\s*const tab
 // A document opens in the view's tabs. The pane may stay mounted behind the
 // gate (a text that could not be saved waits in it), so what is held is that it
 // SHOWS and OPENS nothing.
-ok(/const openDocHere = \(id: string, startIn\?: "edit"\) => \{\s*if \(!ideasOn \|\| !wsOpen\) return;/.test(code), "openDocHere opens nothing with Ideas off");
+ok(/const openDocHere = \(id: string, startIn\?: "edit"(?: \| "title")?\) => \{\s*if \(!ideasOn \|\| !wsOpen\) return;/.test(code), "openDocHere opens nothing with Ideas off");
 ok(/const docShown = wsShown !== null && mainDoc !== null && wsShown\.id === mainDoc\.ws && wsTabNow === mainDoc\.tab && !\(memFile && memFile\.kind !== "text"\);/.test(code) && /<MainDocument\s[\s\S]{0,160}?shown=\{docShown\}/.test(code), "a document in the main area is shown only on its own tab, which its beta draws");
 ok(/const docBeta = !mainDoc \|\| \(mainDoc\.source === ideaSource \? ideasOn : wsChatsOn\);/.test(code) && /if \(!docBeta \|\| !docWs\) void leaveMainDoc\(\);/.test(code), "…and is closed, once saved, when ITS beta goes off (Ideas' documents, or a memory's files)");
 ok(/const wsMem = useWsMemory\(wsChatsOn && !!wsList,/.test(code) && /memory=\{!wsChatsOn \? null/.test(code), "workspace_memory is asked for, and the Overview's memory drawn, only with workspace chats on");

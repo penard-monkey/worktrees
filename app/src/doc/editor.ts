@@ -292,6 +292,19 @@ export function mountEditor(parent: HTMLElement, hooks: EditorHooks): DocEditor 
       const p = (at && v.posAtCoords(at)) ?? v.state.selection.main.head;
       v.dispatch({ changes: { from: p, insert: text }, selection: { anchor: p + text.length }, userEvent: "input.paste", scrollIntoView: true });
     },
+    selectTitle() {
+      const doc = v.state.doc;
+      for (let i = 1; i <= doc.lines; i++) {
+        const l = doc.line(i);
+        const m = /^#[ \t]+/.exec(l.text);
+        if (m) {
+          v.dispatch({ selection: { anchor: l.from + m[0].length, head: l.to }, scrollIntoView: true });
+          v.focus();
+          return;
+        }
+      }
+      v.focus();
+    },
     gotoLine(n) {
       const l = v.state.doc.line(Math.max(1, Math.min(n, v.state.doc.lines)));
       v.dispatch({ selection: { anchor: l.from, head: l.to }, scrollIntoView: true });

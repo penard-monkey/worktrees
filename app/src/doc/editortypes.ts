@@ -39,6 +39,9 @@ export type DocEditor = {
   put(text: string, at?: { x: number; y: number }): void;
   /** Put the cursor at the start of line `n` (1-based, the file's) and show it. */
   gotoLine(n: number): void;
+  /** Select the first heading's words (not its `# `), so what is typed names
+   *  the document: a new idea's "Untitled". At the end when it has none. */
+  selectTitle(): void;
   destroy(): void;
 };
 

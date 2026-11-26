@@ -575,7 +575,7 @@ const memNote = (v: MemoryView | undefined, from: string, href: string): string 
 };
 const EMPTY_WS: WsDef[] = [];
 /** The document the main window has open, and where (a workspace's tab). */
-type MainDoc = DocTarget & { ws: string; tab: "plan" | "ideas" | "memory"; startIn?: "edit" };
+type MainDoc = DocTarget & { ws: string; tab: "plan" | "ideas" | "memory"; startIn?: "edit" | "title" };
 /** One entry of `DOCK_RAIL` (declared inside App, which owns the icons). */
 type DockRailItem = { key: Settings["dock_tab"]; track: string; icon: React.ReactNode; title: string };
 
@@ -6930,7 +6930,7 @@ function App() {
   const wsGoSeq = useRef(0);
   const wsOpenRef = useRef(wsOpen);
   wsOpenRef.current = wsOpen;
-  const showWs = async (id: string, tab: WsTab, o: { doc?: string; startIn?: "edit"; here?: boolean; chat?: string | null } = {}): Promise<boolean> => {
+  const showWs = async (id: string, tab: WsTab, o: { doc?: string; startIn?: "edit" | "title"; here?: boolean; chat?: string | null } = {}): Promise<boolean> => {
     if (!viewOn || id === EVERYTHING_ELSE_ID) return false;
     const n = ++wsGoSeq.current;
     const to = tabOr(tab, tabsOf(id));
@@ -7078,7 +7078,7 @@ function App() {
     setWsTrail((t) => ({ ...t, [id]: next }));
     void showWs(id, "memory", { doc: next.paths[next.at] });
   };
-  const openDocHere = (id: string, startIn?: "edit") => {
+  const openDocHere = (id: string, startIn?: "edit" | "title") => {
     if (!ideasOn || !wsOpen) return;
     if (id === tabDoc(wsOpen, "plan")?.name || id === wsById(wsOpen)?.plan) void showWs(wsOpen, "plan", { startIn });
     else void showWs(wsOpen, "ideas", { doc: id, startIn });
@@ -7276,6 +7276,19 @@ function App() {
     setIdeasTick((n) => n + 1);
   };
   const wsCall = (c: { cmd: string; args: Record<string, unknown> }) => wsRun(c.cmd, c.args);
+  /** New idea, from a workspace's view: made, linked here, and open in Edit with
+   *  its title selected. A link that fails leaves it made and open, says so, and
+   *  the Ideas tab keeps it in the list with Link. */
+  const newIdeaHere = async (id: string) => {
+    let made: { id: string };
+    try { made = await invoke<{ id: string }>("idea_create", { title: null }); } catch (e) { fail(`Could not make a new idea: ${String(e)}`); return; }
+    setIdeasTick((n) => n + 1);
+    const c = linkIdeaCall(id, made.id);
+    try { setWsList(await invoke<WsList>(c.cmd, c.args)); } catch (e) {
+      fail(`Made the new idea, but could not link it to this workspace: ${String(e)}. It is open here; Link puts it in the workspace.`);
+    }
+    openDocHere(made.id, "title");
+  };
   const wsLite = () => (wsList?.workspaces ?? []).map((w) => ({ id: w.id, plan: w.plan ?? null, ideas: w.ideas ?? [] }));
 
   // Auto-disarm the TIMED arms: the project-header ✕ ("hdr|") and both Close
@@ -9373,6 +9386,7 @@ function App() {
     setPlan: (plan) => void wsCall(setPlanCall(wsHere, plan)),
     makePlan: ovHere?.ideas.some((i) => i.live) ? () => void makePlanHere(wsHere) : null,
     linkIdea: (id) => void wsCall(linkIdeaCall(wsHere, id)),
+    newIdea: () => void newIdeaHere(wsHere),
     unlinkIdea: (id) => void wsCall(unlinkIdeaCall(wsHere, id)),
     arm: (e, d) => arm(e, { kind: d.kind, id: d.id, title: d.title }),
     snap: ws,

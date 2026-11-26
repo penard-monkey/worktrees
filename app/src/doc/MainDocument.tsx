@@ -25,8 +25,9 @@ export type MainDocApi = {
 
 export function MainDocument(props: {
   target: DocTarget;
-  /** Open in Edit, whatever its kind opens in ("Edit the plan"). */
-  startIn?: "edit";
+  /** Open in Edit, whatever its kind opens in ("Edit the plan"); `title`: in
+   *  Edit with its heading's words selected (a new idea). */
+  startIn?: "edit" | "title";
   shown: boolean;
   rows: DocRows;
   api: React.RefObject<MainDocApi | null>;
@@ -81,7 +82,7 @@ export function MainDocument(props: {
     follow: (to) => at.current.follow(to),
   });
   const refusedNow = useRef(false);
-  const { open, openDoc, session, closeOpen, save, current, switchMode } = doc;
+  const { open, openDoc, session, closeOpen, save, current, switchMode, editTitle } = doc;
   const leaveDoc = doc.leave;
   const leave = useCallback(async (before: string) => {
     const ok = await leaveDoc(before);
@@ -106,6 +107,7 @@ export function MainDocument(props: {
         if (cur && cur.name !== target.name) at.current.opened(cur);
         if (cur) at.current.landed?.(cur, true);
         if (at.current.startIn === "edit") switchMode("edit", false);
+        else if (at.current.startIn === "title") editTitle();
         return;
       }
       if (cur && !(await leave("before you open another"))) { if (!gone) at.current.refused(cur); return; }

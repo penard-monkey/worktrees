@@ -37,7 +37,7 @@ export type Held = { key: string; text: string };
 export type PickRow = { id: string | null; title: string; hint?: string; text?: string };
 
 /** Where the cursor goes when an editor comes: into the text, or to a line. */
-export type CursorNext = { line?: number } | null;
+export type CursorNext = { line?: number; title?: boolean } | null;
 
 export type DocOptions = {
   source: DocSource;
@@ -359,6 +359,14 @@ export function useDoc(o: DocOptions) {
     cursorNext.current = m === "edit" ? {} : null;
     if (m === "edit") window.setTimeout(() => { if (handle.current && cursorNext.current) { cursorNext.current = null; handle.current.focus(); } }, 0);
   }, []);
+  /** Edit, with the heading's words selected (a new idea: type its name). */
+  const editTitle = useCallback(() => {
+    switchMode("edit", false);
+    cursorNext.current = { title: true };
+    // As gotoLine's: switchMode's own timer runs first and takes the request as
+    // a plain focus; with no editor yet, EditorHost takes it as the editor comes.
+    window.setTimeout(() => { if (handle.current) { cursorNext.current = null; handle.current.selectTitle(); } }, 0);
+  }, [switchMode]);
   /** Put the cursor on a line, in Edit. */
   const gotoLine = useCallback((line: number) => {
     switchMode("edit", false);
@@ -383,7 +391,7 @@ export function useDoc(o: DocOptions) {
 
   const say = useCallback((msg: string) => cb.current.notice(msg), []);
   return {
-    say, source, open, save, mode, setMode, switchMode, gotoLine, readBody, renaming, setRenaming, busy, setBusy, hasSel,
+    say, source, open, save, mode, setMode, switchMode, editTitle, gotoLine, readBody, renaming, setRenaming, busy, setBusy, hasSel,
     history, setHistory, versions, tick, bump, session, handle, held, cursorNext, arm,
     begin, current, leave, openDoc, rename, saveAsNew, closeOpen, restore,
     picker, pickIdx, pickRows, insertLink, hooks, replaced,

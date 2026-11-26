@@ -67,10 +67,12 @@ export function EditorHost(props: {
       insert: (from, to, text) => editor.insert(from, to, text),
       put: (text, at) => editor.put(text, at),
       gotoLine: (n) => editor.gotoLine(n),
+      selectTitle: () => editor.selectTitle(),
     };
     const next = props.cursorNext.current;
     props.cursorNext.current = null;
     if (next?.line !== undefined) editor.gotoLine(next.line);
+    else if (next?.title) editor.selectTitle();
     else if (open.focus || next) editor.focus();
     // The text is read once per opening; a reload goes through `replace`,
     // never through a re-render.
