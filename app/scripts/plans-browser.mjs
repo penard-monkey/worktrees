@@ -289,9 +289,10 @@ async function main(page, tag, name) {
 /** The list of places is slow (a git fan-out) and the plan's line is not: the
  *  item just started must never read "place removed" in between. */
 async function slow(page, tag) {
+  // `restore_last: false`: it boots at Home (restore is on by default since 2026-11-25).
   await page.addInitScript((s) => {
     if (!sessionStorage.getItem("wt-mock-ui-state")) sessionStorage.setItem("wt-mock-ui-state", JSON.stringify(s));
-  }, { places_side: "left", dock_side: "right", settings_rev: 5, nav_pinned: true, nav_view: "workspaces", beta_ideas: true });
+  }, { places_side: "left", dock_side: "right", settings_rev: 5, nav_pinned: true, nav_view: "workspaces", beta_ideas: true, restore_last: false });
   for (const [where, sel, go] of [
     ["overview", "ws-ov", async () => {
       await page.goto(`${BASE}/?ideas=seed&workspaces=1&slowlist=900`);

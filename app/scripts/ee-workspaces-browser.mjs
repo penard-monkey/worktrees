@@ -36,7 +36,9 @@ const only = process.argv.find((a) => a.startsWith("--engine="))?.slice(9);
 let failed = 0;
 const ok = (c, m) => { if (!c) failed++; console.log((c ? "ok   " : "FAIL ") + m); };
 
-const SEED = { places_side: "left", dock_side: "left", settings_rev: 4, nav_pinned: true, nav_view: "workspaces" };
+// `restore_last: false`: a boot at the view, no place selected (restore is on by
+// default since 2026-11-25, and selecting the waiting place would ack its mark).
+const SEED = { places_side: "left", dock_side: "left", settings_rev: 4, nav_pinned: true, nav_view: "workspaces", restore_last: false };
 /** `free`: take the first workspace's first project out (it is in no other),
  *  so a project with real places is in no workspace — the mock's Everything
  *  Else otherwise holds only a "repo gone" project with none. */

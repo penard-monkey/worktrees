@@ -69,7 +69,9 @@ const forward = (page) => page.locator("[data-testid=nav-forward]:visible").firs
 async function boot(page, betas, extra = {}) {
   await page.addInitScript((s) => {
     if (!sessionStorage.getItem("wt-mock-ui-state")) sessionStorage.setItem("wt-mock-ui-state", JSON.stringify(s));
-  }, { places_side: "left", dock_side: "right", settings_rev: 5, nav_pinned: true, nav_view: "workspaces", ...Object.fromEntries(betas.map((b) => [b, true])), ...extra });
+  // `restore_last: false`: these parts boot at Home (it is on by default since
+  // 2026-11-25, and a fresh mock boot would otherwise open a place).
+  }, { places_side: "left", dock_side: "right", settings_rev: 5, nav_pinned: true, nav_view: "workspaces", restore_last: false, ...Object.fromEntries(betas.map((b) => [b, true])), ...extra });
   await page.goto(`${BASE}/?ideas=seed&workspaces=1&folding=0`);
   await page.waitForSelector("[data-testid=ws-group]");
 }
