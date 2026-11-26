@@ -31,6 +31,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ### Changed
 
 - **Menus work from the keyboard.** A menu opened with a key has its first item focused; ↑ ↓, Home and End walk it, → and ← go in and out of a list beside it, Tab and Escape close it, and the focus goes back to where it was. Opened with the mouse, nothing takes the focus until you press ↓.
+- **Restore last place is on by default.** A new install selects the place you used most recently when the app opens, ready but not started (Enter attaches); Settings → General → Startup turns it off. An install that has saved its settings before keeps the value it has: every settings file saved since July records it, so one that never touched it stays off.
 - **Restore last also restores a workspace's view (beta).** With it on (Settings → General), a relaunch comes back to the workspace, the tab and the chat it was quit on.
 - **A waiting agent shows on its project's and its workspace's dot even while others work.** The dot said "working" whenever anything was, so one busy lane hid one that waited for you. Waiting comes first now.
 

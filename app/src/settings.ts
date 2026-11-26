@@ -623,7 +623,7 @@ export const DEFAULTS: Settings = {
   ai_auto_resume: true,
   update_auto_check: true,
   update_dismissed: "",
-  restore_last: false,
+  restore_last: true,
   restore_window: true,
   sync_with_sessions: false,
   projects_parent: "",
@@ -972,6 +972,9 @@ export async function loadSettings(): Promise<Settings> {
     s.usage_codex = typeof s.usage_codex === "boolean" ? s.usage_codex : true;
     s.usage_kimi = typeof s.usage_kimi === "boolean" ? s.usage_kimi : true;
     s.pull_requests = typeof s.pull_requests === "boolean" ? s.pull_requests : true;
+    // On by default since 2026-11-25. A stored value is kept: every blob saved
+    // since #45 holds one (whole-blob saves), and false there may be a choice.
+    s.restore_last = typeof s.restore_last === "boolean" ? s.restore_last : true;
     // Whole-blob settings give every existing install an explicit false. The
     // marker applies the new default once, then leaves later user choices alone.
     const needsChatDefaultMigration = raw?.chat_default_v1 !== true;
