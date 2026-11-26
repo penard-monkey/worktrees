@@ -8,7 +8,8 @@
 
 import type { MigrationRow, MigrationOutcome } from "../CodexMcpPanel";
 import { GUEST_HOST, guestHelpers, guestInvoke } from "./guest";
-import { agentSessions, initialWorkspace, sessionName, type Place, type Workspace } from "./fixtures";
+import { agentSessions, initialWorkspace, laneTreeRepo, sessionName, type Place, type Workspace } from "./fixtures";
+import type { Lineage } from "../lineage";
 import { isHarness, type Harness } from "../harness";
 import { cloneSource, type CloneErrorKind, type CloneProgress } from "../clone";
 import { mockProjectPrs } from "./prs";
@@ -18,7 +19,14 @@ import type { By } from "../provenance";
 /** `worktrees_core::docs::DocEntry` — see the `list_docs` case. */
 type MockDoc = { path: string; rel: string; title: string; group: string; mtime_ms: number };
 
-let ws: Workspace = initialWorkspace();
+// `?lanes` adds the lane-tree project (fixtures.ts `laneTreeRepo`) after the
+// healthy ones: lanes started by lanes, for the nested nav.
+const mockLanes = new URLSearchParams(location.search).has("lanes");
+let ws: Workspace = (() => {
+  const w = initialWorkspace();
+  if (mockLanes) w.projects.splice(w.projects.length - 1, 0, laneTreeRepo());
+  return w;
+})();
 
 const mockMigration: MigrationRow[] = [
   { name: "literal-env", transport: "stdio", status: "copy_literal_env", reason: "API_KEY is a literal value; it will be written into Codex config and briefly visible in the process list while copying. Select this server explicitly to copy it." },
@@ -257,6 +265,91 @@ function mockPiHostEdit(e: Record<string, unknown>) {
       return null;
   }
   throw `unknown pi host edit '${String(e.op)}'`;
+}
+
+// ── lane children (core `lineage`) ───────────────────────────────────────────
+// The mock stands in for core, so it resolves `Place.lineage` from the declared
+// links the way `lineage::Index` does: a link holds when it names (main) or a
+// place that exists and was not born after the link, is not into another
+// project, and does not loop back. (Core reads the NEWEST link of a hand-made
+// loop as absent; this guard drops any looping link, which only a hand edit can
+// make.) Live = an agent session up. The app never computes any of this.
+const LINEAGE_MAIN = "(main)";
+type LinkKey = "under" | "handed_to" | "started_by";
+function lineageOf(places: Place[]): Map<string, Lineage> {
+  const by = new Map(places.map((p) => [p.slug, p]));
+  const link = (slug: string, k: LinkKey) => by.get(slug)?.declared?.[k];
+  const holds = (slug: string, k: LinkKey) => {
+    const l = link(slug, k);
+    if (!l || l.project || l.place === slug) return false;
+    if (l.place === LINEAGE_MAIN) return true;
+    const p = by.get(l.place);
+    return !!p && (p.created_epoch ?? 0) <= l.at;
+  };
+  const raw = (slug: string, keys: LinkKey[]) => keys.find((k) => holds(slug, k));
+  const loops = (slug: string, start: string, keys: LinkKey[]) => {
+    const seen = new Set<string>();
+    for (let cur: string | undefined = start; cur && cur !== LINEAGE_MAIN && !seen.has(cur); ) {
+      if (cur === slug) return true;
+      seen.add(cur);
+      const k = raw(cur, keys);
+      cur = k ? link(cur, k)!.place : undefined;
+    }
+    return false;
+  };
+  const pick = (slug: string, keys: LinkKey[]) => {
+    for (const k of keys) {
+      if (holds(slug, k) && !loops(slug, link(slug, k)!.place, keys)) {
+        const to = link(slug, k)!.place;
+        return to === LINEAGE_MAIN ? undefined : to;
+      }
+    }
+    return undefined;
+  };
+  const DRAW: LinkKey[] = ["under", "handed_to", "started_by"];
+  const UP: LinkKey[] = ["handed_to", "started_by"];
+  const live = (slug: string) => {
+    const p = by.get(slug);
+    return !!p && (p.tmux_session.up || Object.values(p.agent_sessions ?? {}).some((s) => s.up));
+  };
+  const reportsTo = (slug: string) => {
+    const seen = new Set([slug]);
+    for (let cur = pick(slug, UP); cur && !seen.has(cur); cur = pick(cur, UP)) {
+      if (live(cur)) return cur;
+      seen.add(cur);
+    }
+    return LINEAGE_MAIN;
+  };
+  const out = new Map<string, Lineage>();
+  for (const p of places) {
+    const s = p.slug, d = p.declared;
+    const sb = d?.started_by && d.started_by.place !== s ? d.started_by : undefined;
+    const l: Lineage = {};
+    if (sb) l.starter = { place: sb.place, at: sb.at, ...(sb.project ? { project: sb.project } : { ...(holds(s, "started_by") ? {} : { removed: true }) }) };
+    if (holds(s, "under")) l.under = d!.under;
+    if (holds(s, "handed_to")) l.handed_to = d!.handed_to;
+    const parent = pick(s, DRAW), up = pick(s, UP);
+    if (parent) l.parent = parent;
+    if (up) l.up = up;
+    if (s !== LINEAGE_MAIN) l.reports_to = reportsTo(s);
+    const others = places.filter((o) => o.slug !== s);
+    const started = others.filter((o) => o.declared?.started_by?.place === s && holds(o.slug, "started_by")).map((o) => o.slug);
+    const lanes = others.filter((o) => pick(o.slug, UP) === s).map((o) => o.slug);
+    if (started.length) l.started = started;
+    if (lanes.length) l.lanes = lanes;
+    out.set(s, l);
+  }
+  return out;
+}
+/** Every snapshot's rows with `lineage`, as `Project::ls` sets it. */
+function withLineage(w: Workspace): Workspace {
+  for (const pv of w.projects) {
+    const places = pv.snapshot?.places;
+    if (!places) continue;
+    const all = lineageOf(places);
+    for (const p of places) p.lineage = all.get(p.slug);
+  }
+  return w;
 }
 
 function editPlace(repo: string, slug: string, fn: (p: Place) => void) {
@@ -2692,9 +2785,38 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       // banner and the project sheet's adopt block were all undrivable here.
       // Off by default: a stray is an abnormal condition and every other test
       // asserts against a project without one.
-      return withNames(withStrays(clone(ws)));
-    case "list_places":
-      return clone(findProject(args.repo)?.snapshot ?? null);
+      return withNames(withStrays(withLineage(clone(ws))));
+    case "list_places": {
+      const snap = clone(findProject(args.repo)?.snapshot ?? null);
+      if (snap) withLineage({ projects: [{ root: args.repo, ok: true, error: null, snapshot: snap }] });
+      return snap;
+    }
+    case "set_place_under": {
+      // `ops::set_place_under` → core `set_under`: display only; refuses
+      // (main), an unknown place or target, and a cycle; `null` = back
+      // under its starter. The harness is the console, so `by` is the owner.
+      const pv = findProject(args.repo);
+      const places = pv?.snapshot?.places ?? [];
+      const slug = args.slug as string;
+      const to = (args.under as string | null | undefined)?.trim() || null;
+      if (slug === LINEAGE_MAIN) throw "(main) is the top of every project; it cannot be moved";
+      const pl = places.find((p) => p.slug === slug);
+      if (!pl) throw `no such place: ${slug}`;
+      if (to && to !== LINEAGE_MAIN) {
+        if (!places.some((p) => p.slug === to)) throw `no such place to move it under: ${to}`;
+        if (to === slug) throw `${slug} cannot be drawn under itself`;
+        const lin = lineageOf(places);
+        for (let cur: string | undefined = to, n = 0; cur && n < 64; cur = lin.get(cur)?.parent, n++)
+          if (cur === slug) throw `${to} is drawn under ${slug}; moving ${slug} under it would make a cycle`;
+      }
+      const declared = { ...(pl.declared ?? {}) };
+      if (to) declared.under = { place: to, at: now(), by: "owner" };
+      else delete declared.under;
+      pl.declared = declared;
+      const lin = lineageOf(places).get(slug);
+      const line = `Its reports still go up its own line (${lin?.up ?? LINEAGE_MAIN} first).`;
+      return lin?.parent ? `${slug} is drawn under ${lin.parent} now. ${line}` : `${slug} is drawn at the top level now. ${line}`;
+    }
 
     case "plugin:dialog|open": {
       // simulate a native folder pick → a fresh project path. `?empty` picks a
@@ -3596,8 +3718,20 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       }
       // delBranch is state-invisible here (no branch objects modeled) — the
       // place is removed either way; the flag is logged above.
-      if (pv?.snapshot) pv.snapshot.places = pv.snapshot.places.filter((p) => p.slug !== args.slug);
-      return { ok: true, code: 0, output: `Removed ${args.slug}` };
+      // Lane children §7 (`ops::apply_handoff`): every lane that hangs from
+      // the removed place is handed to its own next one up. Never a cascade.
+      let moved = "";
+      if (pv?.snapshot) {
+        const lin = lineageOf(pv.snapshot.places);
+        const lanes = lin.get(args.slug)?.lanes ?? [];
+        const to = lin.get(args.slug)?.up ?? LINEAGE_MAIN;
+        for (const p of pv.snapshot.places) {
+          if (lanes.includes(p.slug)) p.declared = { ...(p.declared ?? {}), handed_to: { place: to, at: now(), from: args.slug } };
+        }
+        if (lanes.length) moved = `\nmoved up to ${to}: ${lanes.join(", ")}`;
+        pv.snapshot.places = pv.snapshot.places.filter((p) => p.slug !== args.slug);
+      }
+      return { ok: true, code: 0, output: `Removed ${args.slug}${moved}` };
     }
 
     // serve's `privacy_denial` row (`worktrees_api::macprivacy`): null for
@@ -6786,6 +6920,16 @@ const ACTIVITY_CYCLE: { busy: string[]; waiting: string[] }[] = [
   // idle — no dots at all
   { busy: [], waiting: [] },
 ];
+// `?lanes`: the lane tree keeps a grandchild working and, in the split family
+// under a CLOSED starter, one lane waiting — what the collapsed row's roll-up
+// must never hide (lane-children §5.5).
+if (mockLanes) {
+  const LT = "/Users/demo/workspace/lane-tree/.worktrees";
+  for (const a of ACTIVITY_CYCLE.slice(0, 3)) {
+    a.busy.push(`${LT}/probe-fonts`, `${LT}/deep-6`);
+    a.waiting.push(`${LT}/view-fable`);
+  }
+}
 const CODEX_PLACES = new Set([`${CDV}/billing-refactor`]);
 const PI_PLACES = new Set([`${CDV}/catalog-import`]);
 const KIMI_PLACES = new Set([`${CDV}/ledger-sync`]);

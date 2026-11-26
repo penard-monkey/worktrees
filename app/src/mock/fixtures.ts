@@ -5,6 +5,7 @@
 
 import { HARNESSES, type Harness } from "../harness";
 import type { By, LaunchedBy, RemoteInstruction } from "../provenance";
+import type { Lineage, Link } from "../lineage";
 
 export type Declared = {
   lifecycle?: string;
@@ -24,6 +25,11 @@ export type Declared = {
   last_remote_instruction?: RemoteInstruction;
   note_by?: By;
   title_by?: By;
+  /** Lane children (store.rs): the declared links. The mock resolves them
+   *  into `Place.lineage` on every list, as core does. */
+  started_by?: Link;
+  handed_to?: Link;
+  under?: Link;
 } | null;
 
 export type Place = {
@@ -48,6 +54,7 @@ export type Place = {
   profile_stale?: boolean;
   declared: Declared;
   lifecycle_effective: string;
+  lineage?: Lineage;
 };
 export type Stray = { path: string; branch: string | null; slug: string };
 export type Snapshot = { repo: string; prefix: string; places: Place[]; unborn?: boolean; strays?: Stray[] };
@@ -120,6 +127,7 @@ function place(prefix: string, root: string, o: Opt): Place {
     // for exactly this reason.)
     profile_name: o.profile_name ?? null,
     profile_stale: o.profile_stale ?? false,
+    ...(o.lineage ? { lineage: o.lineage } : {}),
   };
 }
 
@@ -347,6 +355,55 @@ function brokenRepo(): ProjectView {
     error: "not a git repository (or any parent up to mount point)",
     snapshot: null,
   };
+}
+
+/** `?lanes`: a project of lanes started by lanes (lane-children §11 step 7),
+ *  for building the nested nav. Only declared links here; the mock resolves
+ *  `lineage` on every list (`withLineage` in install.ts). It holds:
+ *  - three levels with a closed MIDDLE: orchestrator → view-combined (closed)
+ *    → critique → probe-fonts, so critique reports past its closed starter;
+ *  - a SPLIT family: design-chats is closed, its two lanes are active (the
+ *    ghost-row case, §5.4), and one of them is waiting (the roll-up, §5.5);
+ *  - an ADOPTED lane: adopted was started by orchestrator and moved to the
+ *    top level by (main);
+ *  - a lane whose starter was REMOVED: handed was handed to orchestrator;
+ *  - a lane started from ANOTHER project: from-elsewhere, top level;
+ *  - a chain six deep: deep-1 … deep-6, the depth stop (§5.2). */
+export function laneTreeRepo(): ProjectView {
+  const root = "/Users/demo/workspace/lane-tree";
+  const P = "lanes";
+  const T0 = NOW - 3 * DAY;
+  const by = (place: string, at = T0 + 3600): Link => ({ place, at });
+  const live = (slug: string, harness: Harness = "claude") => ({
+    tmux_session: { name: sessionName(P, slug), up: true },
+    agent_sessions: agentSessions(sessionName(P, slug), harness, harness === "claude" ? "claude-opus-5-5" : null),
+    lifecycle_effective: "active",
+  });
+  const lane = (slug: string, o: Partial<Place> & { declared?: Declared }, up = true): Place =>
+    place(P, root, {
+      slug, branch: `lane/${slug}`, created_epoch: T0, last_commit_epoch: NOW - 2 * 3600,
+      last_commit_subject: `work in ${slug}`, ahead: 2,
+      ...(up ? live(slug) : { lifecycle_effective: "closed" }),
+      ...o,
+    });
+  const places: Place[] = [
+    place(P, root, { slug: "(main)", branch: "main", is_main: true, created_epoch: T0 - DAY, ...live("(main)") }),
+    lane("orchestrator", { declared: { last_opened_epoch: NOW - 600, last_worked_epoch: NOW - 300 } }),
+    lane("feat-docs", { declared: { started_by: by("orchestrator") } }),
+    lane("view-combined", { declared: { started_by: by("orchestrator"), lifecycle: "closed", last_opened_epoch: NOW - 9 * DAY } }, false),
+    lane("critique", { declared: { started_by: by("view-combined", T0 + 7200) } }),
+    lane("probe-fonts", { declared: { started_by: by("critique", T0 + 9000) } }),
+    lane("view-kimi", { ...live("view-kimi", "kimi"), declared: { started_by: by("orchestrator") } }),
+    lane("design-chats", { declared: { lifecycle: "closed", last_opened_epoch: NOW - 9 * DAY } }, false),
+    lane("view-fable", { declared: { started_by: by("design-chats") } }),
+    lane("view-codex", { ...live("view-codex", "codex"), declared: { started_by: by("design-chats") } }),
+    lane("adopted", { declared: { started_by: by("orchestrator"), under: { place: "(main)", at: NOW - DAY, by: "(main)" } } }),
+    lane("handed", { declared: { started_by: by("gone-starter"), handed_to: { place: "orchestrator", at: NOW - DAY, from: "gone-starter" } } }),
+    lane("from-elsewhere", { declared: { started_by: { place: "feat-redesign", at: T0 + 3600, project: "worktrees" } } }),
+    lane("deep-1", {}),
+    ...[2, 3, 4, 5, 6].map((n) => lane(`deep-${n}`, { declared: { started_by: by(`deep-${n - 1}`, T0 + n * 600) } })),
+  ];
+  return { root, ok: true, error: null, snapshot: { repo: root, prefix: P, places } };
 }
 
 export function initialWorkspace(): Workspace {
