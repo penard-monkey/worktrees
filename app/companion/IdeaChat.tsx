@@ -7,6 +7,7 @@
 // comes from the `ideas:sessions` push (by session name); the list row
 // (`idea_conversations`) carries its record: title, start, the history copy
 // it started from. An ended conversation reads read-only, with Resume.
+import { STATE_WORDS, stateOf, type ConvState, type Expect } from "../src/desk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChatPane, type ComposerQuote } from "../src/ChatPane";
 import { ideaChatKey } from "../src/chat";
@@ -21,7 +22,6 @@ import type { Quote } from "./ideaquote";
 export type IdeaSessionsEv = { live: string[]; busy: string[]; waiting: string[]; idea_of: Record<string, string> };
 export const NO_SESSIONS: IdeaSessionsEv = { live: [], busy: [], waiting: [], idea_of: {} };
 
-export type ConvState = "running" | "busy" | "waiting" | "ended";
 export type Conv = {
   id: string;
   harness: string;
@@ -32,24 +32,6 @@ export type Conv = {
   session: string;
   state: ConvState;
 };
-
-/** What this window just did to a conversation, until a push agrees: a
- *  start or resume answers once its session exists, and the poll's next push
- *  is up to a tick away, so the last push still says "ended" (measured on a
- *  real serve: one tick of a Resume bar over a conversation that was starting). */
-export type Expect = { conv: string; live: boolean } | null;
-
-/** A conversation's state now: the push wins over the list's, which is as
- *  old as its last read — except while `expect` says what this window just
- *  did and the push has not caught up. */
-export function stateOf(c: Pick<Conv, "session" | "state"> & { id?: string }, ev: IdeaSessionsEv | null, expect: Expect = null): ConvState {
-  if (expect && c.id === expect.conv && ev && ev.live.includes(c.session) !== expect.live) return expect.live ? "running" : "ended";
-  if (!ev) return c.state;
-  if (ev.waiting.includes(c.session)) return "waiting";
-  if (ev.busy.includes(c.session)) return "busy";
-  if (ev.live.includes(c.session)) return "running";
-  return "ended";
-}
 
 /** The dot an idea gets in the list: amber while a conversation waits on the
  *  person, green while one works, a ring while one is merely open. */
@@ -63,8 +45,6 @@ export function ideaDots(ev: IdeaSessionsEv | null): Map<string, ConvState> {
   }
   return out;
 }
-
-const STATE_WORDS: Record<ConvState, string> = { running: "running", busy: "working", waiting: "waiting on you", ended: "ended" };
 
 function startedWords(iso: string): string {
   const d = new Date(iso);

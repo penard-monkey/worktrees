@@ -15,10 +15,10 @@
 use std::path::Path;
 
 use tauri::webview::NewWindowResponse;
-use tauri::{AppHandle, Manager, Runtime, Url, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, Runtime, Url, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
 
-use crate::winstate;
+use crate::winstate::{self, Frame};
 
 /// The window's label: its capability file and its winstate slot name it.
 pub const LABEL: &str = "companion";
@@ -58,6 +58,29 @@ fn outside<R: Runtime>(app: &AppHandle<R>, url: &Url) {
     });
 }
 
+/// Where a companion with no remembered frame opens: beside the main window, on
+/// its monitor, on the side with more room; with room on neither, at the bottom
+/// right and lower than the main window's header, so what stands at the top of
+/// its document (the floated card) is still seen. `None`: no monitor holds it.
+pub fn beside(main: Frame, monitors: &[(f64, f64, f64, f64)]) -> Option<Frame> {
+    const GAP: f64 = 12.0;
+    const LOWER: f64 = 260.0;
+    let (cx, cy) = (main.x + main.width / 2.0, main.y + main.height / 2.0);
+    let &(mx, my, mw, mh) = monitors.iter().find(|&&(x, y, w, h)| cx >= x && cx < x + w && cy >= y && cy < y + h)?;
+    let (left, right) = (main.x - mx - 2.0 * GAP, mx + mw - (main.x + main.width) - 2.0 * GAP);
+    let room = left.max(right);
+    if room >= MIN.0 {
+        let width = SIZE.0.min(room);
+        let x = if right >= left { main.x + main.width + GAP } else { main.x - GAP - width };
+        let y = main.y.max(my);
+        return Some(Frame { x, y, width, height: SIZE.1.min(my + mh - y - GAP).max(MIN.1) });
+    }
+    let width = SIZE.0.min(mw * 0.6).max(MIN.0);
+    let bottom = my + mh - GAP;
+    let y = (main.y + LOWER).min(bottom - MIN.1).max(my);
+    Some(Frame { x: (mx + mw - GAP - width).max(mx), y, width, height: SIZE.1.min(bottom - y).max(MIN.1) })
+}
+
 /// Bring the companion forward, making it first if it is not open. `dir` is
 /// the app's config dir, where its frame is kept.
 pub fn open<R: Runtime>(app: &AppHandle<R>, dir: &Path, why: &str) -> Result<(), String> {
@@ -93,6 +116,12 @@ pub fn open<R: Runtime>(app: &AppHandle<R>, dir: &Path, why: &str) -> Result<(),
             e.to_string()
         })?;
     crate::applog("info", &format!("companion: opened ({why})"));
+    // With no remembered frame it would open over the main window, and cover the
+    // card a floated document leaves there. `attach` then restores one it has.
+    if let Some(f) = app.get_webview_window("main").and_then(|m| winstate::frame_of(&m)).and_then(|m| beside(m, &winstate::monitors(&w))) {
+        let _ = w.set_position(LogicalPosition::new(f.x, f.y));
+        let _ = w.set_size(LogicalSize::new(f.width, f.height));
+    }
     winstate::attach(&w, dir, restore, MIN);
     Ok(())
 }
@@ -117,13 +146,14 @@ pub fn reopens_at_launch(dir: &Path, was_open: bool) -> bool {
     was_open && winstate::enabled(ui.as_ref()) && beta(ui.as_ref())
 }
 
-/// Close the companion if it is open: the beta was turned off. `close`, not
+/// Close the companion if it is open: the beta was turned off, or Dock put back
+/// the one document the window was opened for. `close`, not
 /// `destroy`: it goes through `CloseRequested` like its own close button, so
 /// winstate marks it closed and keeps its frame for when it is next opened.
 pub fn close<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     match app.get_webview_window(LABEL) {
         Some(w) => {
-            crate::applog("info", "companion: closed (the Ideas beta was turned off)");
+            crate::applog("info", "companion: closed (asked)");
             w.close().map_err(|e| e.to_string())
         }
         None => Ok(()),
@@ -144,6 +174,33 @@ pub fn main_closed<R: Runtime>(app: &AppHandle<R>) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    const fn at(x: f64, y: f64, width: f64, height: f64) -> Frame {
+        Frame { x, y, width, height }
+    }
+
+    #[test]
+    fn a_first_open_does_not_cover_the_main_window() {
+        // Room on the right, then on the left: beside it, and off it.
+        let mons = [(0.0, 0.0, 2560.0, 1440.0)];
+        let r = beside(at(100.0, 80.0, 1200.0, 800.0), &mons).unwrap();
+        assert!(r.x >= 1300.0 && r.x + r.width <= 2560.0 && r.y == 80.0 && r.width == SIZE.0, "{r:?}");
+        let l = beside(at(1300.0, 80.0, 1200.0, 800.0), &mons).unwrap();
+        assert!(l.x >= 0.0 && l.x + l.width <= 1300.0, "{l:?}");
+        // A second monitor, left of the first: its own coordinates.
+        let two = [(0.0, 0.0, 1440.0, 900.0), (-2560.0, -300.0, 2560.0, 1440.0)];
+        let s = beside(at(-2500.0, -200.0, 1200.0, 800.0), &two).unwrap();
+        assert!(s.x >= -1300.0 && s.x + s.width <= 0.0, "{s:?}");
+        // No room beside it: lower than its header and the card under that, on screen.
+        let full = at(0.0, 25.0, 1440.0, 875.0);
+        let c = beside(full, &[(0.0, 0.0, 1440.0, 900.0)]).unwrap();
+        assert!(c.y >= full.y + 250.0 && c.width < full.width && c.x + c.width <= 1440.0 && c.y + c.height <= 900.0, "{c:?}");
+        assert!(c.width >= MIN.0 && c.height >= MIN.1, "{c:?}");
+        // A short screen keeps the floor, and the top edge on it.
+        let t = beside(at(0.0, 0.0, 1280.0, 600.0), &[(0.0, 0.0, 1280.0, 600.0)]).unwrap();
+        assert!(t.y >= 0.0 && t.height >= MIN.1, "{t:?}");
+        assert!(beside(at(9000.0, 0.0, 100.0, 100.0), &mons).is_none(), "on no monitor");
+    }
 
     #[test]
     fn the_beta_defaults_off_and_reads_only_a_bool() {

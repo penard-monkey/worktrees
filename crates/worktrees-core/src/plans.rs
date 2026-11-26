@@ -76,6 +76,14 @@ pub struct WorkItem {
     pub started: Option<String>,
     /// The provenance line, read ([`Started`]).
     pub place: Option<Started>,
+    /// Who proposed it, as written: `<chat title> · <chat id> · <when>`, the
+    /// line a workspace chat's `plan_propose_work` writes ([`with_item`]).
+    /// Absent for an item a person wrote.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposed: Option<String>,
+    /// The proposer's line, read ([`Proposed`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<Proposed>,
     /// Lines the edits below need: the `project:` and `started:` lines, and
     /// the item's last line that is not blank.
     #[serde(skip)]
@@ -115,6 +123,141 @@ impl Started {
         }
         Ok(t)
     }
+}
+
+/// Which workspace chat proposed a work item: `<by> · <chat> · <at>`, where
+/// `by` is the chat's title then and `chat` its id, which is what names it.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct Proposed {
+    pub by: String,
+    pub chat: String,
+    pub at: String,
+}
+
+impl Proposed {
+    /// `<by> · <chat> · <at>`, the chat a ULID, or `None` for any other
+    /// shape. The title may hold a `·` of its own: it is everything left of
+    /// the last two.
+    pub fn parse(text: &str) -> Option<Proposed> {
+        let mut it = text.rsplitn(3, '·').map(str::trim);
+        let (at, chat, by) = (it.next()?, it.next()?, it.next()?);
+        let ok = !at.is_empty() && !by.is_empty() && crate::ulid::is_valid(chat);
+        ok.then(|| Proposed { by: by.into(), chat: chat.into(), at: at.into() })
+    }
+
+    /// The value written. Refused when it would not read back as itself.
+    pub fn text(&self) -> Result<String, String> {
+        let t = format!("{} · {} · {}", self.by, self.chat, self.at);
+        if t.chars().any(|c| c.is_control() || crate::harness::invisible(c)) || Proposed::parse(&t).as_ref() != Some(self) {
+            return Err(format!("not a proposed line to record: {t:?}"));
+        }
+        Ok(t)
+    }
+}
+
+/// A work item to add to a plan ([`with_item`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NewItem {
+    pub title: String,
+    pub project: String,
+    pub branch: String,
+    pub brief: String,
+    pub ai: Option<String>,
+    pub model: Option<String>,
+    pub proposed: Option<Proposed>,
+}
+
+/// The longest brief [`with_item`] writes.
+pub const BRIEF_MAX: usize = 16 * 1024;
+
+/// One line of a value: no line break, control or invisible character.
+fn one_line(v: &str) -> bool {
+    !v.chars().any(|c| c.is_control() || crate::harness::invisible(c))
+}
+
+/// `text` with `item` added as the last item of `## Work`, after the
+/// section's last line that is not blank, or in a `## Work` section made at
+/// the end. Refused when a value would not read back as itself (a title
+/// twice, a line break in a one-line value, a control character anywhere),
+/// which is checked by reading the result back: the new item must be the
+/// last, equal to `item`, and every item before it unchanged.
+pub fn with_item(text: &str, item: &NewItem) -> Result<String, String> {
+    let title = item.title.trim();
+    if title.is_empty() || title != item.title || !one_line(title) || title.chars().count() > 200 || title.starts_with('#') {
+        return Err(format!("not a work item's title: {:?} (one line, at most 200 characters)", item.title));
+    }
+    if item.project.trim().is_empty() || item.project.trim() != item.project || !one_line(&item.project) {
+        return Err(format!("not a project name: {:?}", item.project));
+    }
+    let b = &item.branch;
+    if b.is_empty() || b.starts_with('-') || b.chars().any(char::is_whitespace) || !one_line(b) {
+        return Err(format!("not a branch: {b:?} (no spaces, and it does not start with `-`)"));
+    }
+    for (k, v) in [("ai", &item.ai), ("model", &item.model)] {
+        if let Some(v) = v {
+            if v.is_empty() || v.chars().any(char::is_whitespace) || !one_line(v) {
+                return Err(format!("not a value for `{k}:`: {v:?}"));
+            }
+        }
+    }
+    let brief = item.brief.trim_end();
+    if brief.trim().is_empty() || brief.len() > BRIEF_MAX || brief.chars().any(|c| (c.is_control() && c != '\n' && c != '\t') || crate::harness::invisible(c)) {
+        return Err(format!("not a brief: it needs words, at most {BRIEF_MAX} bytes, and no control character but line breaks and tabs"));
+    }
+    let proposed = item.proposed.as_ref().map(Proposed::text).transpose().map_err(|e| format!("proposed: {e}"))?;
+    let before = read(text);
+    let w0 = before.work.clone().unwrap_or_default();
+    if w0.iter().any(|w| w.title == title) {
+        return Err(format!("the plan has an item “{title}” already: give this one another title"));
+    }
+    let sep = eol(text);
+    let mut block = format!("### {title}{sep}project: {}{sep}branch: {b}{sep}", item.project);
+    for (k, v) in [("ai", &item.ai), ("model", &item.model)] {
+        if let Some(v) = v {
+            block.push_str(&format!("{k}: {v}{sep}"));
+        }
+    }
+    if let Some(p) = &proposed {
+        block.push_str(&format!("proposed: {p}{sep}"));
+    }
+    block.push_str(&format!("brief: |{sep}"));
+    for l in brief.split('\n') {
+        let l = l.trim_end_matches('\r');
+        if l.trim().is_empty() {
+            block.push_str(sep);
+        } else {
+            block.push_str(&format!("  {l}{sep}"));
+        }
+    }
+    // The text after the new block: a blank line before what follows it.
+    let spaced = |rest: &str| if rest.is_empty() || rest.starts_with(sep) { rest.to_string() } else { format!("{sep}{rest}") };
+    let out = match section_span(text, "work") {
+        Some((_, body, end)) if text[body..end].trim().is_empty() => format!("{}{block}{}", &text[..body], spaced(&text[body..])),
+        Some((_, body, end)) => {
+            // Right after the section's last character that is not a line
+            // ending: that line's ending, a blank line, the item.
+            let at = body + text[body..end].trim_end_matches(['\n', '\r']).len();
+            match text[at..].strip_prefix(sep) {
+                Some(rest) => format!("{}{sep}{sep}{block}{}", &text[..at], spaced(rest)),
+                None if at == text.len() => format!("{text}{sep}{sep}{block}"),
+                None => return Err("the plan's Work section ends in a way it could not be added to: add the item by hand".into()),
+            }
+        }
+        None => {
+            let kept = text.trim_end();
+            if kept.is_empty() { format!("## Work{sep}{sep}{block}") } else { format!("{kept}{sep}{sep}## Work{sep}{sep}{block}") }
+        }
+    };
+    let after = read(&out);
+    let w1 = after.work.unwrap_or_default();
+    let same = |a: &WorkItem, b: &WorkItem| (&a.title, &a.project, &a.branch, &a.brief, &a.ai, &a.model, &a.started, &a.proposed) == (&b.title, &b.project, &b.branch, &b.brief, &b.ai, &b.model, &b.started, &b.proposed);
+    let new_ok = w1.last().is_some_and(|n| {
+        n.title == title && n.project.as_deref() == Some(item.project.as_str()) && n.branch.as_deref() == Some(b.as_str()) && n.brief.as_deref() == Some(brief) && n.ai == item.ai && n.model == item.model && n.proposed == proposed && n.started.is_none()
+    });
+    if !(new_ok && w1.len() == w0.len() + 1 && w0.iter().zip(&w1).all(|(a, b)| same(a, b)) && after.projects == before.projects) {
+        return Err(format!("“{title}” could not be added to the plan without changing the rest of it"));
+    }
+    Ok(out)
 }
 
 /// `2026-11-12 09:30`, the host's local time: what a person reads in the
@@ -249,7 +392,7 @@ fn skippable(t: &str) -> bool {
 }
 
 const PROJECT_FORM: &str = "write `- <name> (registered)`, `- <name> (clone: <url>)` or `- <name> (new: <path>)`";
-const WORK_KEYS: &str = "`project:`, `branch:`, `brief:`, `ai:`, `model:` or `started:`";
+const WORK_KEYS: &str = "`project:`, `branch:`, `brief:`, `ai:`, `model:`, `proposed:` or `started:`";
 
 fn project_line(l: &Line, problems: &mut Vec<Problem>) -> Option<Project> {
     let bad = |problems: &mut Vec<Problem>, words: String| {
@@ -426,6 +569,7 @@ pub fn read(text: &str) -> Sections {
                     "ai" => &mut it.ai,
                     "model" => &mut it.model,
                     "started" => &mut it.started,
+                    "proposed" => &mut it.proposed,
                     "brief" => &mut it.brief,
                     _ => {
                         bad(&mut problems, format!("unknown key `{key}:`: expected {WORK_KEYS}"));
@@ -457,6 +601,12 @@ pub fn read(text: &str) -> Sections {
                         it.place = Started::parse(value);
                         if it.place.is_none() && !value.is_empty() {
                             bad(&mut problems, "not a started line: the app writes `started: <project> · <place> · <when>`".into());
+                        }
+                    }
+                    "proposed" => {
+                        it.proposal = Proposed::parse(value);
+                        if it.proposal.is_none() {
+                            bad(&mut problems, "not a proposed line: a workspace chat writes `proposed: <chat> · <chat id> · <when>`".into());
                         }
                     }
                     _ => {}
@@ -748,6 +898,73 @@ started: homelab-ansible · jellyfin-role · 2026-11-12\n\n### Config repo\nproj
         assert!(with_registered(PLAN, "nope", "x").unwrap_err().contains("no project “nope”"));
         assert!(with_registered(PLAN, "jellyfin-config", "worktrees").unwrap_err().contains("already"));
         assert!(with_registered(PLAN, "jellyfin-config", "a\nb").is_err());
+    }
+
+    fn prop() -> Proposed {
+        Proposed { by: "Release · order".into(), chat: "01JC90A1000000000000000000".into(), at: "2026-11-25 10:00".into() }
+    }
+
+    fn new_item(title: &str) -> NewItem {
+        NewItem { title: title.into(), project: "worktrees".into(), branch: "feat/x".into(), brief: "Goal.\n\n  ## not a heading\n```\nfenced\n```\nStop.".into(), ai: Some("claude".into()), model: None, proposed: Some(prop()) }
+    }
+
+    /// A proposed item lands as the last of `## Work`, reads back as itself
+    /// with who proposed it, and every other byte stays where it was.
+    #[test]
+    fn a_proposed_item_is_added_at_the_end_of_work_and_reads_back() {
+        let out = with_item(PLAN, &new_item("Proposed thing")).unwrap();
+        let s = read(&out);
+        assert_eq!(s.problems, vec![], "{out}");
+        let w = s.work.unwrap();
+        assert_eq!(w.len(), 3);
+        let it = &w[2];
+        assert_eq!((it.title.as_str(), it.project.as_deref(), it.branch.as_deref(), it.ai.as_deref()), ("Proposed thing", Some("worktrees"), Some("feat/x"), Some("claude")));
+        assert_eq!(it.brief.as_deref(), Some("Goal.\n\n  ## not a heading\n```\nfenced\n```\nStop."));
+        assert_eq!(it.proposal.as_ref(), Some(&prop()));
+        assert_eq!(it.proposed.as_deref(), Some("Release · order · 01JC90A1000000000000000000 · 2026-11-25 10:00"));
+        assert!(it.place.is_none(), "proposed is not started");
+        assert!(out.starts_with(&PLAN[..PLAN.find("## Notes").unwrap()].trim_end()), "everything above stays");
+        assert!(out.ends_with("## Notes\n- anything (at all)\n"), "the next section stays below: {out}");
+        assert_eq!(read(&out).projects, read(PLAN).projects);
+        // A plan with no Work section gets one, at the end.
+        let bare = "---\nid: x\n---\n# Plan: y\n\nProse.\n";
+        let out = with_item(bare, &new_item("A")).unwrap();
+        assert!(out.starts_with(bare), "{out}");
+        assert_eq!(read(&out).work.unwrap()[0].title, "A");
+        // CRLF stays CRLF.
+        let crlf = "## Work\r\n### A\r\nproject: p\r\nbranch: b\r\n";
+        let out = with_item(crlf, &new_item("B")).unwrap();
+        assert!(!out.replace("\r\n", "").contains('\n'), "{out:?}");
+        assert_eq!(read(&out).work.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_new_item_that_would_not_read_back_as_itself_is_refused() {
+        let bad = |f: &dyn Fn(&mut NewItem)| {
+            let mut it = new_item("T");
+            f(&mut it);
+            with_item(PLAN, &it).unwrap_err()
+        };
+        assert!(bad(&|i| i.title = "Config repo".into()).contains("already"), "a title twice");
+        assert!(bad(&|i| i.title = "two\nlines".into()).contains("title"));
+        assert!(bad(&|i| i.title = " ".into()).contains("title"));
+        assert!(bad(&|i| i.branch = "-x".into()).contains("branch"));
+        assert!(bad(&|i| i.branch = "a b".into()).contains("branch"));
+        assert!(bad(&|i| i.project = "a\nbranch: z".into()).contains("project"));
+        assert!(bad(&|i| i.brief = "bell\u{7}".into()).contains("brief"));
+        assert!(bad(&|i| i.brief = "  ".into()).contains("brief"));
+        assert!(bad(&|i| i.ai = Some("a b".into())).contains("ai"));
+        assert!(bad(&|i| i.proposed = Some(Proposed { chat: "x y".into(), ..prop() })).contains("proposed"));
+    }
+
+    #[test]
+    fn a_proposed_line_is_read_or_named() {
+        let t = "## Work\n### A\nproject: p\nbranch: b\nproposed: Chat 2 · 01JC90A1000000000000000000 · 2026-11-25 10:00\n### B\nproject: p\nbranch: c\nproposed: someone\n";
+        let s = read(t);
+        assert_eq!(s.problems.iter().map(|p| p.line).collect::<Vec<_>>(), vec![9], "{:?}", s.problems);
+        let w = s.work.unwrap();
+        assert_eq!(w[0].proposal.as_ref().map(|p| p.by.as_str()), Some("Chat 2"));
+        assert_eq!((w[1].proposed.as_deref(), &w[1].proposal), (Some("someone"), &None));
     }
 
     #[test]

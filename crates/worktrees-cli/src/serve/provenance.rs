@@ -477,6 +477,8 @@ mod tests {
 
     /// The MCP server's source, as built: everything above its `mod tests`.
     const MCP_RS: &str = include_str!("../mcp.rs");
+    /// Its workspace mode, a module of its own (`mcp/wsmode.rs`): read too.
+    const WSMODE_RS: &str = include_str!("../mcp/wsmode.rs");
 
     /// The live half of a Rust file: cut at the `#[cfg(test)]` that heads
     /// `mod tests`, not at the first `#[cfg(test)]` (a gated item above the
@@ -535,6 +537,9 @@ mod tests {
         assert!(src.contains("fn cmd_mcp") && src.contains("\"place_status\""), "the slice holds the server");
         assert!(!src.contains("fn place_status_reports_who_launched_and_who_wrote"), "the slice stops at mod tests");
         assert_eq!(control_names(src, &control_rows()), Vec::<String>::new());
+        let ws = live(WSMODE_RS);
+        assert!(src.contains("mod wsmode;") && ws.contains("\"plan_propose_work\""), "the workspace mode is read as well");
+        assert_eq!(control_names(ws, &control_rows()), Vec::<String>::new());
     }
 
     /// The check is shown red on planted names — one per family, and the

@@ -2118,16 +2118,19 @@ wait loop on it never ended and a sandbox app ran for two hours.
   (`docs/proposals/workspace-chats.md` §4.5): ideas, plans and a workspace's
   memory are edited in the main window with the same editor, and the Ideas
   window is the floated form of the same pane. The rule is rewritten, not
-  dropped: CodeMirror is imported by ONE module, the document pane's editor,
-  and `app/src` reaches that module only through a dynamic `import()` with
-  destructured names (a namespace import defeats tree-shaking, above), so the
-  editor is a chunk fetched on first use and never part of the entry chunk.
-  The documents lane lands that module and rewrites
-  `app/scripts/companion-boundary-check.mjs` to hold exactly that. UNTIL IT
-  MERGES, the check still enforces the first rule (it walks the app's import
-  graph and, when a build exists, greps `app/dist` outside `dist/companion/`),
-  and no other lane imports CodeMirror into `app/src`. A new exception names
-  its bundle and its check in this paragraph.
+  dropped: CodeMirror is imported by ONE module, `app/src/doc/editor.ts`, and
+  both windows reach that module only through `app/src/doc/loadeditor.ts`'s
+  dynamic `import()` with destructured names (a namespace import defeats
+  tree-shaking, above), so the editor is a chunk fetched when a document is
+  first opened and never part of the main window's entry chunk.
+  `app/scripts/editor-boundary-check.mjs` holds exactly that: no other file in
+  `app/src`, `app/companion` or `app/viewer` names an editor package, editor.ts
+  has that one importer, and, when a build exists, exactly one of the app's
+  built files carries CodeMirror, no page or chunk imports it statically, and
+  it is not the file with the pane's own code (a static import folds the editor
+  INTO App's chunk, which alone looks like one lazy file). The companion keeps
+  its own build, and the check still holds that too. A new exception names its
+  bundle and its check in this paragraph.
 - **Driving the sandbox app by NAME drives the INSTALLED app — and it has no
   bundle id to address instead.** `sandbox.sh --app` runs `tauri dev`, which
   execs the UNBUNDLED binary (`<worktree>/target/debug/app` — the workspace

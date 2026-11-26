@@ -936,6 +936,8 @@ html[data-guides="off"] .kids > .places::after { display: none; }
   font-size: var(--fs-meta); color: var(--txt-dim);
 }
 .topbar-proj-name { min-width: 2ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A count never breaks from its glyph. */
+.topbar .s { white-space: nowrap; }
 .topbar-proj-sep { flex: none; color: var(--txt-mute); }
 /* The slug beside a renamed place. Quieter than the branch chip and NOT a
    chip — it is what the directory and the tmux session are called, so it has to
@@ -3970,14 +3972,14 @@ body.dragging .grip { cursor: grabbing; }
   border: 1px solid var(--line-strong); border-radius: var(--r-md);
   background: var(--bg-tree);
 }
-.ws-group[data-ws-color="blue"] { --ws-hue: var(--hue-blue); }
-.ws-group[data-ws-color="purple"] { --ws-hue: var(--hue-purple); }
-.ws-group[data-ws-color="green"] { --ws-hue: var(--hue-green); }
-.ws-group[data-ws-color="amber"] { --ws-hue: var(--hue-amber); }
-.ws-group[data-ws-color="orange"] { --ws-hue: var(--hue-orange); }
-.ws-group[data-ws-color="red"] { --ws-hue: var(--hue-red); }
-.ws-group[data-ws-color="teal"] { --ws-hue: var(--hue-teal); }
-.ws-group[data-ws-color="gray"] { --ws-hue: var(--hue-gray); }
+.ws-group[data-ws-color="blue"], .wsf[data-ws-color="blue"], .wsd-crumb[data-ws-color="blue"] { --ws-hue: var(--hue-blue); }
+.ws-group[data-ws-color="purple"], .wsf[data-ws-color="purple"], .wsd-crumb[data-ws-color="purple"] { --ws-hue: var(--hue-purple); }
+.ws-group[data-ws-color="green"], .wsf[data-ws-color="green"], .wsd-crumb[data-ws-color="green"] { --ws-hue: var(--hue-green); }
+.ws-group[data-ws-color="amber"], .wsf[data-ws-color="amber"], .wsd-crumb[data-ws-color="amber"] { --ws-hue: var(--hue-amber); }
+.ws-group[data-ws-color="orange"], .wsf[data-ws-color="orange"], .wsd-crumb[data-ws-color="orange"] { --ws-hue: var(--hue-orange); }
+.ws-group[data-ws-color="red"], .wsf[data-ws-color="red"], .wsd-crumb[data-ws-color="red"] { --ws-hue: var(--hue-red); }
+.ws-group[data-ws-color="teal"], .wsf[data-ws-color="teal"], .wsd-crumb[data-ws-color="teal"] { --ws-hue: var(--hue-teal); }
+.ws-group[data-ws-color="gray"], .wsf[data-ws-color="gray"], .wsd-crumb[data-ws-color="gray"] { --ws-hue: var(--hue-gray); }
 .ws-group + .ws-group, .drop-gap.ws + .ws-group { margin-top: var(--s3); }
 .ws-group.dragged { opacity: 0.4; }
 /* Everything Else: derived and fixed, so no grab cursor on its title. Its hue
@@ -4080,12 +4082,139 @@ body.dragging .ws-h { cursor: grabbing; }
   font-family: var(--font-mono); font-size: var(--fs-label);
 }
 .app-crash > * { flex: none; }
-/* ── a workspace's overview (idea board phase 4, WorkspaceOverview.tsx) ── */
+/* ── the workspace view (workspace-view-design.md; WorkspaceFrame.tsx) ──────
+   A frame in the main area: a top bar like a place's, then the documents as
+   tabs. `data-room` is the documents side's own width, measured (useTier.ts):
+   a container query here would make it the containing block of the document
+   pane's fixed popovers. Cards are `--bg-panel` on the main area's
+   `--bg-abyss`; a box inside a card goes back to `--bg-abyss`. */
+.wsf { --ws-hue: var(--accent); flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.wsf[hidden], .wsf-split[hidden] { display: none; }
+.wsf-top { flex: none; }
+.wsf-name {
+  flex: 0 1 auto; min-width: 5ch; display: inline-flex; align-items: center; gap: var(--s2); padding: 2px var(--s2); border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--ws-hue) 22%, var(--bg-panel)); color: var(--txt-hi); font-size: var(--fs-label); font-weight: var(--fw-bold);
+}
+.wsf-name > svg { flex: none; }
+.wsf-name-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wsf-counts { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--txt); font-size: var(--fs-meta); }
+/* The chat's column (a later slice) is the middle; the documents are on the
+   dock's side of it. With none they are the whole room. */
+.wsf-body { flex: 1 1 auto; min-height: 0; display: flex; }
+.wsf-mid { flex: 1 1 0; min-width: 420px; min-height: 0; display: flex; flex-direction: column; }
+.wsf-docs { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.wsf-body[data-mid] > .wsf-docs { min-width: 340px; }
+.wsf-split-bar { flex: none; width: 1px; background: var(--line); cursor: col-resize; position: relative; touch-action: none; }
+.wsf-split-bar::after { content: ""; position: absolute; inset: 0 -4px; z-index: 2; }
+.wsf-split-bar:hover, .wsf-split-bar:focus-visible { background: var(--accent); outline: none; }
+.wsf-body[data-mid][data-dock="left"] > .wsf-docs { order: -2; }
+.wsf-body[data-mid][data-dock="left"] > .wsf-split-bar { order: -1; }
+/* Room for one: the other is hidden, and stays as it is. */
+.wsf-body[data-one] > .wsf-mid, .wsf-body[data-one] > .wsf-docs { min-width: 0; }
+.wsf-body[data-one="chat"] > .wsf-docs, .wsf-body[data-one="docs"] > .wsf-mid { display: none; }
+.wsf-tabs { flex: none; display: flex; gap: var(--s1); padding: 0 var(--s3); border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; }
+.wsf-tab { flex: none; white-space: nowrap; padding: 7px var(--s2); border: 0; background: transparent; color: var(--txt); font-size: var(--fs-label); }
+.wsf-tab:hover { color: var(--txt-hi); }
+.wsf-tab.on { color: var(--txt-hi); font-weight: var(--fw-med); box-shadow: inset 0 -2px 0 var(--ws-hue); }
+.wsf-tab-n, .wsf-chip-n { margin-left: 5px; color: var(--txt-dim); font-size: var(--fs-meta); }
+.wsf-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+/* The Plan and Ideas tabs: their list, and the document. */
+.wsf-split { flex: 1 1 auto; min-height: 0; display: flex; }
+.wsf-slot { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.wsf-side { flex: none; box-sizing: border-box; width: 340px; overflow-y: auto; display: flex; flex-direction: column; gap: var(--s2); padding: var(--s3); border-right: 1px solid var(--line); background: var(--bg-panel); }
+.wsf-side > * { flex: none; }
+.wsf-side.ideas { width: 250px; }
+.wsf-split:not([data-beside]) { flex-direction: column; }
+.wsf-split:not([data-beside]) > .wsf-side { width: auto; max-height: 45%; border-right: 0; border-bottom: 1px solid var(--line); }
+.wsf-side-line { flex: none; text-align: left; padding: 5px var(--s3); border: 0; border-bottom: 1px solid var(--line); background: var(--bg-panel); color: var(--txt); font-size: var(--fs-meta); }
+.wsf-side-line:hover { color: var(--txt-hi); }
+.wsf-side-line svg { vertical-align: -2px; }
+.wsf-side-h { display: flex; align-items: baseline; gap: var(--s2); color: var(--txt); font-size: var(--fs-meta); }
+.wsf-side-h > span { flex: 1 1 0; min-width: 0; }
+.wsf-ideas { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+.wsf-idea { display: flex; align-items: center; gap: var(--s1); padding: 3px var(--s2); border-radius: var(--r-sm); }
+.wsf-idea.on { background: var(--bg-elev); box-shadow: inset 3px 0 0 var(--ws-hue); }
+.wsf-idea-open { flex: 1 1 0; min-width: 0; border: 0; padding: 0; background: transparent; color: var(--txt-hi); font: inherit; font-size: var(--fs-label); text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wsf-link { flex: none; max-width: 60%; border: 0; padding: 0; background: transparent; color: var(--txt-hi); font-size: var(--fs-meta); text-decoration: underline; text-underline-offset: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wsf-nodoc { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; align-items: center; padding: var(--s6) var(--s4); }
+.wsf-nodoc > * { max-width: 34rem; }
+.wsf-floated { border: 1px dashed var(--line-strong); border-radius: 8px; padding: var(--s4); display: flex; flex-direction: column; gap: var(--s3); background: var(--bg-panel); }
+.wsf-floated p, .wsf-empty p { margin: 0; color: var(--txt-hi); font-size: var(--fs-body); }
+.wsf-empty { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s3); padding: var(--s4); }
+.wsf-scroll > .wsf-empty { padding: var(--s6); }
+/* The Overview. */
+.wsf-ov { display: flex; flex-direction: column; gap: var(--s3); padding: var(--s4); max-width: 1500px; margin: 0 auto; }
+.wsf-cols { display: flex; align-items: flex-start; gap: var(--s4); }
+.wsf-col { display: flex; flex-direction: column; gap: var(--s3); min-width: 0; }
+.wsf-col-main { flex: 1 1 0; }
+.wsf-col-side { flex: 0 0 370px; }
+.wsf-docs[data-room="narrow"] .wsf-cols { flex-direction: column; align-items: stretch; }
+.wsf-docs[data-room="narrow"] .wsf-col-side { flex: none; }
+.wsf-docs[data-room="narrow"] .wsf-col-main { flex: none; }
+.wsf-docs[data-room="narrow"] .wsf-col-main:has(> .wsf-card-tall) { order: 1; }
+.wsf-card { border: 1px solid var(--line); border-radius: 8px; background: var(--bg-panel); overflow: hidden; min-width: 0; }
+.wsf-card-h { display: flex; align-items: center; gap: var(--s2); min-height: 34px; box-sizing: border-box; padding: 4px var(--s3); border-bottom: 1px solid var(--line); }
+.wsf-card-side { flex: 0 1 auto; min-width: 0; margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--txt); font-size: var(--fs-meta); }
+.wsf-card-h:has(> .wsf-card-side) > .wsf-card-name { flex: none; }
+.wsf-card-name { flex: 1 1 auto; white-space: nowrap; color: var(--txt); font-size: var(--fs-meta); letter-spacing: 0.08em; text-transform: uppercase; font-weight: var(--fw-med); }
+.wsf-side > .wsf-card-name { flex: none; margin-top: var(--s2); }
+.wsf-card-acts { flex: 0 1 auto; min-width: 0; display: flex; align-items: center; gap: var(--s1); }
+.wsf-card-acts .wsf-link { flex: 0 1 auto; max-width: none; min-width: 0; }
+.wsf-card-b { display: flex; flex-direction: column; gap: var(--s2); padding: var(--s3); }
+.wsf-card .ws-ov-rows, .wsf-side .ws-ov-rows { border: 0; border-radius: 0; }
+.wsf-card .ws-ov-chip, .wsf-side .ws-ov-chip { background: var(--bg-elev); }
+.wsf-card .ws-ov-pick, .wsf-side .ws-ov-pick, .wsf-card .ws-ov-brief, .wsf-side .ws-ov-brief { background: var(--bg-abyss); }
+.wsf-side .ws-ov-row { padding-left: 0; padding-right: 0; }
+/* A column too narrow for one line: the name first, what it is doing and its
+   buttons under it. */
+.wsf-side .ws-ov-row:has(> .ws-ov-state) > .ws-ov-item, .wsf-docs[data-room="wide"] .wsf-col-side .ws-ov-work .ws-ov-item { flex-basis: 100%; }
+.wsf-side .ws-ov-state, .wsf-docs[data-room="wide"] .wsf-col-side .ws-ov-work .ws-ov-state { flex: 1 1 auto; }
+.wsf-more { display: block; width: 100%; padding: 6px var(--s3); border: 0; border-top: 1px solid var(--line); background: transparent; color: var(--txt-hi); font-size: var(--fs-meta); text-align: left; }
+.wsf-more:hover { background: var(--bg-elev); }
+.ws-ov-none { color: var(--txt); font-size: var(--fs-label); margin: 0; }
+.wsf-card > .ws-ov-none { padding: var(--s3); }
+/* What needs somebody: the hue is the edge and the dot. */
+.wsf-attn { display: flex; align-items: center; gap: var(--s3); padding: var(--s2) var(--s3); border: 1px solid var(--line); border-left: 3px solid var(--warn); border-radius: 8px; background: var(--bg-panel); color: var(--txt-hi); font-size: var(--fs-label); }
+.wsf-attn-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); }
+.wsf-attn-t { flex: 1 1 0; min-width: 0; overflow-wrap: anywhere; }
+/* The documents row in a workspace's nav card. The row is its own container:
+   nothing in it is fixed. */
+.wsf-chips { display: flex; flex-wrap: wrap; gap: 4px; padding: 5px var(--s2) 4px; container-type: inline-size; border-bottom: 1px solid var(--line); }
+.wsf-chip {
+  flex: none; display: inline-block; white-space: nowrap; padding: 1px 7px; line-height: 1.5;
+  border: 1px solid var(--line-strong); border-radius: var(--r-sm); background: var(--bg-panel); color: var(--txt-hi); font-size: var(--fs-meta);
+}
+.wsf-chip:hover { background: var(--bg-elev); }
+.wsf-chip.none { border-style: dashed; background: transparent; color: var(--txt); }
+.wsf .ctrl:not(:disabled) { color: var(--txt-hi); }
+.wsf-chip.on { color: var(--txt-hi); background: var(--bg-elev); box-shadow: inset 0 -2px 0 var(--ws-hue); }
+.wsf-chip-i { margin-right: 4px; }
+.wsf-chip-i svg, .wsf-chip-f svg { display: inline-block; vertical-align: -2px; }
+.wsf-chip-f { margin-left: 4px; }
+.wsf-chip-dot { display: inline-block; width: 6px; height: 6px; margin-left: 5px; border-radius: 50%; background: var(--warn); vertical-align: 1px; }
+@container (max-width: 250px) { .wsf-chip-i { display: none; } .wsf-chip { padding: 1px 6px; } }
+
+/* ── a place's workspace (workspace-view-design.md §6; WorkspaceDock.tsx) ── */
+/* It gives way right after the project, down to its icon: the place keeps its name. */
+.wsd-crumb { --ws-hue: var(--accent); flex: 0 500 auto; min-width: 2.9rem; display: inline-flex; align-items: center; gap: var(--s2); }
+.wsd-crumb .wsf-name { min-width: 0; border: 0; font-family: inherit; max-width: 16rem; }
+.wsd-crumb .wsf-name:hover { filter: brightness(1.1); }
+.wsd-crumb-in { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
+.wsd-crumb-in > svg { flex: none; }
+.wsd { flex: 1 1 auto; min-height: 0; min-width: 0; height: 100%; display: flex; flex-direction: column; background: var(--bg-abyss); }
+.wsd-h, .wsd-doc { flex: none; display: flex; align-items: center; gap: var(--s2); padding: 4px var(--s3); border-bottom: 1px solid var(--line); background: var(--bg-panel); min-height: 34px; box-sizing: border-box; }
+.wsd-name { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--txt-hi); font-size: var(--fs-label); font-weight: var(--fw-med); }
+.wsd-name svg { vertical-align: -2px; }
+.wsd-files { flex: 1 1 0; min-width: 0; border: 0; background: transparent; padding: 2px 0; color: var(--txt-hi); font: inherit; font-size: var(--fs-label); font-weight: var(--fw-med); text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wsd-doc .ctrl { flex: 0 1 auto; min-width: 0; color: var(--txt-hi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wsd-list { flex: none; max-height: 45%; overflow-y: auto; border-bottom: 1px solid var(--line); background: var(--bg-panel); padding: var(--s1) 0; }
+.wsd-read { position: relative; flex: 1 1 auto; min-height: 0; }
+.wsd-none { margin: 0; padding: var(--s5); color: var(--txt-hi); font-size: var(--fs-label); overflow-wrap: anywhere; }
+
+/* ── a workspace's plan and ideas (idea board phase 4, WorkspaceOverview.tsx) ── */
 /* Marked in the card's own color; its tint stays, or the card would lose its
    color while its overview shows. */
 .ws-h.on { box-shadow: inset 3px 0 0 var(--ws-hue); }
-.ws-ov { max-width: 760px; margin: 0 auto; padding: var(--s6) var(--s5); display: flex; flex-direction: column; gap: var(--s3); }
-.ws-ov-title { margin: 0; color: var(--txt-hi); font-size: 1.4rem; }
 .ws-ov-err { color: var(--txt-hi); border-left: 3px solid var(--danger); padding-left: var(--s2); }
 .ws-ov-line { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2); }
 .ws-ov-key { color: var(--txt-dim); font-size: var(--fs-meta); min-width: 3.5em; }
@@ -4103,21 +4232,21 @@ body.dragging .ws-h { cursor: grabbing; }
 .ws-ov-pick { list-style: none; margin: 0; padding: var(--s2); display: flex; flex-wrap: wrap; gap: var(--s2); border: 1px solid var(--line); border-radius: 8px; background: var(--bg-panel); }
 .ws-ov-problems { margin: 0; padding: var(--s2) var(--s3) var(--s2) var(--s5); border-left: 3px solid var(--warn); background: var(--bg-panel); color: var(--txt-hi); font-size: var(--fs-meta); }
 .ws-ov-rows { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-.ws-ov-row { display: flex; align-items: baseline; gap: var(--s3); padding: var(--s1) var(--s3); border-top: 1px solid var(--line); font-size: var(--fs-meta); color: var(--txt-dim); width: 100%; }
+.ws-ov-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px var(--s2); box-sizing: border-box; padding: var(--s1) var(--s3); border-top: 1px solid var(--line); font-size: var(--fs-meta); color: var(--txt-dim); width: 100%; }
 .ws-ov-rows > :first-child .ws-ov-row, .ws-ov-rows > .ws-ov-row:first-child { border-top: 0; }
-.ws-ov-item { display: flex; align-items: baseline; gap: var(--s3); flex: 1 1 auto; min-width: 0; border: 0; padding: 0; background: transparent; text-align: left; cursor: pointer; font: inherit; color: inherit; }
+.ws-ov-item { display: flex; align-items: baseline; gap: var(--s2); flex: 1 1 11rem; min-width: 0; border: 0; padding: 0; background: transparent; text-align: left; cursor: pointer; font: inherit; color: inherit; }
 .ws-ov-work.on { box-shadow: inset 0 0 0 2px var(--accent); }
 .ws-ov-state.at-there::before { background: var(--ok); }
 .ws-ov-state.at-busy::before { background: var(--accent); }
 .ws-ov-state.at-waiting::before { background: var(--warn); }
 .ws-ov-state.at-gone::before, .ws-ov-state.at-unregistered::before { background: var(--danger); }
-.ws-ov-name { flex: none; color: var(--txt-hi); max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-ov-name { flex: 0 1 auto; min-width: 4ch; color: var(--txt-hi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ws-ov-state { flex: none; color: var(--txt-hi); }
 .ws-ov-state::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 5px; border-radius: 50%; background: var(--txt-dim); vertical-align: 1px; }
 .ws-ov-state.registered::before { background: var(--ok); }
 .ws-ov-state.not-registered::before { background: var(--danger); }
 .ws-ov-state.to-clone::before, .ws-ov-state.to-create::before { background: var(--warn); }
-.ws-ov-detail { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-ov-detail { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ws-ov-brief { margin: 0 var(--s3) var(--s2); padding: var(--s2); white-space: pre-wrap; font-size: var(--fs-meta); background: var(--bg-panel); border: 1px solid var(--line); border-radius: 6px; color: var(--txt-hi); }
 
 /* ── Editable fields: one answer to "can I type here?" ─────────────────────

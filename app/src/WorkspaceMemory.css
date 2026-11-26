@@ -1,0 +1,102 @@
+/* A workspace's memory (WorkspaceMemory.tsx). Hue is an edge or a tint; a diff
+   row's tint is mixed over the surface it is on, never over transparent. */
+.wsf-side.memory { width: 250px; padding: var(--s2) 0; }
+.wsm-files { display: flex; flex-direction: column; gap: var(--s1); }
+.wsm-files > .wsc-filter { margin: 0 var(--s2) var(--s1); flex: none; background: var(--bg-abyss); }
+.wsm-files > .ws-ov-none, .wsm-skipped { padding: 0 var(--s3); }
+.wsm-skipped { margin: var(--s1) 0; color: var(--txt); font-size: var(--fs-meta); overflow-wrap: anywhere; }
+.wsm-group-h { display: block; width: 100%; border: 0; background: transparent; padding: 4px var(--s3) 2px; color: var(--txt); font-size: var(--fs-meta); text-align: left; text-transform: capitalize; }
+.wsm-group-h:hover { color: var(--txt-hi); }
+.wsm-group-h svg { vertical-align: -1px; }
+.wsm-n { color: var(--txt-dim); }
+.wsm-list, .wsm-cfiles { list-style: none; margin: 0; padding: 0; }
+.wsm-file { display: block; width: 100%; border: 0; background: transparent; padding: 3px var(--s3); color: var(--txt-hi); font: inherit; font-size: var(--fs-label); text-align: left; }
+.wsm-file:hover { background: var(--bg-elev); }
+.wsm-file.on { background: var(--bg-elev); box-shadow: inset 3px 0 0 var(--ws-hue); }
+.wsm-file-in { width: 100%; box-sizing: border-box; display: flex; align-items: center; gap: var(--s2); min-width: 0; }
+.wsm-file-i { flex: none; color: var(--txt-dim); line-height: 0; }
+.wsm-file-n { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wsm-file-s { flex: none; color: var(--txt-dim); font-size: var(--fs-meta); }
+.wsm-preview { flex: 1 1 auto; min-height: 0; overflow: auto; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; gap: var(--s3); padding: var(--s5); }
+.wsm-preview img { max-width: 100%; max-height: 70vh; object-fit: contain; border: 1px solid var(--line); border-radius: 6px; }
+.wsm-preview-w { margin: 0; color: var(--txt-hi); font-size: var(--fs-label); overflow-wrap: anywhere; }
+.wsm-skipped p { margin: 0; }
+.wsm-skipped ul { margin: 2px 0 0; padding-left: var(--s4); }
+.wsm-crumb { flex: none; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--txt); font-size: var(--fs-label); }
+.ix-head[data-tier="0"] .wsm-crumb { display: none; }
+.wsm-trail { flex: none; display: inline-flex; }
+.wsm-trail .icon-btn:disabled { opacity: 0.35; }
+/* ── history ── */
+.wsm-hist { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: var(--s2); padding: var(--s3) var(--s4); background: var(--bg-abyss); }
+.wsm-hist > * { flex: none; }
+.wsm-hist-h { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; }
+.wsm-hist-t { color: var(--txt-hi); font-size: var(--fs-label); font-weight: var(--fw-med); min-width: 0; overflow-wrap: anywhere; }
+.wsm-hist-h .agent-view { margin-left: 0; }
+.wsm-hist-x { margin-left: auto; }
+.wsm-log { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--bg-panel); }
+.wsm-row { display: block; width: 100%; border: 0; border-left: 3px solid transparent; background: transparent; padding: 6px var(--s3); color: var(--txt-hi); font: inherit; font-size: var(--fs-label); text-align: left; }
+.wsm-row + .wsm-row { border-top: 1px solid var(--line); }
+.wsm-row:hover, .wsm-cfile:hover { background: var(--bg-elev); }
+.wsm-row.fold, .wsm-row.redo { border-left-color: var(--done); }
+.wsm-row.undo { border-left-color: var(--warn); }
+/* Its own width first, not a share of nothing: WKWebView sizes what is in a
+   <button> by its content (AGENTS.md), and a basis of 0 has none. */
+.wsm-row-n { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wsm-row-l { color: var(--txt); }
+.wsm-row.undone .wsm-row-n { color: var(--txt); text-decoration: line-through; }
+.wsm-row-u, .wsm-row-d { flex: none; color: var(--txt); font-size: var(--fs-meta); }
+.wsm-pm { flex: none; display: inline-flex; gap: 4px; font-size: var(--fs-meta); }
+.wsm-add, .wsm-del { padding: 0 4px; border-radius: 3px; color: var(--txt-hi); }
+.wsm-add { background: color-mix(in srgb, var(--ok) 24%, var(--bg-panel)); }
+.wsm-del { background: color-mix(in srgb, var(--danger) 24%, var(--bg-panel)); }
+.wsm-change { display: flex; flex-direction: column; gap: var(--s2); }
+.wsm-change-h { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2); padding: var(--s2) var(--s3); border: 1px solid var(--line); border-left: 3px solid var(--line-strong); border-radius: 6px; background: var(--bg-panel); color: var(--txt-hi); font-size: var(--fs-label); }
+.wsm-change-h.fold, .wsm-change-h.redo { border-left-color: var(--done); }
+.wsm-change-h.undo { border-left-color: var(--warn); }
+.wsm-change-w { flex: 1 1 12rem; min-width: 0; display: flex; flex-direction: column; overflow-wrap: anywhere; }
+.wsm-change-d { color: var(--txt); font-size: var(--fs-meta); }
+.wsm-armed { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 16%, var(--bg-elev)); }
+.wsm-err { margin: 0; padding: var(--s2) var(--s3); border-left: 3px solid var(--danger); background: var(--bg-panel); color: var(--txt-hi); font-size: var(--fs-label); overflow-wrap: anywhere; }
+.wsm-cfiles, .wsm-one { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--bg-panel); }
+.wsm-cfile { display: block; width: 100%; border: 0; background: transparent; padding: 4px var(--s3); color: var(--txt-hi); font-family: var(--font-mono); font-size: var(--fs-meta); text-align: left; }
+.wsm-cfiles li + li { border-top: 1px solid var(--line); }
+.wsm-cfile.on { background: var(--bg-elev); box-shadow: inset 3px 0 0 var(--ws-hue); }
+.wsm-cfile-n { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wsm-cfile-s { flex: 1 1 auto; color: var(--txt); }
+.wsm-one-h { display: flex; gap: var(--s3); padding: 5px var(--s3); border-bottom: 1px solid var(--line); color: var(--txt-hi); font-family: var(--font-mono); font-size: var(--fs-meta); }
+.wsm-one-h > span { flex: 1 1 0; min-width: 0; overflow-wrap: anywhere; }
+.wsm-diff { font-family: var(--font-mono); font-size: var(--fs-meta); line-height: 1.55; color: var(--txt-hi); }
+.wsm-dl { display: flex; }
+.wsm-dl.add { background: color-mix(in srgb, var(--ok) 18%, var(--bg-panel)); }
+.wsm-dl.del { background: color-mix(in srgb, var(--danger) 18%, var(--bg-panel)); }
+.wsm-dl.gap { justify-content: center; color: var(--txt); }
+.wsm-dn { flex: none; width: 3.2em; padding-right: 6px; text-align: right; color: var(--txt); user-select: none; }
+.wsm-ds { flex: none; width: 1.2em; user-select: none; }
+.wsm-dt { flex: 1 1 0; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; padding-right: var(--s2); }
+.wsm-sides { display: flex; flex-wrap: wrap; gap: var(--s3); padding: var(--s3); }
+.wsm-side { flex: 1 1 180px; min-width: 0; margin: 0; }
+.wsm-side figcaption { color: var(--txt); font-size: var(--fs-meta); margin-bottom: 4px; }
+.wsm-side img { max-width: 100%; height: auto; border: 1px solid var(--line); border-radius: 4px; }
+.wsm-pad { padding: var(--s3); }
+/* ── the overview's column ── */
+.wsm-last { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2); padding: 6px var(--s3); border-bottom: 1px solid var(--line); border-left: 3px solid var(--done); color: var(--txt-hi); font-size: var(--fs-label); }
+.wsm-last-w { flex: 1 1 14rem; min-width: 0; overflow-wrap: anywhere; }
+.wsm-excerpt { max-height: max(260px, calc(100vh - 290px)); overflow: hidden; }
+/* A card in a page: its own name is over it, so the index's first heading is not
+   drawn, and the rest are a card's size. */
+.wsm-excerpt .md { padding: var(--s3) var(--s4); font-size: var(--fs-label); }
+.wsm-excerpt .md > .md-h1:first-child { display: none; }
+.wsm-excerpt .md :is(.md-h1, .md-h2) { font-size: 1.1em; border-bottom: 0; padding-bottom: 0; }
+.wsm-excerpt .md :is(.md-h3, .md-h4, .md-h5, .md-h6) { font-size: 1em; }
+.wsm-excerpt.cut { mask-image: linear-gradient(to bottom, #000 calc(100% - 56px), transparent); -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 56px), transparent); }
+.wsm-long { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; padding: var(--s1) var(--s4); border-bottom: 1px solid var(--line); border-left: 3px solid var(--warn); background: var(--bg-panel); color: var(--txt-hi); font-size: var(--fs-label); }
+.wsm-long > span { flex: 1 1 12rem; min-width: 0; }
+.wsm-long.under { border-left-color: var(--done); }
+.wsm-under { max-height: 40vh; overflow-y: auto; border-bottom: 1px solid var(--line); background: var(--bg-panel); flex: none; }
+.wsm-new { border: 0; background: transparent; padding: 6px var(--s3); color: var(--txt-hi); font: inherit; font-size: var(--fs-label); text-align: left; }
+.wsm-new:hover { background: var(--bg-elev); }
+.wsm-new svg { vertical-align: -1px; }
+.wsm-newf { display: flex; flex-direction: column; gap: var(--s1); padding: var(--s1) var(--s2); }
+.wsm-newf .wsm-skipped { padding: 0; }
+.md-link.gone { color: var(--txt-dim); border-bottom-style: dotted; }
+.wsf-chip-dot.new { background: var(--done); }

@@ -22,7 +22,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
 use remote_common::*;
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
 // ── the witnesses ────────────────────────────────────────────────────────────
@@ -287,3 +287,114 @@ int main(int argc, char **argv) {
     for (;;) sleep(100);
 }
 "#;
+
+/// Named workspaces on a paired device (iOS workspaces phase 1), through the
+/// real binary and the real remote listener: the `ok` names `workspaces`; a
+/// `"*"` device reads every workspace, an empty one included, PROJECTED (no
+/// plan, ideas, member names); narrowed mid-connection to one project, its
+/// very next call sees only the workspace that project fully covers, numbered
+/// from 0; and `workspaces:changed`, declared, reaches it only for a write
+/// that changed its answer, while the console's answer keeps every field.
+#[test]
+fn a_paired_device_reads_the_workspaces_it_fully_covers() {
+    let Some(lan) = lan_or_skip() else { return };
+    let (sb, sf) = Sandbox::launch("workspaces");
+    let git = |dir: &std::path::Path, a: &[&str]| {
+        let ok = std::process::Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(a).output().unwrap();
+        assert!(ok.status.success(), "git {a:?}: {ok:?}");
+    };
+    let mut con = console(&sf);
+    let mut roots = Vec::new();
+    for (i, name) in ["a", "b"].into_iter().enumerate() {
+        let repo = sb.root.join(name);
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "x"]);
+        let repo = std::fs::canonicalize(&repo).unwrap().to_string_lossy().into_owned();
+        let added = rpc(&mut con, 10 + i as u64, "add_project", json!({ "dir": repo }));
+        assert!(added.get("ok").is_some(), "{added}");
+        roots.push(repo);
+    }
+    let (a, b) = (roots[0].clone(), roots[1].clone());
+    let mut id = 20;
+    let mut make = |con: &mut _, name: &str, members: &[&str]| -> String {
+        id += 2;
+        let v = rpc(con, id, "workspace_create", json!({ "name": name }));
+        let w = v["ok"]["workspaces"].as_array().and_then(|l| l.iter().find(|w| w["name"] == json!(name))).unwrap_or_else(|| panic!("{v}"))["id"].as_str().unwrap().to_string();
+        let v = rpc(con, id + 1, "workspace_set_projects", json!({ "id": w, "roots": members }));
+        assert!(v.get("ok").is_some(), "{v}");
+        w
+    };
+    let both = make(&mut con, "Both", &[&a, &b]);
+    let only_a = make(&mut con, "Only a", &[&a]);
+    make(&mut con, "Empty", &[]);
+    let v = rpc(&mut con, 30, "workspace_set_color", json!({ "id": only_a, "color": "purple" }));
+    assert!(v.get("ok").is_some(), "{v}");
+    // The console's answer, unchanged: every field of every workspace.
+    let mine = rpc(&mut con, 31, "workspaces_list", json!({}));
+    let first = &mine["ok"]["workspaces"][0];
+    for k in ["id", "name", "projects", "color", "plan", "ideas"] {
+        assert!(first.get(k).is_some(), "the console's answer lost {k}: {mine}");
+    }
+    assert_eq!(first["projects"][0]["registered"], json!(true), "{mine}");
+
+    let st = rpc(&mut con, 32, "remote_enable", json!({ "address": lan.to_string() }));
+    let at: SocketAddr = st["ok"]["at"].as_str().unwrap_or_else(|| panic!("{st}")).parse().unwrap();
+    let pin = st["ok"]["pin"].as_str().unwrap().to_string();
+    let dev = device();
+    let (paired, _) = pair(&mut con, &dev, &["read"]);
+    let (mut ws, ok) = session(at, &pin, &dev).expect("a session");
+    assert_eq!(ok["workspaces"], json!(["list"]), "the remote ok names what a device may use: {ok}");
+    ws.send(tokio_tungstenite::tungstenite::Message::text(json!({ "listen": ["workspaces:changed"] }).to_string())).unwrap();
+
+    // `"*"`: all three, projected, in the host's order.
+    let all = rpc(&mut ws, 40, "workspaces_list", json!({}));
+    assert_eq!(
+        all["ok"],
+        json!({ "workspaces": [
+            { "id": both, "name": "Both", "order": 0, "projects": [{ "root": a }, { "root": b }] },
+            { "id": only_a, "name": "Only a", "color": "purple", "order": 1, "projects": [{ "root": a }] },
+            { "id": all["ok"]["workspaces"][2]["id"], "name": "Empty", "order": 2, "projects": [] },
+        ] }),
+        "{all}"
+    );
+
+    // Narrowed to `a` mid-connection: the very next call applies it.
+    let n = rpc(&mut con, 41, "device_set_scope", json!({ "id": paired["device_id"], "caps": ["read"], "projects": [a] }));
+    assert!(n.get("ok").is_some(), "{n}");
+    let narrow = rpc(&mut ws, 42, "workspaces_list", json!({}));
+    assert_eq!(
+        narrow["ok"],
+        json!({ "workspaces": [{ "id": only_a, "name": "Only a", "color": "purple", "order": 0, "projects": [{ "root": a }] }] }),
+        "only the workspace `a` fully covers, from order 0: {narrow}"
+    );
+    let text = narrow.to_string();
+    assert!(!text.contains("Both") && !text.contains(&both) && !text.contains("Empty"), "{text}");
+
+    // The events this device hears before its next answer.
+    let heard = |ws: &mut tokio_tungstenite::tungstenite::WebSocket<Tls>, id: u64| -> Vec<Value> {
+        ws.send(tokio_tungstenite::tungstenite::Message::text(json!({ "id": id, "cmd": "workspaces_list", "args": {} }).to_string())).unwrap();
+        let mut events = Vec::new();
+        loop {
+            let v: Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
+            if v["id"] == json!(id) {
+                return events;
+            }
+            if v.get("event").is_some() {
+                events.push(v);
+            }
+        }
+    };
+    // A write to a workspace it cannot see: nothing.
+    let v = rpc(&mut con, 50, "workspace_rename", json!({ "id": both, "name": "Both renamed" }));
+    assert!(v.get("ok").is_some(), "{v}");
+    assert_eq!(heard(&mut ws, 51), Vec::<Value>::new(), "a write to a workspace this device cannot see reached it");
+    // A write to one it can: one bare event.
+    let v = rpc(&mut con, 52, "workspace_rename", json!({ "id": only_a, "name": "Just a" }));
+    assert!(v.get("ok").is_some(), "{v}");
+    let got = heard(&mut ws, 53);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0]["event"], json!("workspaces:changed"));
+    assert_eq!(got[0]["payload"], Value::Null, "no payload reaches a device: {got:?}");
+    drop(sb);
+}

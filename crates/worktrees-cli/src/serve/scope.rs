@@ -109,10 +109,27 @@ pub fn places(view: &View, mut v: Value) -> Value {
     v
 }
 
+/// `Lineage` fields that name only places of the row's own project.
+pub const LINEAGE_SAME_PROJECT: &[&str] = &["under", "handed_to", "parent", "up", "reports_to", "started", "lanes"];
+/// `Lineage` fields that can name another project, and are cut.
+pub const LINEAGE_CUT: &[&str] = &["starter"];
+
+/// A place row's lineage, as `view.caller` may see it: for any scope but
+/// every project, a starter in another project is cut to `{at, elsewhere}`
+/// (`lineage::cut_foreign_starter`). The console is unchanged.
+fn lineage_cut(view: &View, place: &mut Value) {
+    if !view.projects.is_all() {
+        worktrees_core::lineage::cut_foreign_starter(place);
+    }
+}
+
 fn places_stamps(view: &View, snapshot: &mut Value) {
     if let Some(Value::Array(places)) = snapshot.get_mut("places") {
-        for d in places.iter_mut().filter_map(|p| p.get_mut("declared")) {
-            stamps(view, d);
+        for p in places.iter_mut() {
+            lineage_cut(view, p);
+            if let Some(d) = p.get_mut("declared") {
+                stamps(view, d);
+            }
         }
     }
 }
@@ -171,6 +188,73 @@ pub fn by_project(view: &View, v: Value) -> Value {
     keep(view, v, "projects", "root", true)
 }
 
+/// What a paired device is told of one named workspace (`workspaces_list`,
+/// iOS phase 1, the owner's lift of 2026-11-25): an ALLOWLIST. `order` is its
+/// position among the workspaces this caller is shown, so a hidden one leaves
+/// no gap; `color` is absent when it has none.
+#[cfg(test)]
+pub const WORKSPACE_KEPT: &[&str] = &["id", "name", "color", "order", "projects"];
+/// Of each member, only its registry root.
+#[cfg(test)]
+pub const WORKSPACE_PROJECT_KEPT: &[&str] = &["root"];
+/// What the projection DECIDED to drop: the console's fields that never reach
+/// a device. A field the record gains is in neither list, and
+/// `a_workspace_field_is_decided_before_it_reaches_a_device` fails until it is.
+#[cfg(test)]
+pub const WORKSPACE_DROPPED: &[&str] = &["plan", "ideas"];
+/// A member's: the registry's name for it and whether it still is registered.
+/// The device has both from `list_workspace`, for the projects it may see.
+#[cfg(test)]
+pub const WORKSPACE_PROJECT_DROPPED: &[&str] = &["name", "registered"];
+
+/// `workspaces_list` (`worktrees_api::workspaces::Workspaces`) as `view` may
+/// see it. The console's answer is untouched: the desktop app reads every
+/// field. Any other caller, a `"*"` device included, gets
+/// [`project_workspaces`].
+pub fn named_workspaces(view: &View, v: Value) -> Value {
+    if view.caller.is_console() {
+        return v;
+    }
+    serde_json::json!({ "workspaces": project_workspaces(view.projects, v.get("workspaces")) })
+}
+
+/// The workspaces of `list` whose EVERY member root `scope` covers, each cut
+/// to [`WORKSPACE_KEPT`], numbered densely in the list's order. `"*"` covers
+/// every workspace, an empty one included; a list never covers an empty one,
+/// nor one with a single member outside it, which is then absent entirely:
+/// no id, no name, no colour, no count and no gap in `order`. Roots are
+/// judged exactly as stored (registry keys, canonical), so a stale root is
+/// outside every list. Works on the row's shape and on the store's, which
+/// share every kept key.
+pub fn project_workspaces(scope: &Projects, list: Option<&Value>) -> Vec<Value> {
+    let roots = |w: &Value| -> Option<Vec<String>> {
+        w.get("projects").and_then(Value::as_array)?.iter().map(|p| p.get("root").and_then(Value::as_str).map(str::to_string)).collect()
+    };
+    let covered = |w: &&Value| {
+        roots(w).is_some_and(|r| scope.is_all() || (!r.is_empty() && r.iter().all(|r| scope.covers_root(r))))
+    };
+    let Some(Value::Array(items)) = list else { return Vec::new() };
+    items
+        .iter()
+        .filter(covered)
+        .enumerate()
+        .map(|(order, w)| {
+            let mut out = serde_json::Map::new();
+            for key in ["id", "name"] {
+                out.insert(key.into(), w.get(key).cloned().unwrap_or(Value::Null));
+            }
+            let color = w.get("color").and_then(Value::as_str).filter(|c| worktrees_core::workspaces::COLORS.contains(c));
+            if let Some(c) = color {
+                out.insert("color".into(), Value::from(c));
+            }
+            out.insert("order".into(), Value::from(order));
+            let members: Vec<Value> = roots(w).unwrap_or_default().into_iter().map(|r| serde_json::json!({ "root": r })).collect();
+            out.insert("projects".into(), Value::Array(members));
+            Value::Object(out)
+        })
+        .collect()
+}
+
 // ── events ───────────────────────────────────────────────────────────────────
 
 /// How each event reaches a caller. Every name the api emits has a row; a
@@ -202,12 +286,29 @@ pub const EVENTS: &[(&str, Event)] = &[
     // `{changed: [{id, mtime_ms}], removed: [id]}`: the ideas folder moved
     // (`worktrees_api::ideas`). Desktop only, like every ideas row.
     ("ideas:changed", Event::Console),
+    // `{id, changed: [{path, mtime_ms, size, rev}], removed: [path]}`: a
+    // workspace's memory moved (`worktrees_api::memory`). Desktop only, like
+    // its rows.
+    ("workspaces:memory", Event::Console),
+    // `{id, commit}`: its newest commit is another one. Desktop only.
+    ("workspaces:history", Event::Console),
     // `{live, busy, waiting}`: the idea conversations' tmux sessions, by name
     // (phase S, `worktrees_api::watch::IdeaSessions`). Desktop only.
     ("ideas:sessions", Event::Console),
+    // `{live, busy, waiting, chat_of, fold}`: the workspace chats' tmux
+    // sessions, by name (`worktrees_api::watch::WorkspaceSessions`). Desktop
+    // only.
+    ("workspaces:sessions", Event::Console),
     // `keepawake::State`: the host's sleep hold, which `get_keep_awake`
     // answers for any device (`read`, host-wide, no project in it).
     ("keep_awake:changed", Event::Everyone),
+    // `{before, after}` inside serve, `null` on the wire (iOS phase 1): the
+    // workspaces file was written (`worktrees_core::workspaces::watch_writes`,
+    // under every writer). The console hears every write; a device only one
+    // that changed what its `workspaces_list` answers, judged from the two
+    // states the payload carries, so a device that covers no workspace never
+    // learns that the owner edited one. Only to a socket that declared it.
+    ("workspaces:changed", Event::NamedWorkspaces),
     // `{what, share?, seq?}` (group chat §6, `sharethread::changed`): a share,
     // its guests or its thread changed. The console, and the sockets of the
     // principals its `to` names — a guest hears about its own shares and
@@ -221,7 +322,7 @@ pub const EVENTS: &[(&str, Event)] = &[
 /// (`Host::has_audience` is the one-shots' alone). `shares:changed` is one:
 /// a client that does not show shares has no use for it, and a guest's
 /// socket gets nothing it did not ask for.
-pub const DECLARED_ONLY: &[&str] = &["shares:changed"];
+pub const DECLARED_ONLY: &[&str] = &["shares:changed", "workspaces:changed"];
 
 pub fn needs_declaration(event: &str) -> bool {
     is_one_shot(event) || DECLARED_ONLY.contains(&event)
@@ -252,8 +353,9 @@ pub fn is_one_shot(event: &str) -> bool {
 /// "re-read", and a client re-pulls the workspace, which carries
 /// `last_worked_epoch`, on every reconnect. `sessions:drafts` has
 /// `list_drafts`. `ideas:sessions` is the idea conversations' live, busy
-/// and waiting sets, the companion's dots: the same shape of state.
-pub const SNAPSHOT: &[&str] = &["sessions:busy", "ideas:sessions"];
+/// and waiting sets, the companion's dots: the same shape of state. `workspaces:sessions` is
+/// its twin for the workspaces' chats.
+pub const SNAPSHOT: &[&str] = &["sessions:busy", "ideas:sessions", "workspaces:sessions"];
 
 /// `event`'s row in [`SNAPSHOT`], for the `'static` name a cache keys on.
 pub fn snapshot(event: &str) -> Option<&'static str> {
@@ -303,6 +405,9 @@ pub enum Event {
     /// The console, and the callers whose principal the payload's `to`
     /// names; `to` is cut from every copy. The ONE kind a guest hears.
     Principals,
+    /// `workspaces:changed`: `{before, after}` in, `null` out, and to a
+    /// device only when its projection of the two differs.
+    NamedWorkspaces,
 }
 
 /// `payload` as `caller` (holding `grant`) may see it, or `None` to send it
@@ -337,6 +442,11 @@ pub fn event(name: &str, payload: &Value, caller: &Caller, grant: &Grant, roots:
     };
     let scope = &grant.projects;
     match how {
+        Event::NamedWorkspaces => {
+            let moved = caller.is_console()
+                || project_workspaces(scope, payload.get("before")) != project_workspaces(scope, payload.get("after"));
+            return moved.then_some(Value::Null);
+        }
         Event::Everyone => return Some(payload.clone()),
         Event::Console => return caller.is_console().then(|| payload.clone()),
         _ if scope.is_all() => return Some(payload.clone()),
@@ -346,7 +456,7 @@ pub fn event(name: &str, payload: &Value, caller: &Caller, grant: &Grant, roots:
     // No event carries a stamp, so none names a device.
     let view = View { projects: scope, roots: &roots, caller, names: &NoDevices };
     match how {
-        Event::Everyone | Event::Console | Event::Principals => unreachable!("answered above"),
+        Event::Everyone | Event::Console | Event::Principals | Event::NamedWorkspaces => unreachable!("answered above"),
         Event::ByPath(field) => payload.get(field).and_then(Value::as_str).is_some_and(|p| covers(&view, p)).then(|| payload.clone()),
         Event::Drafts => {
             let mut v = payload.clone();
@@ -378,6 +488,121 @@ pub fn event(name: &str, payload: &Value, caller: &Caller, grant: &Grant, roots:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── named workspaces (iOS workspaces phase 1) ──
+
+    /// The console's `workspaces_list` answer as the row gives it: a workspace
+    /// over `/r/a` and `/r/b`, one over `/r/a` alone with a colour and a plan,
+    /// an empty one, one over `/r/b`.
+    fn ws_answer() -> Value {
+        let m = |r: &str| json!({ "root": r, "name": r.trim_start_matches("/r/"), "registered": true });
+        json!({ "workspaces": [
+            { "id": "w1", "name": "Both", "projects": [m("/r/a"), m("/r/b")], "color": null, "plan": "p1", "ideas": ["i1"] },
+            { "id": "w2", "name": "Only a", "projects": [m("/r/a")], "color": "purple", "plan": null, "ideas": [] },
+            { "id": "w3", "name": "Empty", "projects": [], "color": null, "plan": null, "ideas": [] },
+            { "id": "w4", "name": "Only b", "projects": [m("/r/b")], "color": "chartreuse", "plan": null, "ideas": [] },
+        ] })
+    }
+
+    fn ws_view<'a>(g: &'a Grant, c: &'a Caller, roots: &'a [String]) -> View<'a> {
+        View { projects: &g.projects, roots, caller: c, names: &NoDevices }
+    }
+
+    /// A device whose list is `/r/a` sees "Only a" and nothing of the
+    /// workspace that also holds `/r/b` — not its name, id, colour or a gap
+    /// in `order` — nor of the empty one; and through the event it hears a
+    /// write to "Only a" and never one to "Both".
+    #[test]
+    fn a_list_device_never_sees_a_partly_covered_workspace() {
+        let (g, c, r) = (scoped(&["/r/a"]), phone(), reg());
+        let out = named_workspaces(&ws_view(&g, &c, &r), ws_answer());
+        assert_eq!(out, json!({ "workspaces": [{ "id": "w2", "name": "Only a", "color": "purple", "order": 0, "projects": [{ "root": "/r/a" }] }] }));
+        let text = out.to_string();
+        for leak in ["w1", "Both", "w3", "Empty", "p1", "i1", "/r/b"] {
+            assert!(!text.contains(leak), "{leak} reached a device that does not cover it: {text}");
+        }
+        // The event, from the store's shape: a rename of "Both" is silent.
+        let before = ws_answer()["workspaces"].clone();
+        let mut after = before.clone();
+        after[0]["name"] = json!("Both, renamed");
+        let p = json!({ "before": before, "after": after });
+        assert_eq!(ev("workspaces:changed", &p, &c, &g), None, "a write it cannot see reached it");
+        assert_eq!(ev("workspaces:changed", &p, &Caller::console(), &Grant::everything()), Some(Value::Null), "the console hears every write");
+        assert_eq!(ev("workspaces:changed", &p, &phone(), &Grant::everything()), Some(Value::Null), "a \"*\" device sees every workspace");
+        // b joins "Only a": it leaves this device's view, so it hears that.
+        let mut after = before.clone();
+        after[1]["projects"] = json!([{ "root": "/r/a" }, { "root": "/r/b" }]);
+        assert_eq!(ev("workspaces:changed", &json!({ "before": before, "after": after }), &c, &g), Some(Value::Null));
+        // A plan or idea link changes nothing it is shown.
+        let mut after = before.clone();
+        after[1]["plan"] = json!("p9");
+        assert_eq!(ev("workspaces:changed", &json!({ "before": before, "after": after }), &phone(), &Grant::everything()), None);
+    }
+
+    /// `"*"` sees every workspace, the empty one included, projected: no
+    /// plan, no ideas, no member names; a colour the palette lacks is none.
+    #[test]
+    fn a_star_device_gets_every_workspace_projected() {
+        let (g, c, r) = (Grant::everything(), phone(), Vec::new());
+        let out = named_workspaces(&ws_view(&g, &c, &r), ws_answer());
+        assert_eq!(
+            out,
+            json!({ "workspaces": [
+                { "id": "w1", "name": "Both", "order": 0, "projects": [{ "root": "/r/a" }, { "root": "/r/b" }] },
+                { "id": "w2", "name": "Only a", "color": "purple", "order": 1, "projects": [{ "root": "/r/a" }] },
+                { "id": "w3", "name": "Empty", "order": 2, "projects": [] },
+                { "id": "w4", "name": "Only b", "order": 3, "projects": [{ "root": "/r/b" }] },
+            ] })
+        );
+        // An empty workspace is never a list's: not even an empty list's.
+        let none = scoped(&[]);
+        assert_eq!(named_workspaces(&ws_view(&none, &c, &reg()), ws_answer()), json!({ "workspaces": [] }));
+    }
+
+    /// The console's answer is the row's, byte for byte.
+    #[test]
+    fn the_console_gets_the_workspaces_answer_unchanged() {
+        let (g, c, r) = (Grant::everything(), Caller::console(), Vec::new());
+        assert_eq!(named_workspaces(&ws_view(&g, &c, &r), ws_answer()).to_string(), ws_answer().to_string());
+    }
+
+    /// Every field of the row's record, and of the store's, is DECIDED: kept
+    /// or dropped. A field either gains is in neither list, and this fails
+    /// until someone decides whether a device may see it.
+    #[test]
+    fn a_workspace_field_is_decided_before_it_reaches_a_device() {
+        use worktrees_api::workspaces::{WsProject, WsRow};
+        let keys = |v: Value| -> Vec<String> { v.as_object().unwrap().keys().cloned().collect() };
+        let member = WsProject { root: "/r/a".into(), name: Some("a".into()), registered: true };
+        let row = WsRow { id: "w".into(), name: "n".into(), projects: vec![member.clone()], color: Some("red".into()), plan: Some("p".into()), ideas: vec!["i".into()] };
+        let store = worktrees_core::workspaces::Workspace {
+            id: "w".into(),
+            name: "n".into(),
+            projects: vec![worktrees_core::workspaces::ProjectRef { root: "/r/a".into(), extra: Default::default() }],
+            color: Some("red".into()),
+            plan: Some("p".into()),
+            ideas: vec!["i".into()],
+            extra: Default::default(),
+        };
+        for (what, have, kept, dropped) in [
+            ("the row's workspace", keys(serde_json::to_value(&row).unwrap()), WORKSPACE_KEPT, WORKSPACE_DROPPED),
+            ("the store's workspace", keys(serde_json::to_value(&store).unwrap()), WORKSPACE_KEPT, WORKSPACE_DROPPED),
+            ("the row's member", keys(serde_json::to_value(&member).unwrap()), WORKSPACE_PROJECT_KEPT, WORKSPACE_PROJECT_DROPPED),
+            ("the store's member", keys(serde_json::to_value(&store.projects[0]).unwrap()), WORKSPACE_PROJECT_KEPT, WORKSPACE_PROJECT_DROPPED),
+        ] {
+            for k in &have {
+                assert!(kept.contains(&k.as_str()) ^ dropped.contains(&k.as_str()), "{what}'s `{k}` is not decided for a device: keep it or drop it in scope.rs");
+            }
+        }
+        // And nothing leaves but the kept keys.
+        let out = project_workspaces(&Projects::All, Some(&json!([serde_json::to_value(&row).unwrap()])));
+        for k in keys(out[0].clone()) {
+            assert!(WORKSPACE_KEPT.contains(&k.as_str()), "{k}");
+        }
+        for k in keys(out[0]["projects"][0].clone()) {
+            assert!(WORKSPACE_PROJECT_KEPT.contains(&k.as_str()), "{k}");
+        }
+    }
 
     /// A guest hears no host event at all: not a projected busy set, not a
     /// bare "re-read", not a device event (group chat §2).
@@ -426,7 +651,10 @@ mod tests {
         let mut never = || -> Vec<String> { panic!("the console's projection read the registry") };
         for (name, _) in EVENTS {
             let p = json!({"path": "/elsewhere", "repo": "/elsewhere", "busy": ["/elsewhere"], "drafts": [{"path": "/x"}]});
-            assert_eq!(event(name, &p, &Caller::console(), &all, &mut never), Some(p.clone()), "{name}");
+            // `workspaces:changed` is bare for everyone: its `{before, after}`
+            // is serve's to judge a device by, never a client's.
+            let want = if *name == "workspaces:changed" { Value::Null } else { p.clone() };
+            assert_eq!(event(name, &p, &Caller::console(), &all, &mut never), Some(want), "{name}");
         }
         assert_eq!(event("not:projected", &json!(1), &Caller::console(), &all, &mut never), Some(json!(1)));
     }
@@ -589,6 +817,77 @@ mod tests {
         let mut want: Vec<String> = STAMPS.iter().map(|s| s.to_string()).collect();
         want.sort();
         assert_eq!(fields, want);
+    }
+
+    /// Lane children: the one reference a place row can make into another
+    /// project is a starter there (`lineage.starter.project`, and the raw
+    /// `declared.started_by` beside it). A scoped device never learns that
+    /// project's name or the starter's slug; the console, an all-projects
+    /// device and a same-project starter are untouched.
+    #[test]
+    fn a_starter_in_another_project_is_cut_for_a_scoped_device() {
+        let snap = |starter: Value| {
+            json!({ "places": [{
+                "slug": "kid", "path": "/r/a/.worktrees/kid",
+                "declared": { "started_by": starter.clone(), "note": "n" },
+                "lineage": { "starter": starter, "reports_to": "(main)" },
+            }] })
+        };
+        let elsewhere = json!({ "place": "design", "at": 5, "project": "b" });
+        let here = json!({ "place": "a-lane", "at": 5 });
+        let g = scoped(&["/r/a"]);
+        let roots = reg();
+        let me = phone();
+        let v = View { projects: &g.projects, roots: &roots, caller: &me, names: &NoDevices };
+        let cut = json!({ "at": 5, "elsewhere": true });
+
+        let got = places(&v, snap(elsewhere.clone()));
+        assert_eq!(got["places"][0]["lineage"]["starter"], cut, "{got}");
+        assert_eq!(got["places"][0]["declared"]["started_by"], cut, "{got}");
+        assert_eq!(got["places"][0]["declared"]["note"], "n");
+        let ws = workspace(&v, json!({ "projects": [{ "root": "/r/a", "ok": true, "snapshot": snap(elsewhere.clone()) }] }));
+        let row = &ws["projects"][0]["snapshot"]["places"][0];
+        assert_eq!((&row["lineage"]["starter"], &row["declared"]["started_by"]), (&cut, &cut), "{ws}");
+
+        // A starter in the same project names nothing the device cannot list.
+        assert_eq!(places(&v, snap(here.clone())), snap(here));
+        // The console, and a device whose scope is every project, see it whole.
+        let all = Grant::everything();
+        let desk = Caller::console();
+        let whole = View { projects: &all.projects, roots: &roots, caller: &desk, names: &NoDevices };
+        assert_eq!(places(&whole, snap(elsewhere.clone())), snap(elsewhere.clone()));
+        let wide = View { projects: &all.projects, roots: &roots, caller: &me, names: &NoDevices };
+        assert_eq!(places(&wide, snap(elsewhere.clone())), snap(elsewhere));
+    }
+
+    /// Every lineage field is classified: it names only places of the row's
+    /// own project (which a device that sees the row may list anyway), or it
+    /// is cut by [`lineage_cut`]. Read off lineage.rs and store.rs, so a field
+    /// added later fails here until it is placed in one list or the other.
+    #[test]
+    fn every_lineage_field_is_same_project_or_cut() {
+        let fields = |src: &str, name: &str| -> Vec<String> {
+            let src = src.split("\n#[cfg(test)]\nmod tests").next().unwrap();
+            let at = src.find(&format!("pub struct {name} {{")).unwrap_or_else(|| panic!("no struct {name}"));
+            let body = &src[at..];
+            let body = &body[..body.find("\n}").unwrap()];
+            let mut f: Vec<String> = body.lines().filter_map(|l| l.trim().strip_prefix("pub ")?.split_once(':').map(|(n, _)| n.to_string())).collect();
+            f.sort();
+            f
+        };
+        let lineage = include_str!("../../../worktrees-core/src/lineage.rs");
+        let store = include_str!("../../../worktrees-core/src/store.rs");
+        let mut want: Vec<String> = LINEAGE_SAME_PROJECT.iter().chain(LINEAGE_CUT).map(|s| s.to_string()).collect();
+        want.sort();
+        assert_eq!(fields(lineage, "Lineage"), want, "a Lineage field is neither same-project nor cut");
+        // A starter, and a link, name another project by `project` alone.
+        assert_eq!(fields(lineage, "Starter"), ["at", "place", "project", "removed"]);
+        assert_eq!(fields(store, "Link"), ["at", "by", "from", "place", "project"]);
+        // The declared links: only `started_by` may carry `project`.
+        let decl = fields(store, "Declared");
+        for k in ["started_by", "handed_to", "under"] {
+            assert!(decl.contains(&k.to_string()), "Declared lost {k}");
+        }
     }
 
     #[test]

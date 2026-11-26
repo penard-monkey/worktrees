@@ -1649,10 +1649,27 @@ fn plan_doc<'a>(idx: &'a Index, plan: &str) -> Result<&'a Idea, String> {
 
 /// Write a plan's new text: its current file to history first.
 fn rewrite_plan(root: &Path, p: &Idea, text: &str, md: &fs::Metadata, new_text: &str) -> Result<(), String> {
+    rewrite_plan_with(root, p, text, md, new_text, &|| ())
+}
+
+/// The refusal when the plan changed between being read and being written.
+pub const ERR_PLAN_MOVED: &str = "the plan changed on disk while this was being written (someone saved it): nothing was written; read it again";
+
+/// [`rewrite_plan`], with a test's say in what happens between the history
+/// copy and the write. What is about to be replaced is read again just before
+/// the write and must still be `text`, as a memory save checks its file
+/// (`memory::write_at`): a save from the editor that landed in between is
+/// never written over. The editor's own save names the mtime it read, so it
+/// is refused in turn after this one, and says so.
+fn rewrite_plan_with(root: &Path, p: &Idea, text: &str, md: &fs::Metadata, new_text: &str, between: &dyn Fn()) -> Result<(), String> {
     if new_text == text {
         return Ok(());
     }
     history_copy_at(root, p.id.as_deref().unwrap_or_default(), text.as_bytes())?;
+    between();
+    if fs::read(root.join(&p.file)).ok().as_deref() != Some(text.as_bytes()) {
+        return Err(ERR_PLAN_MOVED.into());
+    }
     crate::fsx::write_atomic(&root.join(&p.file), new_text.as_bytes(), Some(md.permissions())).map_err(|e| format!("{}: {e}", p.file))
 }
 
@@ -1768,6 +1785,34 @@ pub fn plan_started_at(
     let new_text = crate::plans::with_started(&text, line, title, started)?;
     rewrite_plan(root, &p, &text, &md, &new_text)?;
     read_at(root, plan)
+}
+
+/// What [`plan_propose_at`] did: the plan as it is now, and the new item's
+/// line in it.
+#[derive(Serialize, Debug)]
+pub struct Proposal {
+    pub plan: Doc,
+    pub line: usize,
+}
+
+/// Add `item` to the plan `plan` as the last item of its `## Work`
+/// ([`crate::plans::with_item`]): a workspace chat's proposal. Nothing is
+/// started. The plan goes to history first; a write that would land over
+/// text this did not read is refused ([`rewrite_plan`]).
+pub fn plan_propose_at(root: &Path, plan: &str, item: &crate::plans::NewItem) -> Result<Proposal, String> {
+    plan_propose_with(root, plan, item, &|| ())
+}
+
+fn plan_propose_with(root: &Path, plan: &str, item: &crate::plans::NewItem, between: &dyn Fn()) -> Result<Proposal, String> {
+    refuse_real(root)?;
+    let idx = list_at(root)?;
+    let p = plan_doc(&idx, plan)?.clone();
+    let (text, md) = load(root, &p)?;
+    let new_text = crate::plans::with_item(&text, item)?;
+    rewrite_plan_with(root, &p, &text, &md, &new_text, between)?;
+    let doc = read_at(root, plan)?;
+    let line = crate::plans::read(&doc.content).work.unwrap_or_default().iter().rev().find(|w| w.title == item.title).map(|w| w.line).unwrap_or(0);
+    Ok(Proposal { plan: doc, line })
 }
 
 /// The plan's project `name` (a `clone:` or `new:` line, say) is registered
@@ -2632,6 +2677,42 @@ mod tests {
         assert_eq!(copies(&root, &pi).len(), 3, "the line's path is in history");
         plan_set_project_at(&root, &pi, "conf", "conf", None).unwrap();
         assert_eq!(copies(&root, &pi).len(), 3, "already so: nothing written");
+    }
+
+    /// A proposal is one more item at the end of Work, history first; and an
+    /// edit that lands between this reading the plan and writing it is never
+    /// overwritten: the proposal is refused and the other text stays.
+    #[test]
+    fn a_proposed_item_is_a_plan_edit_that_never_writes_over_another() {
+        let t = Tmp::new("plan-propose");
+        let root = t.root();
+        let a = id(&made(&root, "Jellyfin", "a\n"));
+        let body = "# Plan: J\n\n## Work\n### Role\nproject: conf\nbranch: role\nbrief: |\n  Do it.\n\n## Notes\nkeep\n";
+        let p0 = make_plan_at(&root, &[a.clone()], None, Some(body)).unwrap();
+        let pi = id(&p0);
+        let item = crate::plans::NewItem {
+            title: "Docs".into(),
+            project: "conf".into(),
+            branch: "docs".into(),
+            brief: "Write them.".into(),
+            proposed: Some(crate::plans::Proposed { by: "Chat 1".into(), chat: crate::ulid::new(), at: "2026-11-25 10:00".into() }),
+            ..Default::default()
+        };
+        let got = plan_propose_at(&root, &pi, &item).unwrap();
+        let w = crate::plans::read(&got.plan.content).work.unwrap();
+        assert_eq!((w.len(), w[1].title.as_str(), w[1].line), (2, "Docs", got.line));
+        assert!(w[1].proposal.is_some() && w[1].place.is_none());
+        assert!(got.plan.content.ends_with("## Notes\nkeep\n"), "{}", got.plan.content);
+        assert_eq!(copies(&root, &pi), vec![p0.content.clone()], "the plan as it was, first");
+        assert!(plan_propose_at(&root, &pi, &item).unwrap_err().contains("already"), "one title once");
+        assert!(plan_propose_at(&root, &a, &item).is_err(), "an idea is not a plan");
+        // The person saves in the editor while the proposal is being made.
+        let file = root.join(&got.plan.idea.file);
+        let theirs = format!("{}\nTyped by the person.\n", got.plan.content);
+        let other = crate::plans::NewItem { title: "Other".into(), ..item.clone() };
+        let e = plan_propose_with(&root, &pi, &other, &|| fs::write(&file, &theirs).unwrap()).unwrap_err();
+        assert!(e.contains("changed"), "{e}");
+        assert_eq!(fs::read_to_string(&file).unwrap(), theirs, "the person's text stays");
     }
 
     #[test]

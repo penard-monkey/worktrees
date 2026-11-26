@@ -20,6 +20,9 @@ export type MarkdownProps = {
   renderImage?: (src: string, alt: string, title: string | null) => ReactNode;
   /** Link activation. `href` is verbatim from the doc (may be relative). */
   onLink?: (href: string) => void;
+  /** Why a link goes nowhere (it names no file there is): it is drawn dim, with
+   *  this as its tooltip. `null`: an ordinary link. */
+  linkNote?: (href: string) => string | null;
   /**
    * Raw HTML in the source. DEFAULT — and the dock's permanent behaviour — is
    * to render it as literal, visible, inert text (`2026-08-03-files-viewer`
@@ -187,12 +190,13 @@ function inline(tokens: Token[] | undefined, ctx: Ctx, keyBase = "i", depth = 0)
         }
         // An authored link's text is not mined: it already goes somewhere.
         const inner: Ctx = { ...ctx, pathLinks: undefined };
+        const gone = ctx.linkNote?.(href) ?? null;
         return (
           <a
             key={k}
-            className="md-link"
+            className={gone ? "md-link gone" : "md-link"}
             href={href}
-            title={lt.title ?? lt.href}
+            title={gone ?? lt.title ?? lt.href}
             onClick={(e) => { e.preventDefault(); ctx.onLink?.(href); }}
             onAuxClick={(e) => e.preventDefault()}
           >

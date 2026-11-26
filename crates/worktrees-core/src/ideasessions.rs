@@ -36,11 +36,14 @@
 //! machine's launch lock, as `ops::launch` does.
 
 use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::desksessions::{self as desk, Desk, Launch};
+pub use crate::desksessions::{help_has_session_id, new_uuid, transcript_paths, Start};
 use crate::ideas;
 
 /// The folder under the ideas folder that holds conversations' records and
@@ -54,10 +57,6 @@ pub const START: &str = "start.md";
 pub const MARKER: &str = "~idea~";
 /// The tmux name's head.
 pub const SESSION_PREFIX: &str = "worktrees~idea~";
-/// A record larger than this is refused rather than read.
-const RECORD_MAX: u64 = 1024 * 1024;
-/// How long `claude --help` may take before the floor is called unknown.
-const HELP_SECS: u64 = 15;
 
 /// The tmux session of conversation `conv`.
 pub fn session_name(conv: &str) -> String {
@@ -81,6 +80,11 @@ pub fn opener(idea: &str, conv: &str) -> String {
     format!("Read {DESK_DIR}/{idea}/{conv}/{START} and begin.")
 }
 
+/// [`opener`], as the turns are read by it.
+pub fn start_opener(idea: &str, conv: &str) -> crate::turns::Opener {
+    crate::turns::Opener { engine: crate::turns::Engine::Start, text: opener(idea, conv) }
+}
+
 /// One conversation, as the record keeps it.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Conversation {
@@ -97,92 +101,59 @@ pub struct Conversation {
     pub started_from: String,
 }
 
-/// `.desk/<idea id>/sessions.json`. Keys this build does not know are kept.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct Record {
-    #[serde(default)]
-    pub conversations: Vec<Conversation>,
-    #[serde(flatten)]
-    pub other: serde_json::Map<String, serde_json::Value>,
+impl desk::Entry for Conversation {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn session_id(&self) -> &str {
+        &self.session_id
+    }
+    fn set_title(&mut self, title: String) {
+        self.title = title;
+    }
 }
+
+/// `.desk/<idea id>/sessions.json`. Keys this build does not know are kept.
+pub type Record = desk::Record<Conversation>;
 
 fn check_idea(idea: &str) -> Result<(), String> {
     if crate::ulid::is_valid(idea) { Ok(()) } else { Err(format!("not an idea id: {idea:?}")) }
 }
 
 fn check_conv(conv: &str) -> Result<(), String> {
-    if crate::ulid::is_valid(conv) { Ok(()) } else { Err(format!("not a conversation id: {conv:?}")) }
+    desk::check_conv("conversation", conv)
 }
 
-/// `.desk/<idea>`, the idea id checked first.
-fn idea_desk(root: &Path, idea: &str) -> Result<PathBuf, String> {
+/// `.desk/<idea>` and its record, the idea id checked first.
+fn idea_desk(root: &Path, idea: &str) -> Result<Desk, String> {
     check_idea(idea)?;
-    Ok(root.join(DESK_DIR).join(idea))
+    let all = root.join(DESK_DIR);
+    Ok(Desk {
+        root: root.to_path_buf(),
+        dirs: vec![all.clone(), all.join(idea)],
+        file: RECORD,
+        convs: Vec::new(),
+        owner: format!("the idea {idea}"),
+        noun: "conversation",
+        refuse_real: ideas::refuse_real,
+        lock: None,
+    })
 }
 
-/// The record of `idea`, or an empty one when it has none. A link where the
-/// record or its folders should be is refused: `.desk` and everything in it
-/// are real directories and regular files this module made.
+/// The record of `idea`, or an empty one when it has none ([`Desk::read`]).
 pub fn read_record_at(root: &Path, idea: &str) -> Result<Record, String> {
-    let desk = idea_desk(root, idea)?;
-    for d in [root.join(DESK_DIR), desk.clone()] {
-        match fs::symlink_metadata(&d) {
-            Ok(md) if md.file_type().is_dir() => {}
-            Ok(_) => return Err(format!("{} is not a folder", d.display())),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Record::default()),
-            Err(e) => return Err(format!("{}: {e}", d.display())),
-        }
-    }
-    let p = desk.join(RECORD);
-    let md = match fs::symlink_metadata(&p) {
-        Ok(md) => md,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Record::default()),
-        Err(e) => return Err(format!("{}: {e}", p.display())),
-    };
-    if !md.file_type().is_file() {
-        return Err(format!("{} is not a regular file", p.display()));
-    }
-    if md.len() > RECORD_MAX {
-        return Err(format!("{} is too large to read", p.display()));
-    }
-    let text = fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
-    let rec: Record = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", p.display()))?;
-    // A hand-edited record names nothing that is not a conversation of ours.
-    for c in &rec.conversations {
-        check_conv(&c.id)?;
-        if !crate::codex::is_uuid(&c.session_id) {
-            return Err(format!("{}: conversation {} has no usable session id", p.display(), c.id));
-        }
-    }
-    Ok(rec)
-}
-
-fn write_record_at(root: &Path, idea: &str, rec: &Record) -> Result<(), String> {
-    ideas::refuse_real(root)?;
-    let desk = idea_desk(root, idea)?;
-    for d in [root.join(DESK_DIR), desk.clone()] {
-        crate::fsx::make_dir(&d).map_err(|e| format!("{}: {e}", d.display()))?;
-    }
-    let mut text = serde_json::to_string_pretty(rec).map_err(|e| e.to_string())?;
-    text.push('\n');
-    crate::fsx::write_atomic(&desk.join(RECORD), text.as_bytes(), None).map_err(|e| format!("{RECORD}: {e}"))
+    idea_desk(root, idea)?.read()
 }
 
 /// The conversation `conv` of `idea`.
 pub fn find_at(root: &Path, idea: &str, conv: &str) -> Result<Conversation, String> {
     check_conv(conv)?;
-    read_record_at(root, idea)?
-        .conversations
-        .into_iter()
-        .find(|c| c.id == conv)
-        .ok_or_else(|| format!("the idea {idea} has no conversation {conv}"))
+    idea_desk(root, idea)?.find(conv)
 }
 
 /// The idea's conversations, newest first.
 pub fn list_at(root: &Path, idea: &str) -> Result<Vec<Conversation>, String> {
-    let mut v = read_record_at(root, idea)?.conversations;
-    v.sort_by(|a, b| b.id.cmp(&a.id));
-    Ok(v)
+    idea_desk(root, idea)?.list()
 }
 
 /// What `start.md` says: the fixed template, filled with the idea's id, its
@@ -206,26 +177,6 @@ pub fn start_text(idea: &str, file: &str, conv: &str) -> String {
     )
 }
 
-/// `YYYY-MM-DDTHH:MM:SSZ` for now.
-fn now_iso() -> String {
-    let secs = crate::sysclock::now_epoch();
-    let (y, m, d) = crate::attach::civil_from_days(secs.div_euclid(86_400));
-    let s = secs.rem_euclid(86_400);
-    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", s / 3600, s / 60 % 60, s % 60)
-}
-
-/// A random (v4) UUID, lower case: Claude's session id.
-pub fn new_uuid() -> String {
-    let (a, b) = (crate::fsx::random_u64(), crate::fsx::random_u64());
-    let mut bytes = [0u8; 16];
-    bytes[..8].copy_from_slice(&a.to_be_bytes());
-    bytes[8..].copy_from_slice(&b.to_be_bytes());
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    let h: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
-}
-
 /// A new conversation on `idea`, up to the launch: the history copy, the
 /// conversation's folder and `start.md`, and its record entry with the
 /// session id Claude will be given. Nothing is launched.
@@ -238,41 +189,29 @@ pub fn prepare_at(root: &Path, idea: &str) -> Result<Conversation, String> {
     }
     let copy = ideas::history_copy_at(root, idea, doc.content.as_bytes())?;
     let started_from = copy.strip_prefix(root).unwrap_or(&copy).to_string_lossy().into_owned();
-    let mut rec = read_record_at(root, idea)?;
-    let conv = crate::ulid::new();
     let desk = idea_desk(root, idea)?;
-    let dir = desk.join(&conv);
-    for d in [root.join(DESK_DIR), desk.clone(), dir.clone()] {
-        crate::fsx::make_dir(&d).map_err(|e| format!("{}: {e}", d.display()))?;
-    }
+    desk.read::<Conversation>()?;
+    let conv = crate::ulid::new();
+    let dir = desk.make_conv_dir(&conv)?;
     ideas::create_new(&dir.join(START), start_text(idea, &doc.idea.file, &conv).as_bytes()).map_err(|e| format!("{START}: {e}"))?;
-    let n = rec.conversations.len() + 1;
-    let c = Conversation {
-        id: conv,
-        harness: crate::provider::CLAUDE.id.to_string(),
-        session_id: new_uuid(),
-        title: format!("Conversation {n}"),
-        started: now_iso(),
-        started_from,
-    };
-    rec.conversations.push(c.clone());
-    write_record_at(root, idea, &rec)?;
-    Ok(c)
+    desk.edit(|rec: &mut Record| {
+        let c = Conversation {
+            id: conv,
+            harness: crate::provider::CLAUDE.id.to_string(),
+            session_id: new_uuid(),
+            title: format!("Conversation {}", rec.conversations.len() + 1),
+            started: desk::now_iso(),
+            started_from,
+        };
+        rec.conversations.push(c.clone());
+        Ok(c)
+    })
 }
 
 /// Retitle conversation `conv`. A title is one line of at most 120 characters.
 pub fn rename_at(root: &Path, idea: &str, conv: &str, title: &str) -> Result<Conversation, String> {
     check_conv(conv)?;
-    let title: String = title.split(['\n', '\r']).next().unwrap_or("").trim().chars().filter(|c| !c.is_control()).take(120).collect();
-    if title.is_empty() {
-        return Err("a conversation needs a title".into());
-    }
-    let mut rec = read_record_at(root, idea)?;
-    let c = rec.conversations.iter_mut().find(|c| c.id == conv).ok_or_else(|| format!("the idea {idea} has no conversation {conv}"))?;
-    c.title = title;
-    let out = c.clone();
-    write_record_at(root, idea, &rec)?;
-    Ok(out)
+    idea_desk(root, idea)?.rename(conv, title)
 }
 
 /// Forget conversation `conv`: its record entry and its folder. Claude's
@@ -280,48 +219,7 @@ pub fn rename_at(root: &Path, idea: &str, conv: &str, title: &str) -> Result<Con
 /// first.
 pub fn remove_at(root: &Path, idea: &str, conv: &str) -> Result<(), String> {
     check_conv(conv)?;
-    ideas::refuse_real(root)?;
-    let mut rec = read_record_at(root, idea)?;
-    let before = rec.conversations.len();
-    rec.conversations.retain(|c| c.id != conv);
-    if rec.conversations.len() == before {
-        return Err(format!("the idea {idea} has no conversation {conv}"));
-    }
-    write_record_at(root, idea, &rec)?;
-    let dir = idea_desk(root, idea)?.join(conv);
-    match fs::symlink_metadata(&dir) {
-        // `remove_dir_all` removes a link inside without following it.
-        Ok(md) if md.file_type().is_dir() => fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display())),
-        Ok(_) => fs::remove_file(&dir).map_err(|e| format!("{}: {e}", dir.display())),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("{}: {e}", dir.display())),
-    }
-}
-
-/// Where Claude keeps conversation `session_id`'s transcript for a session
-/// started in `root`: `<claude root>/projects/<root, mangled>/<id>.jsonl`.
-/// Claude mangles the directory it sees, which is the RESOLVED one (a link
-/// in the path, macOS's `/tmp`), so the canonical path is asked first.
-pub fn transcript_paths(claude_root: &Path, root: &Path, session_id: &str) -> Vec<PathBuf> {
-    if !crate::codex::is_uuid(session_id) {
-        return Vec::new();
-    }
-    let mut dirs = Vec::new();
-    if let Ok(c) = fs::canonicalize(root) {
-        dirs.push(c.to_string_lossy().into_owned());
-    }
-    let raw = root.to_string_lossy().into_owned();
-    if !dirs.contains(&raw) {
-        dirs.push(raw);
-    }
-    let mut paths: Vec<PathBuf> =
-        dirs.iter().map(|d| PathBuf::from(crate::project::claude_dir_in(claude_root, d)).join(format!("{session_id}.jsonl"))).collect();
-    // A conversation resumed from another folder keeps its file in the
-    // folder it was born in (`agent::transcript_path`).
-    if !paths.iter().any(|p| p.is_file()) {
-        paths.extend(crate::agent::find_transcript(claude_root, session_id));
-    }
-    paths
+    idea_desk(root, idea)?.remove::<Conversation>(conv)
 }
 
 /// The idea whose record has conversation `conv`: the folder
@@ -349,131 +247,61 @@ pub fn idea_of_conv(root: &Path, conv: &str) -> Option<String> {
 /// sessions whose panes sit under it (`Project::live_session_in`). Inside a
 /// project, an idea session would be taken for that place's.
 pub fn check_root(root: &Path, roots: &[String]) -> Result<(), String> {
-    let mine = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    for r in roots {
-        let theirs = fs::canonicalize(r).unwrap_or_else(|_| PathBuf::from(r));
-        if mine.starts_with(&theirs) || theirs.starts_with(&mine) {
-            return Err(format!(
-                "the ideas folder {} is inside the registered project {r} (or holds it): conversations are not started there, \
-                 because the project's places would take them for their own. Point {} at a folder outside every project.",
-                root.display(),
-                ideas::OVERRIDE_ENV
-            ));
-        }
+    match desk::overlapping(root, roots) {
+        None => Ok(()),
+        Some(r) => Err(format!(
+            "the ideas folder {} is inside the registered project {r} (or holds it): conversations are not started there, \
+             because the project's places would take them for their own. Point {} at a folder outside every project.",
+            root.display(),
+            ideas::OVERRIDE_ENV
+        )),
     }
-    Ok(())
 }
 
 // ── launching ───────────────────────────────────────────────────────────────
 
-/// Whether Claude's `--help` lists `--session-id`: the floor a new
-/// conversation needs, so its id can be chosen and recorded first.
-pub fn help_has_session_id(help: &str) -> bool {
-    help.split(|c: char| c.is_whitespace() || c == ',').any(|w| w == "--session-id")
-}
-
-/// Ask the installed Claude (`program`, the configured command's first word)
-/// whether it takes `--session-id`. `--help` prints and exits: it starts no
-/// session and runs no hook.
-fn session_id_floor(program: &str, cwd: &Path) -> Result<(), String> {
-    let mut cmd = crate::childenv::command(program);
-    cmd.arg("--help").current_dir(cwd);
-    let out = crate::proc::run_deadline(cmd, HELP_SECS).map_err(|e| format!("could not run `{program} --help`: {e}"))?;
-    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    if help_has_session_id(&text) {
-        Ok(())
-    } else {
-        Err(format!(
-            "this Claude does not take --session-id (`{program} --help` does not list it), which an idea conversation needs \
-             so its transcript can be found: update Claude Code"
-        ))
-    }
-}
-
-/// How a conversation is launched: fresh, on its opener, or resumed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Start {
-    Fresh,
-    Resume,
+/// The launch of conversation `c` of `idea` in `root`: on its opener when
+/// fresh, with none when resumed.
+fn launch<'a>(root: &'a Path, idea: &str, c: &'a Conversation, session: &'a str, how: Start) -> Result<Launch<'a>, String> {
+    check_idea(idea)?;
+    Ok(Launch {
+        cwd: root,
+        session,
+        conv: &c.id,
+        session_id: &c.session_id,
+        how,
+        opener: (how == Start::Fresh).then(|| opener(idea, &c.id)),
+        settings: None,
+        env: Vec::new(),
+        noun: "conversation",
+        a_kind: "an idea conversation",
+        kinds: "idea conversations",
+    })
 }
 
 /// The `pane0` that runs Claude for conversation `c` of `idea` in tmux
-/// session `session`: the configured Claude command (`ai_cmd`, whose program
-/// must be Claude), `--name`, the session id or its resume, the prompt
-/// plugin, and on a fresh start the opener. The pane ends with Claude, so a
-/// conversation whose Claude exits has no session: it reads as ended.
+/// session `session` ([`Launch::pane0`]).
 pub fn pane0(ai_cmd: &str, idea: &str, c: &Conversation, session: &str, how: Start, prompt_hook: Vec<String>) -> Result<String, String> {
-    let line = launch_line(ai_cmd, idea, c, session, how, prompt_hook)?;
-    Ok(format!("exec \"${{SHELL:-/bin/sh}}\" -ic {}", crate::tmux::sq(&format!("exec {line}"))))
+    launch(Path::new(""), idea, c, session, how)?.pane0(ai_cmd, prompt_hook)
 }
 
 /// [`pane0`]'s command line, before it is quoted for tmux: what the inner
 /// shell runs.
 pub fn launch_line(ai_cmd: &str, idea: &str, c: &Conversation, session: &str, how: Start, prompt_hook: Vec<String>) -> Result<String, String> {
-    check_idea(idea)?;
-    check_conv(&c.id)?;
-    if !crate::codex::is_uuid(&c.session_id) {
-        return Err(format!("conversation {} has no usable session id", c.id));
-    }
-    let adapter = crate::harness::for_cmd(ai_cmd).filter(|_| !ai_cmd.is_empty());
-    if adapter.map(|a| a.provider().id) != Some(crate::provider::CLAUDE.id) {
-        return Err(format!("idea conversations run Claude, and the configured command ({ai_cmd:?}) is not Claude"));
-    }
-    let mut ai = crate::profile::AiLaunch::plain(ai_cmd);
-    ai.prompt_hook = prompt_hook;
-    match how {
-        Start::Fresh => {
-            ai.session_id = Some(c.session_id.clone());
-            ai.opener = Some(opener(idea, &c.id));
-        }
-        Start::Resume => {
-            ai.resume = true;
-            ai.resume_id = Some(c.session_id.clone());
-        }
-    }
-    Ok(format!("{}{}", ai.shell_prefix(), ai.launch_cmd(session)))
+    launch(Path::new(""), idea, c, session, how)?.line(ai_cmd, prompt_hook)
 }
 
-/// Launch conversation `conv` of `idea` in `root`: refused while its session
-/// runs, past the live-agent limit (a lane's words), below Claude's
-/// `--session-id` floor (a fresh start), and for an ideas folder inside a
-/// registered project. Answers the tmux session's name.
+/// Launch conversation `conv` of `idea` in `root` ([`Launch::run`]), refused
+/// for an ideas folder inside a registered project. Answers the tmux
+/// session's name.
 pub fn launch_at(root: &Path, idea: &str, conv: &str, how: Start) -> Result<String, String> {
     check_idea(idea)?;
     check_conv(conv)?;
     check_root(root, &crate::registry::read_lenient().roots())?;
     let c = find_at(root, idea, conv)?;
     let session = session_name(&c.id);
-    if crate::tmux::session_exists(&session) {
-        return Err(format!("conversation {conv} is already running (tmux session {session})"));
-    }
-    let ai_cmd = crate::config::resolve_ai_cmd(Some(crate::provider::CLAUDE.id));
-    let program = ai_cmd.split_whitespace().next().unwrap_or("").to_string();
-    if how == Start::Fresh {
-        session_id_floor(&program, root)?;
-    }
-    let mut ai = crate::profile::AiLaunch::plain(&ai_cmd);
-    let claude = crate::harness::CLAUDE;
-    crate::quota::gate(claude, &ai, crate::sysclock::now_epoch()).map_err(refusal)?;
-    let exclude = [session.clone()];
-    let provider = Some(crate::provider::CLAUDE.id);
-    crate::guard::admit(provider, false, &exclude).map_err(refusal)?;
-    ai.prompt_hook = crate::ops::prompt_hook_for(&ai);
-    let pane0 = pane0(&ai_cmd, idea, &c, &session, how, ai.prompt_hook)?;
-    // The count that decides, under the machine's lock, held across
-    // `new-session` so parallel launches count each other (`guard`).
-    let _lock = crate::guard::launch_lock(|| {});
-    crate::guard::admit(provider, false, &exclude).map_err(refusal)?;
-    let dir = root.to_string_lossy().into_owned();
-    crate::tmux::new_session(&session, &dir, &pane0)?;
-    crate::tmux::tune_session(&session);
+    launch(root, idea, &c, &session, how)?.run()?;
     Ok(session)
-}
-
-fn refusal(r: crate::harness::Refusal) -> String {
-    match r {
-        crate::harness::Refusal::Soft(w) | crate::harness::Refusal::Hard(w) => w,
-    }
 }
 
 /// A new conversation: [`prepare_at`], then [`launch_at`]. A launch that is
@@ -496,15 +324,7 @@ pub fn start_at(root: &Path, idea: &str) -> Result<(Conversation, String), Strin
 /// Claude's transcript stay. Answers whether a session was running.
 pub fn close(conv: &str) -> Result<bool, String> {
     check_conv(conv)?;
-    let session = session_name(conv);
-    if !crate::tmux::session_exists(&session) {
-        return Ok(false);
-    }
-    crate::tmux::kill_session(&session);
-    if crate::tmux::session_exists(&session) {
-        return Err(format!("could not end tmux session {session}"));
-    }
-    Ok(true)
+    desk::close(&session_name(conv))
 }
 
 #[cfg(test)]

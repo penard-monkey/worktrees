@@ -375,7 +375,12 @@ fn spawn_writer<R: Runtime>(app: AppHandle<R>, dir: PathBuf) {
     });
 }
 
-fn monitors<R: Runtime>(w: &WebviewWindow<R>) -> Vec<(f64, f64, f64, f64)> {
+/// A window's frame now, as logical units.
+pub fn frame_of<R: Runtime>(w: &WebviewWindow<R>) -> Option<Frame> {
+    current(w).map(|(f, ..)| f)
+}
+
+pub fn monitors<R: Runtime>(w: &WebviewWindow<R>) -> Vec<(f64, f64, f64, f64)> {
     w.available_monitors()
         .unwrap_or_default()
         .iter()

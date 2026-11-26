@@ -47,6 +47,10 @@ export type Turn = {
   at: number | null; user: string | null; reply: string; tools: string[]; truncated: boolean;
   /** Claude's own entry, never the person's message. Older hosts omit it. */
   notice?: Notice;
+  /** The engine launched the conversation on this line (`turns::Engine`): no
+   *  person's message, and never to be known by its words. A workspace chat's
+   *  and an idea conversation's only; older hosts omit it. */
+  engine?: "start" | "fold";
   /** The turn in order (`turns::Step`): absent from a host that predates it. */
   steps?: Step[];
 };
@@ -442,7 +446,7 @@ export type ToolCall = { name: string; call_id?: string; summary?: string; faile
 export type Item =
   | { k: "sep"; key: string; at: number }
   | { k: "earlier"; key: string }
-  | { k: "user"; key: string; text: string; at: number | null; midTurn?: boolean; cut?: true; turnId?: string }
+  | { k: "user"; key: string; text: string; at: number | null; midTurn?: boolean; cut?: true; turnId?: string; engine?: Turn["engine"] }
   | { k: "notice"; key: string; notice: Notice; at: number | null }
   | { k: "reply"; key: string; text: string; tools: string[]; calls: ToolCall[]; truncated: boolean; at: number | null; label: boolean; turnId?: string }
   | { k: "asked"; key: string; step: AskedStep; label: boolean }
@@ -522,7 +526,7 @@ export function itemsOf(shortTurns: Turn[], answered: Answered[], pending: Pendi
       lastWasAgent = t.notice.kind === "peer_message";
     } else if (t.user === null) out.push({ k: "earlier", key: `e${i}` });
     else {
-      out.push({ k: "user", key: `u${i}`, text: t.user, at: t.at, ...(userCut(t) ? { cut: true as const, ...(offer(t) ? { turnId: offer(t) } : {}) } : {}) });
+      out.push({ k: "user", key: `u${i}`, text: t.user, at: t.at, ...(t.engine ? { engine: t.engine } : {}), ...(userCut(t) ? { cut: true as const, ...(offer(t) ? { turnId: offer(t) } : {}) } : {}) });
       lastWasAgent = false;
     }
     if (!t.steps?.length) {
@@ -1149,22 +1153,43 @@ export function announcement(b: Bundle, agent: string, promptNow: string | null,
 // ── the store: one view per place, keyed by its path ────────────────────────
 
 /** Whom a chat talks to: a place's agent (`agent_*` rows, by `repo` and
- *  `slug`), or, with `idea`, an idea conversation (phase S): the `idea_*`
- *  console rows, by the idea's id and the conversation's. An idea target's
- *  `path` is only the view's key (`ideaChatKey`), never a folder, and its
- *  `repo`/`slug` are empty. No slash commands and no attachments reach an
- *  idea conversation. */
-export type Target = { repo: string; slug: string; path: string; session: string; idea?: IdeaConv };
+ *  `slug`), or a DESK chat, which belongs to no place: with `idea`, an idea
+ *  conversation (phase S, the `idea_*` console rows), and with `ws`, a
+ *  workspace's chat (the `workspace_*` ones), by the idea's or the workspace's
+ *  id and the chat's. A desk target's `path` is only the view's key
+ *  (`ideaChatKey`, `wsChatKey`), never a folder, and its `repo`/`slug` are
+ *  empty. No slash commands and no attachments reach one. */
+export type Target = { repo: string; slug: string; path: string; session: string; idea?: IdeaConv; ws?: IdeaConv };
 export type IdeaConv = { id: string; conv: string };
 
 /** The chat-view key of an idea conversation: no place's path starts so. */
 export function ideaChatKey(c: IdeaConv): string {
   return `idea:${c.id}:${c.conv}`;
 }
+/** …and of a workspace's chat. */
+export function wsChatKey(c: IdeaConv): string {
+  return `ws:${c.id}:${c.conv}`;
+}
 
-/** An idea conversation's row arguments: the idea and the conversation. */
-function ideaArgs(t: Target): IdeaConv {
-  return { id: t.idea!.id, conv: t.idea!.conv };
+/** The rows of the two desk kinds, act by act: the same bodies on the host. */
+const DESK_ROWS = {
+  idea: {
+    turns: "idea_turns", turn_text: "idea_turn_text", tool_call: "idea_tool_call", prompt: "idea_prompt", answer: "idea_answer",
+    answer_text: "idea_answer_text", answer_many: "idea_answer_many", send: "idea_send", interrupt: "idea_interrupt",
+  },
+  ws: {
+    turns: "workspace_turns", turn_text: "workspace_turn_text", tool_call: "workspace_tool_call", prompt: "workspace_prompt", answer: "workspace_answer",
+    answer_text: "workspace_answer_text", answer_many: "workspace_answer_many", send: "workspace_send", interrupt: "workspace_interrupt",
+  },
+} as const;
+/** It belongs to no place. */
+export const isDesk = (t: Pick<Target, "idea" | "ws">): boolean => !!(t.idea || t.ws);
+/** A desk target's rows, or null for a place's. */
+function deskOf(t: Target) {
+  const c = t.idea ?? t.ws;
+  if (!c) return null;
+  const rows = DESK_ROWS[t.idea ? "idea" : "ws"];
+  return <T>(act: keyof typeof rows, more: Record<string, unknown> = {}): Promise<T> => invoke<T>(rows[act], { id: c.id, conv: c.conv, ...more });
 }
 type Load<T> = { data: T | null; error: string | null; loading: boolean; at: number | null };
 
@@ -1281,8 +1306,9 @@ export function loadTurns(t: Target): Promise<void> {
   return once(`t|${t.path}`, async () => {
     put(t.path, { turns: { ...viewOf(t.path).turns, loading: true } });
     try {
-      const r = t.idea
-        ? await invoke<AgentTurns>("idea_turns", { ...ideaArgs(t), n: TURNS_MAX })
+      const desk = deskOf(t);
+      const r = desk
+        ? await desk<AgentTurns>("turns", { n: TURNS_MAX })
         : await invoke<AgentTurns>("agent_turns", { repo: t.repo, slug: t.slug, session: t.session, n: TURNS_MAX });
       const cur = viewOf(t.path);
       put(t.path, {
@@ -1330,8 +1356,9 @@ function readFull(t: Target, id: string, quiet: boolean): Promise<void> {
   return once(`f|${t.path}|${id}`, async () => {
     if (!quiet) land({ state: "loading" });
     try {
-      const r = t.idea
-        ? await invoke<AgentTurnText>("idea_turn_text", { ...ideaArgs(t), turn_id: id })
+      const desk = deskOf(t);
+      const r = desk
+        ? await desk<AgentTurnText>("turn_text", { turn_id: id })
         : await invoke<AgentTurnText>("agent_turn_text", { repo: t.repo, slug: t.slug, turn_id: id });
       land({ state: "done", turn: r.turn });
     } catch (e) {
@@ -1378,8 +1405,9 @@ function readCall(t: Target, id: string): Promise<void> {
   return once(`c|${t.path}|${id}`, async () => {
     land({ state: "loading" });
     try {
-      const r = t.idea
-        ? await invoke<AgentToolCall>("idea_tool_call", { ...ideaArgs(t), call_id: id })
+      const desk = deskOf(t);
+      const r = desk
+        ? await desk<AgentToolCall>("tool_call", { call_id: id })
         : await invoke<AgentToolCall>("agent_tool_call", { repo: t.repo, slug: t.slug, call_id: id });
       land({ state: "done", text: inputText(r.input), truncated: r.truncated, bytes: r.bytes });
     } catch (e) {
@@ -1422,8 +1450,9 @@ export function loadPrompt(t: Target): Promise<void> {
   return once(`p|${t.path}`, async () => {
     put(t.path, { prompt: { ...viewOf(t.path).prompt, loading: true } });
     try {
-      const r = t.idea
-        ? await invoke<AgentPrompt>("idea_prompt", ideaArgs(t))
+      const desk = deskOf(t);
+      const r = desk
+        ? await desk<AgentPrompt>("prompt")
         : await invoke<AgentPrompt>("agent_prompt", { repo: t.repo, slug: t.slug });
       const cur = viewOf(t.path);
       const chose = cur.selected !== null || cur.ticks !== null || !!cur.answerText || !!cur.boxText;
@@ -1559,8 +1588,8 @@ async function base64Of(f: Blob): Promise<string> {
 /** Upload each file the host does not have yet, in order. The paths, or
  *  null when one was refused: then nothing is sent, and the chips say which. */
 async function uploadAll(t: Target): Promise<string[] | null> {
-  // An idea conversation has no place to keep a file in (phase S).
-  if (t.idea) return [];
+  // A desk chat has no place to keep a file in.
+  if (isDesk(t)) return [];
   const paths: string[] = [];
   for (const a of viewOf(t.path).attachments) {
     if (a.path) { paths.push(a.path); continue; }
@@ -1599,8 +1628,9 @@ export async function stopTurn(t: Target, agent: string): Promise<void> {
   if (viewOf(t.path).stopping) return;
   put(t.path, { stopping: true, stopWords: null, sendWords: null });
   try {
-    const r = t.idea
-      ? await invoke<AgentStopped>("idea_interrupt", ideaArgs(t))
+    const desk = deskOf(t);
+    const r = desk
+      ? await desk<AgentStopped>("interrupt")
       : await invoke<AgentStopped>("agent_interrupt", { repo: t.repo, slug: t.slug });
     put(t.path, {
       stopping: false, stopped: r.interrupted,
@@ -1649,8 +1679,9 @@ export async function sendDraft(t: Target, agent: string, rules: SendRules = ONE
     const held = messagesOf(viewOf(t.path).turns.data?.turns ?? []).flatMap((m) => (m.at !== null && isRecordOf(text, m.text) ? [m.at] : []));
     const line = { text };
     put(t.path, { sentLine: line });
-    const r = t.idea
-      ? await invoke<AgentSent>("idea_send", { ...ideaArgs(t), text })
+    const desk = deskOf(t);
+    const r = desk
+      ? await desk<AgentSent>("send", { text })
       : await invoke<AgentSent>("agent_send", { repo: t.repo, slug: t.slug, session: t.session, text });
     const cur = viewOf(t.path);
     let sentId: number | null = null;
@@ -1691,8 +1722,8 @@ export async function sendDraft(t: Target, agent: string, rules: SendRules = ONE
 /** Read the agent's slash commands, at most once a minute unless `force`. */
 export async function loadCommands(t: Target, force = false): Promise<void> {
   const c = viewOf(t.path).commands;
-  // An idea conversation takes no slash commands (phase S): nothing to list.
-  if (t.idea) return;
+  // A desk chat takes no slash commands: nothing to list.
+  if (isDesk(t)) return;
   if (c.loading || (!force && c.at !== null && Date.now() - c.at < 60_000 && c.data?.session === t.session)) return;
   put(t.path, { commands: { ...c, loading: true } });
   try {
@@ -1713,7 +1744,7 @@ export async function sendCommand(t: Target, name: string, args: string, words: 
   const v = viewOf(t.path);
   if (v.sending) return;
   const draft = v.draft;
-  if (t.idea) return;
+  if (isDesk(t)) return;
   put(t.path, { sending: true, sendWords: null, stopWords: null, attachWords: null });
   try {
     const r = await invoke<AgentCommandRun>("agent_command", { repo: t.repo, slug: t.slug, session: t.session, name, args: args || null });
@@ -1788,10 +1819,11 @@ export async function sendAnswer(t: Target, agent: string): Promise<void> {
   if (!way.open || (way.how === "field" && !text.trim()) || draftProblem(text, way.how === "field" ? "answer" : "note")) return;
   put(t.path, { answering: true, answerWords: null });
   try {
-    const r = t.idea
+    const desk = deskOf(t);
+    const r = desk
       ? text.trim()
-        ? await invoke<AgentAnswer>("idea_answer_text", { ...ideaArgs(t), choice: c.n, fingerprint: d.fingerprint, text })
-        : await invoke<AgentAnswer>("idea_answer", { ...ideaArgs(t), choice: c.n, fingerprint: d.fingerprint })
+        ? await desk<AgentAnswer>("answer_text", { choice: c.n, fingerprint: d.fingerprint, text })
+        : await desk<AgentAnswer>("answer", { choice: c.n, fingerprint: d.fingerprint })
       : text.trim()
         ? await invoke<AgentAnswer>("agent_answer_text", { repo: t.repo, slug: t.slug, choice: c.n, fingerprint: d.fingerprint, text })
         : await invoke<AgentAnswer>("agent_answer", { repo: t.repo, slug: t.slug, choice: c.n, fingerprint: d.fingerprint });
@@ -1830,10 +1862,11 @@ export async function sendMany(t: Target): Promise<void> {
   try {
     let fingerprint = d.fingerprint;
     if (fill) {
-      if (t.idea) await invoke<AgentFilled>("idea_answer_text", { ...ideaArgs(t), choice: freeBox.n, fingerprint, text: v.boxText });
+      const desk = deskOf(t);
+      if (desk) await desk<AgentFilled>("answer_text", { choice: freeBox.n, fingerprint, text: v.boxText });
       else await invoke<AgentFilled>("agent_answer_text", { repo: t.repo, slug: t.slug, choice: freeBox.n, fingerprint, text: v.boxText });
-      const now = t.idea
-        ? await invoke<AgentPrompt>("idea_prompt", ideaArgs(t))
+      const now = desk
+        ? await desk<AgentPrompt>("prompt")
         : await invoke<AgentPrompt>("agent_prompt", { repo: t.repo, slug: t.slug });
       put(t.path, { prompt: { data: now, error: null, loading: false, at: Date.now() } });
       if (!now.waiting || !now.readable || !now.multi || !now.choices.some((c) => c.n === freeBox.n && c.checked)) {
@@ -1843,8 +1876,9 @@ export async function sendMany(t: Target): Promise<void> {
       }
       fingerprint = now.fingerprint;
     }
-    const r = t.idea
-      ? await invoke<AgentAnsweredMany>("idea_answer_many", { ...ideaArgs(t), choices: want, fingerprint })
+    const desk = deskOf(t);
+    const r = desk
+      ? await desk<AgentAnsweredMany>("answer_many", { choices: want, fingerprint })
       : await invoke<AgentAnsweredMany>("agent_answer_many", { repo: t.repo, slug: t.slug, choices: want, fingerprint });
     const cur = viewOf(t.path);
     put(t.path, { ...NO_CHOICE, answering: false, answered: [...cur.answered, { label: r.labels.join(", "), at: Date.now(), confirmed: r.confirmed }] });

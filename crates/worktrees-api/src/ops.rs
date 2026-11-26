@@ -84,6 +84,23 @@ pub fn set_note(ctx: &Ctx, repo: String, slug: String, note: String) -> Result<(
     })
 }
 
+/// Adoption from the app's menu or a phone (lane-children §8): draw `slug`
+/// under `under` — `(main)` for the top level, a place of this project, or
+/// `None` to put it back on its starter's line. Display only; the core call
+/// is `ops::set_under`, which refuses a cycle. Recorded as moved by the
+/// caller's principal (`owner` at the console).
+pub fn set_place_under(ctx: &Ctx, repo: String, slug: String, under: Option<String>) -> Result<String, String> {
+    use worktrees_core::ops::UnderTarget;
+    let project = worktrees_core::Project::discover(std::path::Path::new(&repo)).map_err(|e| e.msg)?;
+    let target = match under.as_deref().map(str::trim) {
+        None | Some("") => UnderTarget::Reset,
+        Some(worktrees_core::lineage::MAIN) => UnderTarget::Top,
+        Some(t) => UnderTarget::Place(t.to_string()),
+    };
+    let by = ctx.by().map(|b| b.principal.as_str().to_string()).unwrap_or_else(|| worktrees_core::authz::PrincipalId::OWNER.to_string());
+    worktrees_core::ops::set_under(&project, &slug, target, &by)
+}
+
 /// Drop a reference to one place into ANOTHER place's agent session.
 ///
 /// The nav drag's landing. Within one project, into a Claude pane, it is the

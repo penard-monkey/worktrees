@@ -225,7 +225,13 @@ async function main(page, tag, name) {
   await page.waitForSelector("[data-testid=ws-ov-work]");
   const doc = () => page.evaluate((i) => window.__mock.ideaFile(i).content, id);
   const work = () => rows(page, "[data-testid=ws-ov-work]");
-  ok((await reachable(page, "[data-testid=ws-ov-review], [data-testid=ws-ov-link-place], [data-testid=ws-ov-bring]")).every(Boolean), `${tag} overview: every button is reachable`);
+  ok((await reachable(page, "[data-testid=ws-ov-review], [data-testid=ws-ov-link-place], [data-testid=ws-ov-plan-projects]")).every(Boolean), `${tag} overview: every button is reachable`);
+
+  // ── the Plan tab: the plan's Projects, beside it ──
+  await page.click("[data-testid=ws-ov-plan-projects]");
+  await page.waitForSelector("[data-testid=ws-ov-bring]").catch(async () => { await page.click("[data-testid=ws-side-toggle]"); });
+  await page.waitForSelector("[data-testid=ws-ov-bring]");
+  ok((await reachable(page, "[data-testid=ws-ov-review], [data-testid=ws-ov-link-place], [data-testid=ws-ov-bring]")).every(Boolean), `${tag} Plan tab: every button is reachable`);
 
   // ── Create…: the dialog, filled in and waiting ──
   await page.click("[data-testid=ws-ov-bring][data-name=cfg]");
@@ -250,9 +256,11 @@ async function main(page, tag, name) {
   ok(await until(page, () => [...document.querySelectorAll("[data-testid=ws-ov-project]")].some((r) => r.textContent.includes("ans") && r.dataset.state === "registered"), null, 15000), `${tag} once cloned, the plan says registered, and the overview is still shown`);
 
   // ── the review is read-only; Start ──
+  await page.click("[data-testid=ws-tab][data-tab=overview]");
+  await page.waitForSelector("[data-testid=ws-overview]");
   await page.locator("[data-testid=ws-ov-work]").nth(0).locator("[data-testid=ws-ov-review]").click();
   await page.waitForSelector("[data-testid=start-review]");
-  ok(await page.evaluate(() => document.querySelector("[data-testid=start-brief]").readOnly) && await page.locator("[data-testid=start-edit]").count() === 1, `${tag} overview: the brief is read-only, Edit in Ideas beside it`);
+  ok(await page.evaluate(() => document.querySelector("[data-testid=start-brief]").readOnly) && await page.locator("[data-testid=start-edit]").count() === 1, `${tag} overview: the brief is read-only, Edit the plan beside it`);
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/overview-review-${name}.png` });
   await page.click("[data-testid=start-go]");
   ok(await until(page, () => document.querySelector("[data-testid=start-done]")), `${tag} overview: Start starts it`);
@@ -281,9 +289,10 @@ async function main(page, tag, name) {
 /** The list of places is slow (a git fan-out) and the plan's line is not: the
  *  item just started must never read "place removed" in between. */
 async function slow(page, tag) {
+  // `restore_last: false`: it boots at Home (restore is on by default since 2026-11-25).
   await page.addInitScript((s) => {
     if (!sessionStorage.getItem("wt-mock-ui-state")) sessionStorage.setItem("wt-mock-ui-state", JSON.stringify(s));
-  }, { places_side: "left", dock_side: "right", settings_rev: 5, nav_pinned: true, nav_view: "workspaces", beta_ideas: true });
+  }, { places_side: "left", dock_side: "right", settings_rev: 5, nav_pinned: true, nav_view: "workspaces", beta_ideas: true, restore_last: false });
   for (const [where, sel, go] of [
     ["overview", "ws-ov", async () => {
       await page.goto(`${BASE}/?ideas=seed&workspaces=1&slowlist=900`);

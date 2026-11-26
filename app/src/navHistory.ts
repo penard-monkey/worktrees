@@ -5,13 +5,19 @@
 // the current one, or nothing. `app/scripts/navhistory-check.mjs` evaluates
 // this file as-is. Design: docs/proposals/nav-history.md.
 
-export type DockTab = "files" | "terminal" | "docs" | "plan" | "prs";
+export type DockTab = "files" | "terminal" | "docs" | "plan" | "prs" | "workspace";
 
-/** What the panes show. `place: null` is Home. `dock.file` only means anything
+/** A workspace view's tabs (wsview.ts says which are drawn). */
+export type WsTab = "overview" | "memory" | "plan" | "ideas" | "chats";
+
+/** What the panes show. `place: null` is Home, or the workspace view when `ws`
+ *  names one: its id, its tab, on Ideas the idea picked (on Memory the file), and the chat in its
+ *  middle column. `dock.file` only means anything
  *  on the Files tab and `dock.shell` only on Terminal — `normalize` drops the
  *  other, so two locations that LOOK the same compare equal. */
 export type Loc = {
   place: { repo: string; slug: string } | null;
+  ws?: { id: string; tab: WsTab; doc?: string; chat?: string };
   agent?: string;
   dock?: { tab: DockTab; file?: { path: string; line?: number; col?: number }; shell?: number };
 };
@@ -30,7 +36,7 @@ export const COALESCE_MS = 600;
 export const empty = (): History => ({ entries: [], index: -1, at: 0 });
 
 export const normalize = (l: Loc): Loc => {
-  if (!l.place) return { place: null };
+  if (!l.place) return l.ws ? { place: null, ws: { id: l.ws.id, tab: l.ws.tab, ...((l.ws.tab === "ideas" || l.ws.tab === "memory") && l.ws.doc ? { doc: l.ws.doc } : {}), ...(l.ws.chat ? { chat: l.ws.chat } : {}) } } : { place: null };
   const out: Loc = { place: { repo: l.place.repo, slug: l.place.slug } };
   if (l.agent) out.agent = l.agent;
   if (l.dock) {
@@ -47,6 +53,10 @@ export const normalize = (l: Loc): Loc => {
 
 /** Identity of a location — what "the same place twice" means. */
 export const locKey = (l: Loc): string => JSON.stringify(normalize(l));
+
+/** WHERE a location is, whatever it shows there: the place, the workspace, or
+ *  Home. What history waits to see land when it puts one back. */
+export const whereKey = (l: Loc): string => (l.place ? `p|${l.place.repo}|${l.place.slug}` : l.ws ? `w|${l.ws.id}` : "home");
 
 export const current = (h: History): Loc | null => h.entries[h.index] ?? null;
 
@@ -127,12 +137,20 @@ export const prune = (h: History, dead: (l: Loc) => boolean): History => {
 };
 
 const base = (p: string) => p.slice(p.lastIndexOf("/") + 1);
-const TAB_LABEL: Record<DockTab, string> = { files: "Files", terminal: "Terminal", docs: "Docs", plan: "Plan", prs: "Pull requests" };
+const TAB_LABEL: Record<DockTab, string> = { files: "Files", terminal: "Terminal", docs: "Docs", plan: "Plan", prs: "Pull requests", workspace: "Workspace" };
+
+/** A tab's name, on the tab itself and wherever one is named. */
+export const WS_TAB_LABEL: Record<WsTab, string> = { overview: "Overview", memory: "Memory", plan: "Plan", ideas: "Ideas", chats: "Chats" };
 
 /** One line for a tooltip or the history menu. `nameOf` turns a place into
- *  what the nav calls it (a title, `(main)`); the slug otherwise. */
-export const label = (l: Loc, nameOf?: (repo: string, slug: string) => string): string => {
-  if (!l.place) return "Home";
+ *  what the nav calls it (a title, `(main)`); the slug otherwise. `wsName` is
+ *  a workspace's name, `chatName` one of its chats'. */
+export const label = (l: Loc, nameOf?: (repo: string, slug: string) => string, wsName?: (id: string) => string | null, chatName?: (id: string, conv: string) => string | null): string => {
+  if (!l.place) {
+    if (!l.ws) return "Home";
+    const chat = l.ws.chat ? chatName?.(l.ws.id, l.ws.chat) ?? "a chat" : null;
+    return [wsName?.(l.ws.id) ?? "A workspace", chat, WS_TAB_LABEL[l.ws.tab]].filter(Boolean).join(" · ");
+  }
   const parts = [nameOf?.(l.place.repo, l.place.slug) ?? l.place.slug];
   const d = l.dock;
   if (d) {

@@ -530,7 +530,8 @@ pub fn cmd_serve(args: &[String]) -> i32 {
             return 1;
         }
         // The engine's background work: sweep, merge, the 3 s poll.
-        host::start(running.ctx.clone(), host::Hooks::default());
+        let audit = running.listener.audit();
+        host::start(running.ctx.clone(), host::Hooks { on_fold: Some(Box::new(move |n| audit.fold(n))), ..host::Hooks::default() });
         // Group chat's shares (§3.3): every share's lane and binding checked
         // now and on serve's own poll, whether or not a guest is reading.
         tokio::spawn(shares::watch(opts.config_dir.clone(), running.ctx.host.clone()));

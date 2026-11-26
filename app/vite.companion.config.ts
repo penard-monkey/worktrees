@@ -1,13 +1,11 @@
 // Build for the Ideas companion window — SEPARATE from the app's build, on
 // purpose, the way the docs viewer's is (vite.viewer.config.ts).
 //
-// The companion is where the libraries ideas need will live (CodeMirror 6 in
-// phase 1, docs/proposals/idea-board-phases.md §4.3), and the app's bundle
-// must never gain a byte of them. A second input to `vite.config.ts` would let
-// rollup hoist a chunk the two pages share, and then "it is isolated" would be
-// a claim about a bundler heuristic. So: two configs, two outDirs, nothing
-// shared but SOURCE files the app already owns (ipc.ts, ipcws.ts, tokens.css),
-// which this build compiles into its own chunks. companion-boundary-check.mjs
+// A second input to `vite.config.ts` would let rollup hoist a chunk the two
+// pages share, and then what either one loads would be a claim about a bundler
+// heuristic. So: two configs, two outDirs, nothing shared but SOURCE files the
+// app owns (ipc.ts, ipcws.ts, tokens.css, the document pane and its editor in
+// src/doc/), which this build compiles into its own chunks. editor-boundary-check.mjs
 // asserts it.
 //
 //   pnpm -C app build            → app/dist/ (the app), then app/dist/companion/

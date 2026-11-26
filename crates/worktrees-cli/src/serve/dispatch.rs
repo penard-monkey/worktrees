@@ -1,4 +1,4 @@
-//! The 297 commands, each with its exposure, capability and objects, in ONE
+//! The 325 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -39,7 +39,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::sync::Arc;
-use worktrees_api::{agents, config, disk, files, hostenv, ideas, ideasessions, keepawake, macprivacy, meta, ops, plans, prefs, presets, profiles, project, status, term, viewer, workspace, workspaces, Ctx};
+use worktrees_api::{agents, config, disk, files, hostenv, ideas, ideasessions, keepawake, macprivacy, memory, meta, ops, plans, prefs, presets, profiles, project, status, term, viewer, workspace, workspacechats, workspacefolds, workspaces, Ctx};
 use worktrees_core::authz::{self, Caller, Capability, Caps, DeviceId, Grant, Projects, Registry};
 use worktrees_core::fetchpolicy::Fetcher;
 
@@ -367,6 +367,8 @@ macro_rules! obj {
     (opt($($inner:tt)+)) => { Obj::Opt(&obj!($($inner)+)) };
     (idea($a:ident)) => { Obj::Idea(stringify!($a)) };
     (idea_conv($c:ident, $i:ident)) => { Obj::IdeaConv(stringify!($c), stringify!($i)) };
+    (workspace($a:ident)) => { Obj::Workspace(stringify!($a)) };
+    (workspace_chat($c:ident, $i:ident)) => { Obj::WorkspaceChat(stringify!($c), stringify!($i)) };
     (share($a:ident)) => { Obj::Share(stringify!($a)) };
     (guest) => { Obj::Guest };
     (global) => { Obj::Global };
@@ -887,6 +889,7 @@ commands! { cx, a;
     set_lifecycle: Engine [write, place(repo, slug)] => ops::set_lifecycle(a.get("repo")?, a.get("slug")?, a.get("label")?),
     set_pin: Engine [write, place(repo, slug)] => ops::set_pin(a.get("repo")?, a.get("slug")?, a.get("on")?),
     set_note: Engine [write, place(repo, slug)] => ops::set_note(&cx.ctx, a.get("repo")?, a.get("slug")?, a.get("note")?),
+    set_place_under: Engine [write, place(repo, slug)] => ops::set_place_under(&cx.ctx, a.get("repo")?, a.get("slug")?, a.get("under")?),
     drop_reference: Engine [write, place(repo, slug), place(into_repo, into_slug), session_of(into_session, into_repo, into_slug)] => ops::drop_reference(
         a.get("repo")?, a.get("slug")?, a.get("into_repo")?, a.get("into_slug")?, a.get("into_session")?, a.get("provider")?,
     ),
@@ -1449,13 +1452,18 @@ commands! { cx, a;
     // The addresses `remote_enable` would take now: the host app's picker.
     remote_candidates: HostConsole => remote(cx)?.candidates(),
     remote_advertise: HostConsole => remote(cx)?.set_advertise(a.get("on")?),
-    // ── named workspaces (idea board phase 2, `workspaces.json`): desktop only ──
+    // ── named workspaces (idea board phase 2, `workspaces.json`) ──
     // Lists of references to registered projects. Console, by the owner's
-    // decision of 2026-11-08: nothing a paired device or an agent reaches.
-    workspaces_list: HostConsole => workspaces::workspaces_list(),
+    // decision of 2026-11-08: nothing a paired device or an agent reaches —
+    // save the list itself, which he opened to paired devices on 2026-11-25
+    // (iOS workspaces phase 1): a device reads it projected
+    // (`scope::named_workspaces`: only workspaces whose every member it
+    // covers, without plan or ideas); the console's answer is unchanged.
+    // Every other workspace row stays console-only, and no MCP tool has any.
+    workspaces_list: Engine [read, filtered(named_workspaces)] => workspaces::workspaces_list(),
     workspace_create: HostConsole => workspaces::workspace_create(a.get("name")?),
     workspace_rename: HostConsole => workspaces::workspace_rename(a.get("id")?, a.get("name")?),
-    workspace_remove: HostConsole => workspaces::workspace_remove(a.get("id")?),
+    workspace_remove: HostConsole => workspaces::workspace_remove(&cx.ctx, a.get("id")?),
     workspace_set_projects: HostConsole => workspaces::workspace_set_projects(a.get("id")?, a.get("roots")?),
     workspace_reorder: HostConsole => workspaces::workspace_reorder(a.get("ids")?),
     workspace_set_color: HostConsole => workspaces::workspace_set_color(a.get("id")?, a.get("color")?),
@@ -1481,6 +1489,56 @@ commands! { cx, a;
     workspace_link_idea: HostConsole [console, idea(idea)] => plans::workspace_link_idea(&cx.ctx, a.get("id")?, a.get("idea")?),
     workspace_unlink_idea: HostConsole => plans::workspace_unlink_idea(&cx.ctx, a.get("id")?, a.get("idea")?),
     workspace_overview: HostConsole => plans::workspace_overview(&cx.ctx, a.get("id")?),
+    // ── workspace chats (`worktrees_core::workspacechats`) ──────────────────
+    // Claude in its own tmux session (`worktrees~ws~<conv>`), in the
+    // workspace's own folder, belonging to no project and never a place.
+    // Console rows on two objects, `workspace(id)` (the list has it) and
+    // `workspace_chat(conv, id)` (its `chats.json` does), so no device grant
+    // reaches them. The chat rows run the agent rows' bodies (`agents::*_at`):
+    // `workspace_send` and `workspace_answer_text` are `idea_send`'s and
+    // `idea_answer_text`'s behind one more console-only door (the owner,
+    // 2026-11-24), audited the same way.
+    workspace_chats: HostConsole [console, workspace(id)] => workspacechats::workspace_chats(&cx.ctx, a.get("id")?),
+    workspace_chat_start: HostConsole [console, workspace(id)] => workspacechats::workspace_chat_start(&cx.ctx, a.get("id")?),
+    // Tidy…: a chat on the engine's own tidy file. It takes the id alone, so
+    // no client text reaches what the chat is told.
+    workspace_chat_tidy: HostConsole [console, workspace(id)] => workspacechats::workspace_chat_tidy(&cx.ctx, a.get("id")?),
+    workspace_chat_resume: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_chat_resume(&cx.ctx, a.get("id")?, a.get("conv")?),
+    // Close, as the person means it: what is worth keeping goes to memory
+    // first, and the poll ends the chat (`worktrees_api::workspacefolds`).
+    workspace_chat_fold: HostConsole [console, workspace_chat(conv, id)] => workspacefolds::workspace_chat_fold(&cx.ctx, a.get("id")?, a.get("conv")?),
+    workspace_chat_close: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_chat_close(&cx.ctx, a.get("id")?, a.get("conv")?),
+    workspace_chat_remove: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_chat_remove(&cx.ctx, a.get("id")?, a.get("conv")?),
+    workspace_chat_rename: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_chat_rename(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("title")?),
+    workspace_turns: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_turns(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("n")?),
+    workspace_turn_text: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_turn_text(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("turn_id")?),
+    workspace_tool_call: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_tool_call(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("call_id")?),
+    workspace_prompt: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_prompt(&cx.ctx, a.get("id")?, a.get("conv")?),
+    workspace_answer: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_answer(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("choice")?, a.get("fingerprint")?),
+    workspace_answer_text: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_answer_text(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("choice")?, a.get("fingerprint")?, a.get("text")?),
+    workspace_answer_many: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_answer_many(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("choices")?, a.get("fingerprint")?),
+    workspace_send: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_send(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("text")?),
+    workspace_interrupt: HostConsole [console, workspace_chat(conv, id)] => workspacechats::workspace_interrupt(&cx.ctx, a.get("id")?, a.get("conv")?),
+    workspace_term_open: HostConsole [console, workspace_chat(conv, id)] => {
+        let (session, id) = workspacechats::workspace_term_open(
+            &cx.ctx, a.get("id")?, a.get("conv")?, a.get("cols")?, a.get("rows")?, cx.frames.bytes(a.channel("on_bytes")?),
+        )?;
+        cx.frames.note_term(id, session);
+        Ok::<u32, String>(id)
+    },
+    // ── a workspace's memory (`worktrees_api::memory`): desktop only ──
+    // A folder of the workspace's that is its own git repository, committed by
+    // the engine. Addressed by the workspace's id and a path INSIDE the memory,
+    // which the body resolves (`worktrees_core::memory`), never `.git`.
+    workspace_memory: HostConsole [console, workspace(id)] => memory::workspace_memory(&cx.ctx, a.get("id")?),
+    workspace_memory_make: HostConsole [console, workspace(id)] => memory::workspace_memory_make(&cx.ctx, a.get("id")?),
+    workspace_memory_file: HostConsole [console, workspace(id)] => memory::workspace_memory_file(&cx.ctx, a.get("id")?, a.get("path")?, a.get("commit")?),
+    workspace_memory_image: HostConsole [console, workspace(id)] => memory::workspace_memory_image(&cx.ctx, a.get("id")?, a.get("path")?, a.get("etag")?),
+    workspace_memory_write: HostConsole [console, workspace(id)] => memory::workspace_memory_write(&cx.ctx, a.get("id")?, a.get("path")?, a.get("content")?, a.get("expected_mtime")?, a.get("expected_rev")?, a.get("keep_history")?),
+    workspace_memory_put: HostConsole [console, workspace(id)] => memory::workspace_memory_put(&cx.ctx, a.get("id")?, a.get("name")?, a.get("data")?),
+    workspace_memory_log: HostConsole [console, workspace(id)] => memory::workspace_memory_log(&cx.ctx, a.get("id")?, a.get("path")?, a.get("before")?, a.get("n")?),
+    workspace_memory_diff: HostConsole [console, workspace(id)] => memory::workspace_memory_diff(&cx.ctx, a.get("id")?, a.get("commit")?, a.get("path")?),
+    workspace_memory_revert: HostConsole [console, workspace(id)] => memory::workspace_memory_revert(&cx.ctx, a.get("id")?, a.get("commit")?),
 }
 
 #[cfg(test)]
@@ -1524,7 +1582,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 297 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 325 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1539,7 +1597,8 @@ mod tests {
     /// two (`agent_commands`, `agent_command`), notifications' nine (the
     /// `push_*` rows), and Settings → Agent policy's four (`limits_settings`,
     /// `set_limits`, `policy_preset_status`, `apply_policy_preset`), and the
-    /// named workspaces' seven console rows (`workspaces_list`, `workspace_*`), and the
+    /// named workspaces' seven rows (six console `workspace_*`, and `workspaces_list`, a
+    /// device's `read` since iOS phase 1), and the
     /// idea board's seven console rows (`ideas_list`, `idea_read`,
     /// `idea_create`, `idea_write`, `idea_rename`, `idea_remove`,
     /// `idea_adopt`) and phase 3's seven (`idea_relate`, `idea_merge`,
@@ -1548,18 +1607,21 @@ mod tests {
     /// `workspace_from_plan`, `workspace_set_plan`, `workspace_link_idea`,
     /// `workspace_unlink_idea`, `workspace_overview`) and phase 5's three
     /// (`plan_set_project`, `plan_start`, `plan_link_place`), and the chat's images (`read_place_image`, `agent_call_image`), and phase S's sixteen
-    /// idea-session console rows (`idea_conversation*`, `idea_*` over the agent bodies, `idea_term_open`), and group
+    /// idea-session console rows (`idea_conversation*`, `idea_*` over the agent bodies, `idea_term_open`), the workspace
+    /// chats' seventeen console rows (`workspace_chat*`, `workspace_*` over the agent bodies, `workspace_term_open`), and group
     /// chat's eighteen share rows (fourteen console with PR D's `share_used` and `share_check`, four
     /// `guest`), its thread's two (`thread_read`, `thread_post`, `guest`) and PR C's
     /// two `guest` history rows (`shared_turns`, `shared_tool_call`), the guest's `shared_image` and `shared_call_image`, and the host's sleep
-    /// hold (`get_keep_awake`, `set_keep_awake`), and disk usage's three (`disk_usage`,
-    /// `disk_place_tree`, `disk_delete`); the check scripts
+    /// hold (`get_keep_awake`, `set_keep_awake`), disk usage's three (`disk_usage`,
+    /// `disk_place_tree`, `disk_delete`), a workspace's memory's nine
+    /// console rows (`workspace_memory*`), and lane children's adoption
+    /// (`set_place_under`); the check scripts
     /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 297, "the table has 297 commands");
+        assert_eq!(TABLE.len(), 325, "the table has 325 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1900,6 +1962,11 @@ mod tests {
         ("workspace_link_idea", "id", "a named workspace's id (a console act)"),
         ("workspace_unlink_idea", "id", "a named workspace's id (a console act); `idea` may name an idea that is gone"),
         ("workspace_overview", "id", "a named workspace's id (a console act)"),
+        ("workspace_memory_file", "path", "a path in the workspace's MEMORY, not a project's: the body resolves it under that folder alone (`worktrees_core::memory`), and never its `.git` (a console act)"),
+        ("workspace_memory_image", "path", "a path in the workspace's memory (a console act)"),
+        ("workspace_memory_write", "path", "a path in the workspace's memory (a console act)"),
+        ("workspace_memory_log", "path", "a path in the memory's history, which need not be on disk (a console act)"),
+        ("workspace_memory_diff", "path", "a path the named change lists (a console act)"),
         ("disk_delete", "path", "a path in the PLACE, relative to its root: the body refuses anything but a plain relative path, then lstats every component and resolves it under `place(repo, slug)`'s own root (`diskusage::delete_refusal`), which is not a `file(path)` judged against every project"),
         ("read_place_image", "path", "a path in the PLACE (relative to its root, or absolute under it): the body resolves it under `place(repo, slug)`'s own root by `safepath::place_image`, which is not a `file(path)` judged against every project"),
         ("shared_image", "path", "a path the shared SESSION shows: the body refuses one its turn does not draw, then resolves it under the share's own place (`share(share)`) by the same `safepath::place_image`; a guest names no repo or slug"),
@@ -1977,12 +2044,12 @@ mod tests {
     /// `push_allow_security`); Settings → Agent policy → Limits'
     /// `limits_settings` (`read`) and `set_limits` (`admin`); and the policy
     /// presets' `policy_preset_status` (`read`) and `apply_policy_preset`
-    /// (console); the named workspaces' seven (console); and the idea board's seven and phase 3's seven (console); phase 4's ten and phase 5's three (console); phase S's sixteen idea-session rows (console); `read_place_image` and `agent_call_image` are `read`; the host's sleep hold's `get_keep_awake` (`read`) and `set_keep_awake` (`admin`); disk usage's `disk_usage` and `disk_place_tree` (`read`) and `disk_delete` (`write`); and group chat's
+    /// (console); the named workspaces' six (console) and `workspaces_list` (`read`, a device's since iOS phase 1, projected); and the idea board's seven and phase 3's seven (console); phase 4's ten and phase 5's three (console); phase S's sixteen idea-session rows (console); the workspace chats' sixteen and a workspace's memory's nine (console); `read_place_image` and `agent_call_image` are `read`; the host's sleep hold's `get_keep_awake` (`read`) and `set_keep_awake` (`admin`); disk usage's `disk_usage` and `disk_place_tree` (`read`) and `disk_delete` (`write`); and group chat's
     /// shares: fourteen console rows (`share_*` for the owner, `share_used`, `share_check`, `guest_places_hide`,
     /// `shares_all`, `guests_list`, `guest_remove`, `owner_set_name`) and the
     /// four `guest` rows (`GUEST_ROWS`), the capability's first, the thread's
     /// two `guest` rows (`thread_read`, `thread_post`) and PR C's two
-    /// (`shared_turns`, `shared_tool_call`), then `shared_image` and `shared_call_image`. A row that moves group
+    /// (`shared_turns`, `shared_tool_call`), then `shared_image` and `shared_call_image`; and lane children's `set_place_under` (`write`). A row that moves group
     /// fails here until the count (and the proposal's table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
@@ -1999,7 +2066,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 74), ("write", 24), ("admin", 42), ("console", 113), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 75), ("write", 25), ("admin", 42), ("console", 139), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7), ("guest", 10),
         ]
         .into();
@@ -2167,6 +2234,31 @@ mod tests {
             "plan_set_project", "plan_start", "plan_link_place",
         ] {
             assert_eq!(exposure(cmd), Some(Exposure::HostConsole), "{cmd}: desktop only");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The memory rows are the console's, and a workspace `workspaces.json`
+    /// does not know is refused before any body runs: nothing is made. Their
+    /// bodies are tested in `worktrees_api::memory`, and one memory end to end
+    /// in `serve_bin`, whose serve has a `workspaces.json` of its own.
+    #[test]
+    fn the_memory_rows_are_the_consoles_and_name_a_known_workspace() {
+        let (c, dir, _rx) = call("memory");
+        let folder = dir.join("ws");
+        let c = Call { ctx: c.ctx.clone().with_workspaces_dir(folder.clone()), ..c };
+        let id = worktrees_core::ulid::new();
+        for cmd in [
+            "workspace_memory", "workspace_memory_make", "workspace_memory_file", "workspace_memory_image", "workspace_memory_write",
+            "workspace_memory_put", "workspace_memory_log", "workspace_memory_diff", "workspace_memory_revert",
+        ] {
+            assert_eq!(exposure(cmd), Some(Exposure::HostConsole), "{cmd}: desktop only");
+            let e = super::call(&c, cmd, &args(json!({"id": id, "path": "MEMORY.md", "content": "x", "name": "x.png", "data": "", "commit": "0"}))).unwrap_err();
+            assert!(e.as_str().unwrap().contains(&format!("no workspace {id}")), "{cmd}: {e}");
+        }
+        assert!(!folder.exists());
+        for ev in ["workspaces:memory", "workspaces:history"] {
+            assert_eq!(scope::EVENTS.iter().find(|(n, _)| *n == ev).map(|(_, e)| matches!(e, scope::Event::Console)), Some(true), "{ev}");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

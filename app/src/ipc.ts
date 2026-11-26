@@ -524,9 +524,15 @@ export const CONSOLE_ROWS: readonly string[] = [
   "idea_conversations", "idea_conversation_start", "idea_conversation_resume", "idea_conversation_close",
   "idea_conversation_remove", "idea_conversation_rename", "idea_turns", "idea_turn_text", "idea_tool_call",
   "idea_prompt", "idea_answer", "idea_answer_text", "idea_answer_many", "idea_send", "idea_interrupt", "idea_term_open",
-  // named workspaces (idea board phase 2): desktop only
-  "workspaces_list", "workspace_create", "workspace_rename", "workspace_remove", "workspace_set_projects",
+  // named workspaces (idea board phase 2): desktop only (`workspaces_list`
+  // is a device's since iOS phase 1, but not this window's: CONSOLE_SHAPED)
+  "workspace_create", "workspace_rename", "workspace_remove", "workspace_set_projects",
   "workspace_reorder", "workspace_set_color",
+  // workspace chats: Claude in a workspace's own folder, desktop only
+  "workspace_chats", "workspace_chat_start", "workspace_chat_tidy", "workspace_chat_resume", "workspace_chat_fold", "workspace_chat_close", "workspace_chat_remove",
+  "workspace_chat_rename", "workspace_turns", "workspace_turn_text", "workspace_tool_call", "workspace_prompt",
+  "workspace_answer", "workspace_answer_text", "workspace_answer_many", "workspace_send", "workspace_interrupt",
+  "workspace_term_open",
   // group chat's shares (PR A): the owner's acts and listings
   "share_create", "share_again", "share_allow", "share_remove_guest", "share_stop", "guest_places_hide",
   "share_requests_list", "share_request_dismiss", "shares_all", "guests_list", "guest_remove", "owner_set_name",
@@ -539,7 +545,18 @@ export const CONSOLE_ROWS: readonly string[] = [
   // and what a plan does (phase 5)
   "plan_set_project", "plan_start", "plan_link_place",
   "workspace_from_plan", "workspace_set_plan", "workspace_link_idea", "workspace_unlink_idea", "workspace_overview",
+  // A workspace's memory: the host's own folder, the console's.
+  "workspace_memory", "workspace_memory_make", "workspace_memory_file", "workspace_memory_image", "workspace_memory_write",
+  "workspace_memory_put", "workspace_memory_log", "workspace_memory_diff", "workspace_memory_revert",
 ];
+
+/** Rows a device MAY call whose device answer is a projection this window's
+ *  UI does not read. `workspaces_list` opened to paired devices for the phone
+ *  (iOS workspaces phase 1): a device gets each fully covered workspace's id,
+ *  name, colour, order and member roots, and no plan, ideas or member names,
+ *  while every view and act of this window's workspaces is the console's. So a
+ *  remote window keeps not asking, as before, and shows no workspaces. */
+export const CONSOLE_SHAPED: readonly string[] = ["workspaces_list"];
 
 /** The device's capabilities on the host this window drives, from the remote
  *  handshake's `ok.device.caps`; null when unknown or on the host itself. */
@@ -575,6 +592,7 @@ export function notGranted(cmd: string): string | null {
   if (!remoteName) return null;
   if (CONSOLE_ROWS.includes(cmd)) return `${cmd} is done at ${remoteName} itself: no paired device may`;
   if (ADMIN_ROWS.includes(cmd) && !grantHas("admin")) return `${cmd} needs admin on ${remoteName}: this device was paired without it`;
+  if (CONSOLE_SHAPED.includes(cmd)) return `${cmd} is shown at ${remoteName} itself: a paired device gets the phone's view of it`;
   return null;
 }
 

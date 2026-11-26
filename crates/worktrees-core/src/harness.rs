@@ -1349,7 +1349,7 @@ const INVISIBLE: &[(u32, u32)] = &[
 
 /// One of [`INVISIBLE`]'s characters. `turns`' tool-call summaries remove
 /// the same set, where a typed line refuses it.
-pub(crate) fn invisible(c: char) -> bool {
+pub fn invisible(c: char) -> bool {
     let c = c as u32;
     INVISIBLE.iter().any(|&(lo, hi)| (lo..=hi).contains(&c))
 }

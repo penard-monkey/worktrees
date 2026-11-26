@@ -1,6 +1,6 @@
 // An idea's file is canonical and byte-exact through the editor
-// (app/companion/ideatext.ts, ideastate.ts), proved with the REAL
-// @codemirror/state the companion is built with.
+// (app/src/doc/ideatext.ts, editor.ts's state half), proved with the REAL
+// @codemirror/state both windows are built with.
 //
 //   node app/scripts/ideas-text-check.mjs      # from the repo root; exits non-zero on failure
 //
@@ -18,7 +18,7 @@
 // And the pure helpers the Read view and the "save as new" act use.
 //
 // Override, so a mutation can be shown red without touching the tree:
-//   IDEASTATE_SRC=<copy of ideastate.ts>   IDEATEXT_SRC=<copy of ideatext.ts>
+//   EDITOR_SRC=<copy of editor.ts>   IDEATEXT_SRC=<copy of ideatext.ts>
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -29,18 +29,22 @@ let failed = 0;
 const check = (c, m) => { if (!c) failed++; console.log(`${c ? "ok" : "not ok"} — ${m}`); };
 
 const require = createRequire(here("../package.json"));
-const STATE_URL = pathToFileURL(require.resolve("@codemirror/state").replace(/index\.cjs$/, "index.js")).href;
+/** A package's ES module: what the bundles are built from. */
+const esm = (spec) => pathToFileURL(require.resolve(spec).replace(/index\.cjs$/, "index.js")).href;
+const STATE_URL = esm("@codemirror/state");
 const toData = (code) => `data:text/javascript;base64,${Buffer.from(code).toString("base64")}`;
 const ts = async (p) => (await transformWithEsbuild(fs.readFileSync(p, "utf8"), p, { loader: "ts" })).code;
 
-const textSrc = fs.readFileSync(process.env.IDEATEXT_SRC ?? here("../companion/ideatext.ts"), "utf8");
+const textSrc = fs.readFileSync(process.env.IDEATEXT_SRC ?? here("../src/doc/ideatext.ts"), "utf8");
 check(!/^\s*import\s(?!type\b)/m.test(textSrc), "ideatext.ts has no runtime import (it is loaded as a data: module)");
-const textUrl = toData(await ts(process.env.IDEATEXT_SRC ?? here("../companion/ideatext.ts")));
-const stateCode = (await ts(process.env.IDEASTATE_SRC ?? here("../companion/ideastate.ts")))
+const textUrl = toData(await ts(process.env.IDEATEXT_SRC ?? here("../src/doc/ideatext.ts")));
+const relUrl = toData(await ts(here("../src/doc/ideasrelate.ts")));
+const editorCode = (await ts(process.env.EDITOR_SRC ?? here("../src/doc/editor.ts")))
   .replace(/from\s*["']\.\/ideatext["']/g, `from ${JSON.stringify(textUrl)}`)
-  .replace(/from\s*["']@codemirror\/state["']/g, `from ${JSON.stringify(STATE_URL)}`);
-check(!/from\s*["'](?!data:|file:)/.test(stateCode), "ideastate.ts imports only @codemirror/state and ./ideatext (both rewired here)");
-const { textExtensions, savedText } = await import(toData(stateCode));
+  .replace(/from\s*["']\.\/ideasrelate["']/g, `from ${JSON.stringify(relUrl)}`)
+  .replace(/from\s*["'](@(?:codemirror|lezer)\/[\w-]+)["']/g, (_, spec) => `from ${JSON.stringify(esm(spec))}`);
+check(!/from\s*["'](?!data:|file:)/.test(editorCode), "editor.ts imports CodeMirror and its two pure neighbours alone (all rewired here)");
+const { textExtensions, savedText } = await import(toData(editorCode));
 const T = await import(textUrl);
 const { EditorState, EditorSelection } = await import(STATE_URL);
 

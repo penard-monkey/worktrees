@@ -92,14 +92,15 @@ async function run(engine, name) {
   await workspaces(page, tag, "every flag off");
   await ideasOff(page, tag, "Ideas off");
 
-  // Settings: Advanced and Expert only, findable by search, one checkbox each.
+  // Settings: on General in every mode (group chat start design S2 moved it to
+  // Beginner; beta-check.mjs holds the tier), findable by search, one checkbox each.
   await openSheet(page);
   await toGeneral(page);
-  ok(!(await has(page, ".settings-body [data-sec=beta]")), `${tag} Beginner: Beta features is not drawn`);
+  ok(await has(page, ".settings-body [data-sec=beta]"), `${tag} Beginner: Beta features is drawn on General`);
   await setMode(page, "advanced");
   ok(await has(page, ".settings-body [data-sec=beta]"), `${tag} Advanced: Beta features is drawn on General`);
   const boxes = await page.$$eval(".settings-body [data-sec=beta] input[type=checkbox]", (b) => b.map((x) => x.closest("label")?.innerText.trim()));
-  ok(JSON.stringify(boxes) === JSON.stringify(["Ideas", "Group chat"]), `${tag} …one checkbox per beta feature, Ideas and Group chat: ${JSON.stringify(boxes)}`);
+  ok(JSON.stringify(boxes) === JSON.stringify(["Ideas", "Group chat", "Workspace chats"]), `${tag} …one checkbox per beta feature, Ideas, Group chat and Workspace chats: ${JSON.stringify(boxes)}`);
   ok(!(await page.evaluate(() => document.querySelector(".settings-body [data-sec=beta]")?.innerText.includes("workspaces"))), `${tag} …and it no longer mentions workspaces`);
   await page.fill(".settings-search-input", "beta");
   await page.waitForTimeout(200);

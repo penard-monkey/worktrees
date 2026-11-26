@@ -292,7 +292,14 @@
 .chat-screen summary { cursor: pointer; }
 .chat-screen .chat-prompt-lines { font-size: var(--fs-meta); }
 
-.chat-card-foot { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); margin-top: var(--s3); }
+/* Pinned to the view while any of its card is in it: a card taller than the pane
+   (Claude's folder-trust question in a short window) had its answer below the
+   fold, so a click on a choice looked like nothing (VM, 2026-11-24). Opaque: the
+   card scrolls under it. */
+.chat-card-foot {
+  position: sticky; bottom: 0; z-index: 1; background: var(--bg-panel);
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); margin-top: var(--s1); padding: var(--s2) 0;
+}
 .chat-foot-end { margin-left: auto; }
 .chat-hint { font-size: var(--fs-meta); color: var(--txt-dim); }
 .chat-alert {

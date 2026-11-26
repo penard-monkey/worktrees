@@ -76,6 +76,12 @@ pub struct Message {
     /// copy is then the record, and is filed already-read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub via: Option<String>,
+    /// Why a `report` with no `to` was filed HERE (lane-children §6): the
+    /// sender's starter, the next lane up, or the asker of a reply — so a
+    /// place knows why a lane it never briefed wrote to it. An older reader
+    /// ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routed: Option<String>,
 }
 
 /// A message plus whether its recipient has read it.
@@ -133,6 +139,15 @@ fn entries(dir: &Path) -> Vec<(String, String, PathBuf)> {
     v
 }
 
+/// Who sent message `id` in the log at `dir` — the place a `reply_to` with no
+/// `to` answers (lane-children §6, rule 2). `None` when the log has no such
+/// message or it cannot be read.
+pub fn sender_of(dir: &Path, id: &str) -> Option<String> {
+    let (_, _, path) = entries(dir).into_iter().find(|(i, _, _)| i == id)?;
+    let m: Message = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    Some(m.from)
+}
+
 fn marker(dir: &Path, to_hex: &str, id: &str) -> PathBuf {
     dir.join(".read").join(to_hex).join(id)
 }
@@ -179,6 +194,22 @@ pub fn post_into(
     via: Option<&str>,
     now_ms: i64,
 ) -> Result<Message, String> {
+    post_routed(dir, reply_log, from, to, text, reply_to, via, None, now_ms)
+}
+
+/// `post_into`, recording why a default report went where it did.
+#[allow(clippy::too_many_arguments)]
+pub fn post_routed(
+    dir: &Path,
+    reply_log: &Path,
+    from: &str,
+    to: &str,
+    text: &str,
+    reply_to: Option<&str>,
+    via: Option<&str>,
+    routed: Option<&str>,
+    now_ms: i64,
+) -> Result<Message, String> {
     check_slug("from", from)?;
     check_slug("to", to)?;
     if text.trim().is_empty() {
@@ -210,6 +241,7 @@ pub fn post_into(
         created: now_ms.div_euclid(1000),
         reply_to: reply_to.map(str::to_string),
         via: via.map(str::to_string),
+        routed: routed.map(str::to_string),
     };
     let body = serde_json::to_string(&msg).map_err(|e| e.to_string())?;
     let name = format!("{}.{}.json", msg.id, hex(to));

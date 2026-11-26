@@ -322,6 +322,7 @@ fn ai_launch_inner(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> crat
                 resume: false,
                 resume_id: None,
                 session_id: None,
+                session_settings: None,
                 force: false,
             }
         }
@@ -1096,6 +1097,46 @@ fn write_plan_pointer(p: &Project, ui: &mut dyn Ui, wt: &str, topic: &str) {
     ui.info(&format!("plan: {PLANNING_DIR}/{topic}/ (owned planning)"));
 }
 
+/// `started_by` for a place `cmd_new` just created, from `Ui::started_from`
+/// (`(main)` is no starter), with `handed_to` and `under` cleared: the store
+/// never forgets, and a reused slug must not inherit its namesake's links.
+/// Writes nothing when there is nothing to record or clear, so a repo whose
+/// places have no lineage gets no store write from `new`.
+pub fn record_origin(p: &Project, ui: &mut dyn Ui, slug: &str) {
+    use crate::ui::StartedFrom;
+    let now = crate::sysclock::now_epoch();
+    let starter = match ui.started_from() {
+        StartedFrom::Nobody => None,
+        StartedFrom::Cwd => std::env::current_dir()
+            .ok()
+            .and_then(|d| p.place_containing(&d).ok())
+            .filter(|r| !r.is_main && r.slug != slug)
+            .map(|r| crate::store::Link::to(&r.slug, now)),
+        StartedFrom::Place { slug: from, project } => (from != crate::lineage::MAIN && (project.is_some() || from != slug))
+            .then(|| crate::store::Link { project, ..crate::store::Link::to(&from, now) }),
+    };
+    let stale = crate::store::read_lenient(&p.main_root)
+        .places
+        .get(slug)
+        .is_some_and(|d| d.started_by.is_some() || d.handed_to.is_some() || d.under.is_some());
+    if starter.is_none() && !stale {
+        return;
+    }
+    let said = starter.as_ref().map(|l| match &l.project {
+        Some(pn) => format!("{pn}:{}", l.place),
+        None => l.place.clone(),
+    });
+    if let Err(e) = crate::store::edit(&p.main_root, slug, |d| {
+        d.started_by = starter;
+        d.handed_to = None;
+        d.under = None;
+    }) {
+        ui.warn(&format!("could not record who started '{slug}': {e}"));
+    } else if let Some(s) = said {
+        ui.info(&format!("started by: {s}"));
+    }
+}
+
 pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let (mut do_install, mut do_tmux, mut do_attach, mut do_fetch, mut resume) = (true, true, true, true, false);
     let (mut branch, mut base, mut name, mut ai_flag) = (String::new(), String::new(), None::<String>, None::<String>);
@@ -1323,6 +1364,12 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
                 return 1;
             }
         }
+    }
+
+    // Origin (lane-children §2): only a `new` that CREATED the worktree
+    // records who started it, and it clears whatever a dead namesake left.
+    if !already {
+        record_origin(p, ui, &slug);
     }
 
     // Materialize the declared files and allocate the port slot here — after the
@@ -2156,6 +2203,9 @@ fn remove_one(p: &Project, ui: &mut dyn Ui, name: &str, del_branch: bool, force:
     let live = live_session(p, &slug, &path, None);
     let session = live.clone().unwrap_or_else(|| p.session_name(&slug));
 
+    // Lane-children §7: the lanes that hang from this place move up one
+    // level when it goes. Said before the prompt, written after the removal.
+    let handoff = handoff_plan(p, &slug);
     if !dirty.is_empty() && !force {
         ui.warn(&format!("Worktree '{slug}' has uncommitted changes:"));
         ui.plain(&indent(&dirty));
@@ -2170,6 +2220,9 @@ fn remove_one(p: &Project, ui: &mut dyn Ui, name: &str, del_branch: bool, force:
             String::new()
         };
         ui.plain(&format!("Remove {} → tmux {} · worktree dir{branch_part}", fmt::cyan(&slug), fmt::yellow(&session)));
+        if let Some(line) = handoff_sentence(&handoff) {
+            ui.plain(&line);
+        }
         if !ui.confirm("Proceed? [y/N] ") {
             ui.info(&format!("Skipped {slug}."));
             return Ok(());
@@ -2199,6 +2252,9 @@ fn remove_one(p: &Project, ui: &mut dyn Ui, name: &str, del_branch: bool, force:
         ui.info(&format!("deleted stale dir {slug}"));
     }
     let _ = git::git(&p.main_root, &["worktree", "prune"]);
+    if !Path::new(&path).exists() {
+        apply_handoff(p, ui, &slug, &handoff);
+    }
 
     if del_branch && !branch.is_empty() {
         let flag = if force { "-D" } else { "-d" };
@@ -2221,6 +2277,7 @@ fn remove_one(p: &Project, ui: &mut dyn Ui, name: &str, del_branch: bool, force:
 /// halfway. No prompt and no dirty check: the caller has both.
 pub(crate) fn remove_tree(p: &Project, ui: &mut dyn Ui, wt: &str) -> Result<Vec<String>, i32> {
     let slug = basename(wt);
+    let handoff = handoff_plan(p, &slug);
     let canonical = p.session_name(&slug);
     let mut sessions: Vec<String> = Vec::new();
     if let Some(s) = live_session(p, &slug, wt, None) {
@@ -2243,7 +2300,145 @@ pub(crate) fn remove_tree(p: &Project, ui: &mut dyn Ui, wt: &str) -> Result<Vec<
     }
     ui.info(&format!("removed worktree {slug}"));
     let _ = git::git(&p.main_root, &["worktree", "prune"]);
+    apply_handoff(p, ui, &slug, &handoff);
     Ok(sessions)
+}
+
+/// Where `set_under` puts a place (lane-children §8).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UnderTarget {
+    /// The top level: `under = (main)`.
+    Top,
+    /// Under another place of this project.
+    Place(String),
+    /// Clear `under`: back on the line its starter (or a removal) gave it.
+    Reset,
+}
+
+/// Adoption, the ONE core call behind the nav menu, serve's
+/// `set_place_under`, CLI `place under` and MCP `adopt_place`: where a place
+/// is DRAWN. Writes `under` only — never `started_by`, never a report route
+/// (§6). Refuses `(main)`, an unknown place or target, and a move that would
+/// make a cycle (`lineage::Index::check_under`). `by` is who moved it:
+/// `(main)` (its agent) or a principal. Answers with a sentence that says
+/// where it is drawn now.
+pub fn set_under(p: &Project, slug: &str, target: UnderTarget, by: &str) -> Result<String, String> {
+    use crate::lineage::{Index, MAIN};
+    let store = crate::store::read_lenient(&p.main_root);
+    let births = p.place_births();
+    let index = Index::new(births.iter().map(|(s, b)| (s.as_str(), *b)), &store.places);
+    let place = match &target {
+        UnderTarget::Top => Some(MAIN.to_string()),
+        UnderTarget::Place(t) => Some(t.clone()),
+        UnderTarget::Reset => None,
+    };
+    match &place {
+        Some(t) => index.check_under(slug, t)?,
+        None => index.check_under(slug, MAIN)?,
+    }
+    let now = crate::sysclock::now_epoch();
+    let link = place.map(|t| crate::store::Link { by: Some(by.to_string()), ..crate::store::Link::to(&t, now) });
+    crate::store::edit(&p.main_root, slug, |d| d.under = link)?;
+    let store = crate::store::read_lenient(&p.main_root);
+    let index = Index::new(births.iter().map(|(s, b)| (s.as_str(), *b)), &store.places);
+    let reports = index.up(slug).unwrap_or_else(|| MAIN.to_string());
+    Ok(match index.parent(slug) {
+        None => format!("{slug} is drawn at the top level now. Its reports still go up its own line ({reports} first)."),
+        Some(parent) => format!("{slug} is drawn under {parent} now. Its reports still go up its own line ({reports} first)."),
+    })
+}
+
+/// `worktrees place under <slug> <target | --top | --reset>` — the owner's
+/// adoption at a terminal. Refused when run inside a lane: a lane moves
+/// nothing (§8). A courtesy, not a boundary — an agent with a shell can `cd`
+/// out — and the stake is only where a row is drawn.
+pub fn cmd_place(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
+    const USE: &str = "Usage: worktrees place under <slug> <target | --top | --reset>";
+    let (opts, rest) = crate::argv::split_options(args);
+    let mut pos: Vec<String> = Vec::new();
+    let (mut top, mut reset) = (false, false);
+    for a in opts {
+        match a.as_str() {
+            "--top" => top = true,
+            "--reset" => reset = true,
+            s if s.starts_with('-') => {
+                ui.error(&format!("Unknown flag: {s}"));
+                return 1;
+            }
+            s => pos.push(s.to_string()),
+        }
+    }
+    pos.extend(rest.iter().cloned());
+    if pos.first().map(String::as_str) != Some("under") {
+        ui.error(USE);
+        return 1;
+    }
+    let target = match (&pos[1..], top, reset) {
+        ([slug], true, false) => (slug.clone(), UnderTarget::Top),
+        ([slug], false, true) => (slug.clone(), UnderTarget::Reset),
+        ([slug, t], false, false) => (slug.clone(), UnderTarget::Place(t.clone())),
+        _ => {
+            ui.error(USE);
+            return 1;
+        }
+    };
+    if let Some(here) = std::env::current_dir().ok().and_then(|d| p.place_containing(&d).ok()).filter(|r| !r.is_main) {
+        ui.error(&format!(
+            "You are in the lane {}: a lane cannot move places in the tree. Run this from (main), or ask (main) to.",
+            here.slug
+        ));
+        return 1;
+    }
+    match set_under(p, &target.0, target.1, crate::authz::PrincipalId::OWNER) {
+        Ok(said) => {
+            ui.info(&said);
+            0
+        }
+        Err(e) => {
+            ui.error(&e);
+            1
+        }
+    }
+}
+
+/// What removing `slug` does to the places that hang from it (lane-children
+/// §7): `(lanes, the place they move up to)`. Never a cascade — no lane is
+/// closed or removed because its starter was.
+pub fn handoff_plan(p: &Project, slug: &str) -> (Vec<String>, String) {
+    let store = crate::store::read_lenient(&p.main_root);
+    let births = p.place_births();
+    let index = crate::lineage::Index::new(births.iter().map(|(s, b)| (s.as_str(), *b)), &store.places);
+    index.handoff(slug)
+}
+
+/// The remove path's sentence for a handoff, `None` when nothing hangs from
+/// the place.
+pub fn handoff_sentence((lanes, to): &(Vec<String>, String)) -> Option<String> {
+    match lanes.len() {
+        0 => None,
+        1 => Some(format!("1 lane hangs from it ({}). It moves up to {to}; it is not closed or removed.", lanes[0])),
+        n => Some(format!("{n} lanes hang from it ({}). They move up to {to}; none is closed or removed.", lanes.join(", "))),
+    }
+}
+
+/// Write `handed_to` on each lane of a removed place. `started_by` is never
+/// touched, so a header still says who really started a lane.
+fn apply_handoff(p: &Project, ui: &mut dyn Ui, slug: &str, (lanes, to): &(Vec<String>, String)) {
+    if lanes.is_empty() {
+        return;
+    }
+    let now = crate::sysclock::now_epoch();
+    let mut moved = Vec::new();
+    for lane in lanes {
+        let link = crate::store::Link { from: Some(slug.to_string()), ..crate::store::Link::to(to, now) };
+        match crate::store::edit(&p.main_root, lane, |d| d.handed_to = Some(link)) {
+            Ok(()) => moved.push(lane.as_str()),
+            Err(e) => ui.warn(&format!("could not move {lane} up to {to}: {e}")),
+        }
+    }
+    if !moved.is_empty() {
+        ui.info(&format!("moved up to {to}: {}", moved.join(", ")));
+    }
 }
 
 // ── relink / doctor — the `[[file]]` surface (proposal §7) ───────────────────

@@ -24,7 +24,12 @@ export type WorkItem = {
   ai: string | null; model: string | null;
   /** The `started:` line as written, and as read (null when it is neither). */
   started: string | null; place: Started | null;
+  /** The `proposed:` line a workspace chat wrote (`plan_propose_work`), as
+   *  written and as read; absent for an item a person wrote. */
+  proposed?: string | null; proposal?: Proposed | null;
 };
+/** Core's `Proposed`: which workspace chat proposed an item, its title then. */
+export type Proposed = { by: string; chat: string; at: string };
 /** A work item judged against the registry (core's answer, one per item):
  *  where its place would go, and the root of the place it has. */
 export type WorkState = { line: number; project_state: ProjectState["state"] | null; root?: string; place_root?: string };
@@ -292,7 +297,7 @@ export function planSources(open: DocRow | null, selected: readonly string[], ro
 export function workStatus(w: WorkItem, at: ItemPlace): string {
   const when = w.place ? `started ${w.place.at}` : "";
   switch (at.kind) {
-    case "none": return "not started";
+    case "none": return w.proposal ? `proposed by ${w.proposal.by} · not started` : "not started";
     case "unreadable": return `started: ${w.started}`;
     case "unknown": return when;
     case "unregistered": return `${when} · its project is not registered`;
@@ -303,15 +308,16 @@ export function workStatus(w: WorkItem, at: ItemPlace): string {
   }
 }
 
-/** The main window's hand-off to the Ideas window: the document to open,
- *  written to localStorage under this key just before `open_companion`
- *  brings the window forward. The companion reads it on load, on focus and
- *  on the `storage` event, and removes it. Older than `SHOW_TTL_MS` is
- *  ignored (a request the companion never saw). */
-export const SHOW_KEY = "wt.ideas.show";
-/** …and the other way: the workspace the main window shows, written before
- *  the companion raises it (`raise_window`). The same shape and age rule. */
+/** The Ideas window's hand-off to the main one: the workspace to show, written to
+ *  localStorage under this key just before it raises that window (`raise_window`),
+ *  which reads it on load, on focus and on the `storage` event, and removes it.
+ *  Older than `SHOW_TTL_MS` is ignored. A DOCUMENT goes by doc/handoff.ts, either
+ *  way, and is answered. */
 export const WS_SHOW_KEY = "wt.workspace.show";
+/** …and that the Ideas window changed a workspace (linked, set a plan, made
+ *  one): no event carries a change of the list, so the other window is told to
+ *  read it again. The value is only a time; the `storage` event is the word. */
+export const WS_CHANGED_KEY = "wt.workspaces.changed";
 /** …and an act the main window's own dialogs do (phase 5): clone or create
  *  the plan's project `name`, or show a place. The same shape and age rule;
  *  nothing is done from it but opening a dialog, filled in, or selecting. */

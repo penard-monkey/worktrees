@@ -171,6 +171,12 @@ pub fn read_lenient_at(p: &Path) -> Registry {
     fs::read(p).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
+/// For a reader that must not take an unreadable registry for an empty one: a
+/// rule made from it would be missing, not loose.
+pub fn read_strict_at(p: &Path) -> Result<Registry, String> {
+    read_strict(p)
+}
+
 fn read_strict(p: &Path) -> Result<Registry, String> {
     match fs::read(p) {
         // An EMPTY file is an empty registry, as `read_lenient` already reads
@@ -291,7 +297,11 @@ fn unique_name(reg: &Registry, want: &str) -> String {
 
 /// Append `root` (already canonical) under a fresh unique name. Idempotent:
 /// a root already present keeps its entry and position. Returns its entry.
+///
+/// Refused for anything in the workspaces folder: a workspace's memory is a
+/// git repository and never a project (`wsfolder::refuse_project`).
 pub fn add(root: &str) -> Result<Entry, String> {
+    crate::wsfolder::refuse_project(Path::new(root), &crate::wsfolder::root())?;
     add_at(&path(), root)
 }
 

@@ -131,11 +131,11 @@ pub fn close_all(ctx: &Ctx, id: &str) {
 // ── the chat: the agent rows' bodies on the conversation ────────────────────
 
 pub fn idea_turns(ctx: &Ctx, id: String, conv: String, n: Option<u32>) -> Result<Value, String> {
-    agents::turns_at(ctx, &locus(ctx, &id, &conv)?, None, n)
+    agents::turns_at(ctx, &locus(ctx, &id, &conv)?, None, n, &[sessions::start_opener(&id, &conv)])
 }
 
 pub fn idea_turn_text(ctx: &Ctx, id: String, conv: String, turn_id: String) -> Result<Value, String> {
-    agents::turn_text_at(ctx, &locus(ctx, &id, &conv)?, turn_id)
+    agents::turn_text_at(ctx, &locus(ctx, &id, &conv)?, turn_id, &[sessions::start_opener(&id, &conv)])
 }
 
 pub fn idea_tool_call(ctx: &Ctx, id: String, conv: String, call_id: String) -> Result<Value, String> {
@@ -267,6 +267,16 @@ mod tests {
         let t = idea_turns(&ctx(Ended(Some(lines))), id.clone(), conv.id.clone(), None).unwrap();
         assert_eq!(t["ended"], json!(true), "{t}");
         assert!(!t["turns"].as_array().unwrap().is_empty(), "{t}");
+        // Its own opener is the engine's, short and whole, and the same words
+        // of another conversation's are not.
+        let said = |u: &str, id: &str| json!({ "type": "user", "uuid": id, "timestamp": "2027-01-15T08:00:05Z", "message": { "role": "user", "content": u } }).to_string();
+        for (c, want) in [(conv.id.clone(), json!("start")), (worktrees_core::ulid::new(), Value::Null)] {
+            let lines = vec![said(&sessions::opener(&id, &c), "u-1"), said("Hello", "u-2")];
+            let t = idea_turns(&ctx(Ended(Some(lines.clone()))), id.clone(), conv.id.clone(), None).unwrap();
+            assert_eq!((&t["turns"][0]["engine"], &t["turns"][1]["engine"]), (&want, &Value::Null), "{t}");
+            let t = idea_turn_text(&ctx(Ended(Some(lines))), id.clone(), conv.id.clone(), "u-1".into()).unwrap();
+            assert_eq!(t["turn"]["engine"], want, "{t}");
+        }
         let gone = idea_turns(&ctx(Ended(None)), id.clone(), conv.id.clone(), None).unwrap();
         assert_eq!((gone["ended"].clone(), gone["reason"].clone()), (json!(true), json!(agents::ERR_TRANSCRIPT_GONE)));
         assert!(idea_send(&ctx(Ended(None)), id.clone(), conv.id.clone(), "hello".into()).is_err());

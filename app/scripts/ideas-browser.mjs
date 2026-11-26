@@ -277,6 +277,29 @@ async function run(engine, name) {
     ok(miss.length === 0, `${tag} at ${w}px every header and list control is reachable${miss.length ? `: missing ${miss.join(", ")}` : ""}`);
   }
   await page.setViewportSize({ width: 1200, height: 800 });
+  // The Ideas window's header is its own: every act a button, on as many rows as
+  // they take (these heights are what they were before the pane was shared);
+  // only under 420 px of pane do they fold into the menu, on one row.
+  const ACTS = "Edit,Read,Conversations,Relate…,Merge into…,Split…,History,Rename,Show in Finder,Remove";
+  for (const [w, h] of [[1220, 44], [920, 71], [820, 104], [720, 104], [620, 104], [440, 137], [419, 0], [340, 0]]) {
+    const m = await page.evaluate(async (w) => {
+      const root = document.querySelector("[data-testid=ideas-doc]");
+      Object.assign(root.style, { width: `${w}px`, minWidth: `${w}px` });
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const head = root.querySelector(".ix-head"), hb = head.getBoundingClientRect();
+      const out = [...head.querySelectorAll("button, .ix-title")].filter((e) => { const q = e.getBoundingClientRect(); return q.width > 0 && q.right > hb.right + 0.5; }).length;
+      const r = { w: hb.width, h: Math.round(hb.height), out, acts: [...head.querySelectorAll("button")].map((b) => b.textContent.trim()).join() };
+      Object.assign(root.style, { width: "", minWidth: "" });
+      return r;
+    }, w);
+    ok(Math.abs(m.w - w) < 2 && m.out === 0 && (h ? Math.abs(m.h - h) <= 2 && m.acts === ACTS : m.h <= 45 && m.acts === "Edit,Read,,"), `${tag} at ${w}px of pane ${h ? "every act is a button, as before" : "they fold into the menu, on one row"} (${JSON.stringify(m)})`);
+  }
+  await page.evaluate(() => Object.assign(document.querySelector("[data-testid=ideas-doc]").style, { width: "400px", minWidth: "400px" }));
+  await page.waitForTimeout(150);
+  await page.click("[data-testid=doc-menu-open]");
+  ok(await page.locator("[data-testid=doc-menu] button").evaluateAll((b) => b.map((x) => x.textContent).join()) === "History,Rename…,Relate…,Merge into…,Split…,Show in Finder,Remove", `${tag} its menu has the rest there`);
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => Object.assign(document.querySelector("[data-testid=ideas-doc]").style, { width: "", minWidth: "" }));
 
   // ── the six themes ──
   await openIdea(page, reborn);

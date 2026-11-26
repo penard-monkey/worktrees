@@ -215,6 +215,20 @@ export function LayoutPage() {
       </section>
     </Sec>
 
+    {/* The Workspaces view's built-in last group, Everything Else. Off, the
+        view shows named workspaces only; All projects still lists every one. */}
+    <Sec id="ee-workspaces">
+      <section className="setting">
+        <label>Everything Else in Workspaces</label>
+        <label className="tier-toggle setting-check">
+          <input type="checkbox" checked={settings.nav_ee_in_workspaces}
+            onChange={(e) => onChange({ nav_ee_in_workspaces: e.currentTarget.checked })} />
+          Show Everything Else in Workspaces
+        </label>
+        <div className="hint">Everything Else is the projects that are in no workspace. Off, the Workspaces view shows only your workspaces, and those projects are in All projects, which always lists every project; a place there that waits for you or has work you have not seen marks All projects. With no workspace yet, the Workspaces view is then empty.</div>
+      </section>
+    </Sec>
+
     <Sec id="tree-guides">
       <section className="setting">
         <label>Tree guide lines</label>

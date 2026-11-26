@@ -95,6 +95,9 @@ pub struct Hooks {
     /// so the person sees it. A phone has no window of ours, so a server
     /// leaves this `None` and the event is the whole answer.
     pub on_inbox: Option<Box<dyn Fn() + Send + 'static>>,
+    /// A workspace chat's fold landed or failed: the poll's decision, which no
+    /// request made. Serve writes it to its audit log, which is in no `Ctx`.
+    pub on_fold: Option<Box<dyn Fn(&crate::workspacefolds::FoldNote) + Send + 'static>>,
 }
 
 /// Start the engine's background work for `ctx`, and return the poll thread.
@@ -116,9 +119,16 @@ pub fn start(ctx: Ctx, hooks: Hooks) -> std::thread::JoinHandle<()> {
     // documents outside the repo's own gitignore, indexed by Spotlight.
     viewer::cleanup(&ctx.config_dir);
     import_app_projects(&ctx);
+    // `workspaces:changed` on every write of the workspaces file, for the
+    // life of the poll, which is the life of the engine. The engine's own
+    // file (`Ctx::workspaces_file`), which a test's engine moves.
+    let ws_watch = crate::workspaces::emit_writes(&ctx, ctx.workspaces_file());
     std::thread::Builder::new()
         .name("engine-poll".into())
-        .spawn(move || poll(ctx, hooks))
+        .spawn(move || {
+            let _ws_watch = ws_watch;
+            poll(ctx, hooks)
+        })
         .expect("could not spawn the engine's poll thread")
 }
 
@@ -139,6 +149,7 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
     let mut last = PaneList::fetch_unnamed().unwrap_or_default().fingerprint();
     let mut busy_gate = BusyGate::default();
     let mut last_ideas: Option<crate::watch::IdeaSessions> = None;
+    let mut last_chats: Option<crate::watch::WorkspaceSessions> = None;
     let mut last_models: Option<Vec<(i32, Option<String>)>> = None;
     let mut ticks: u32 = 0;
     // Inbox requests the last tick left waiting for a client, for its log line.
@@ -183,6 +194,9 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
     // The ideas folder's stamp: one `readdir` and an `lstat` per entry a tick,
     // the folder read only when it moved (`ideas::tick`).
     let mut ideas_watch = crate::ideas::IdeasWatch::default();
+    // The workspaces' memories: a `readdir` a folder and an `lstat` an entry a
+    // tick, and a commit after a quiet minute (`memory::tick`).
+    let mut memory_watch = crate::memory::MemoryWatch::default();
     // One `Ctx` for the thread's whole life, and the registries out of it: the
     // dot poll is the hottest reader of both and must not re-resolve them 20
     // times a minute.
@@ -327,7 +341,7 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
                 }
             }
         }
-        let ((busy, waiting, models), idea_sessions) = claude_activity(watch, &mut panes, &fp);
+        let ((busy, waiting, models), idea_sessions, chats) = claude_activity(watch, &mut panes, &fp);
         let idea_sessions = if idea_sessions.live.is_empty() { idea_sessions } else { idea_sessions.with_ideas(pollctx.ideas_dir()) };
         // Change-gated like `sessions:busy`, and pushed on the first tick
         // whatever it holds, so a client that declares it has a state.
@@ -335,6 +349,14 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
             pollctx.emit("ideas:sessions", payload(&idea_sessions));
             last_ideas = Some(idea_sessions);
         }
+        for note in crate::workspacechats::tick(&pollctx, chats, &mut last_chats) {
+            if let Some(f) = &hooks.on_fold {
+                f(&note);
+            }
+        }
+        // After the chats, so who is live is read in the same beat.
+        let live = last_chats.as_ref().map(crate::watch::WorkspaceSessions::by_workspace).unwrap_or_default();
+        crate::memory::tick(&pollctx, &mut memory_watch, live);
         // Every harness without a probe file, read once each (`harness_feed`:
         // codex's rollouts, pi's session files).
         let lanes: Vec<(&'static str, LaneTick)> = provider::PROVIDERS

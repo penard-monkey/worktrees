@@ -75,7 +75,7 @@ export type PlacePanels = {
    *  was the Chat | Terminal switch has a record with no dock tab or width in
    *  it, and absent means what no record means, the global seed (`panelsFor`
    *  spreads only the keys that are there). */
-  dock_tab?: "files" | "terminal" | "docs" | "plan" | "prs";
+  dock_tab?: "files" | "terminal" | "docs" | "plan" | "prs" | "workspace";
   dock_width?: number;
   /** Markdown reading size for THIS place. Seeds from the flat last-used value
    *  (unlike `dock_open`, which deliberately does not seed — see `panelsFor`):
@@ -124,7 +124,7 @@ const isAgentView = (v: unknown): v is AgentView =>
 /** Every tab the dock can show, as a VALUE — the unions above are types and
  *  vanish at runtime. `dockrail-check.mjs` pins it to `DOCK_RAIL` and to both
  *  unions. */
-export const DOCK_TABS = ["files", "terminal", "docs", "plan", "prs"] as const;
+export const DOCK_TABS = ["files", "terminal", "docs", "plan", "prs", "workspace"] as const;
 const isDockTab = (t: unknown): t is Settings["dock_tab"] =>
   typeof t === "string" && (DOCK_TABS as readonly string[]).includes(t);
 
@@ -222,6 +222,14 @@ export type Settings = {
   density: "comfortable" | "compact";
   nav_width: number; // 220–460, further capped by the viewport (see fitLayout)
   nav_guides: boolean; // draw the tree plumb lines in the nav (data-guides on <html>)
+  // Settings → Layout → "Show Everything Else in Workspaces" (the owner,
+  // 2026-11-25: "All projects holds all projects; the workspaces show only
+  // defined workspaces"). Off, the Workspaces view draws no Everything Else
+  // group, projects included: they are in All projects, and a waiting or
+  // unread place among them marks that side of the switch. With no named
+  // workspace the view is then empty, and says so. Default on; a stored value
+  // is kept.
+  nav_ee_in_workspaces: boolean;
   // ── the afterglow dot's decay ───────────────────────────────────────────
   // How long the purple "Claude finished here" ember stays lit, and in how many
   // discrete brightness steps. The FIRST boundary is not a setting — it is
@@ -292,7 +300,7 @@ export type Settings = {
   chat_default_v1: boolean;
   dock_open: boolean; // right dock (Files / Terminal) visible for the selected place
   dock_width: number; // ≥240, ceiling is viewport-derived (see dockCeiling)
-  dock_tab: "files" | "terminal" | "docs" | "plan" | "prs"; // last-used dock tab
+  dock_tab: "files" | "terminal" | "docs" | "plan" | "prs" | "workspace"; // last-used dock tab
   // The reference column's LOWER slot: a section that stays on screen under
   // whichever tab is showing, instead of being one of the tabs. Only the
   // Terminal can take it — `"terminal" | null` rather than every tab, because
@@ -470,6 +478,10 @@ export type Settings = {
   // guest, the thread, and the guest's side). Off by default; read ONLY
   // through `beta.ts` (`groupChatBeta`). The engine's rows are never gated.
   beta_group_chat: boolean;
+  // Settings → General → Beta features → Workspace chats (a workspace's chats
+  // and its memory). Off by default; read ONLY through `beta.ts`
+  // (`workspaceChatsBeta`). Its own key, never Ideas'.
+  beta_workspace_chats: boolean;
   // Group chat's *Use these*: ask once before sending comments with no note
   // (the note is the instruction; without one Codex answered "the plan is
   // unchanged" in the 2026-11-14 rehearsal). False after "Don't ask again".
@@ -577,6 +589,7 @@ export const DEFAULTS: Settings = {
   density: "comfortable",
   nav_width: 300,
   nav_guides: true,
+  nav_ee_in_workspaces: true,
   done_horizon_secs: 12 * 3600,
   done_steps: 3,
   nav_pinned: false,
@@ -619,7 +632,7 @@ export const DEFAULTS: Settings = {
   ai_auto_resume: true,
   update_auto_check: true,
   update_dismissed: "",
-  restore_last: false,
+  restore_last: true,
   restore_window: true,
   sync_with_sessions: false,
   projects_parent: "",
@@ -628,6 +641,7 @@ export const DEFAULTS: Settings = {
   ws_collapsed: {},
   beta_ideas: false,
   beta_group_chat: false,
+  beta_workspace_chats: false,
   use_these_ask_note: true,
   hidden_tiers: [],
   sort_mode: "recent",
@@ -967,6 +981,10 @@ export async function loadSettings(): Promise<Settings> {
     s.usage_codex = typeof s.usage_codex === "boolean" ? s.usage_codex : true;
     s.usage_kimi = typeof s.usage_kimi === "boolean" ? s.usage_kimi : true;
     s.pull_requests = typeof s.pull_requests === "boolean" ? s.pull_requests : true;
+    // On by default since 2026-11-25. A stored value is kept: every blob saved
+    // since #45 holds one (whole-blob saves), and false there may be a choice.
+    s.restore_last = typeof s.restore_last === "boolean" ? s.restore_last : true;
+    s.nav_ee_in_workspaces = typeof s.nav_ee_in_workspaces === "boolean" ? s.nav_ee_in_workspaces : true;
     // Whole-blob settings give every existing install an explicit false. The
     // marker applies the new default once, then leaves later user choices alone.
     const needsChatDefaultMigration = raw?.chat_default_v1 !== true;
@@ -986,6 +1004,7 @@ export async function loadSettings(): Promise<Settings> {
     if (!s.ws_collapsed || typeof s.ws_collapsed !== "object") s.ws_collapsed = {};
     if (s.beta_ideas !== true) s.beta_ideas = false;
     if (s.beta_group_chat !== true) s.beta_group_chat = false;
+    if (s.beta_workspace_chats !== true) s.beta_workspace_chats = false;
     if (s.use_these_ask_note !== false) s.use_these_ask_note = true;
     if (!isHarness(s.default_provider)) s.default_provider = HARNESSES[0];
     // A tab that no longer exists must land on Files, globally AND per place.

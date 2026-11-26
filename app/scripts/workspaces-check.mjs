@@ -131,8 +131,17 @@ const ipc = read("../src/ipc.ts");
 const consoleRows = ipc.match(/export const CONSOLE_ROWS[^=]*=\s*\[([\s\S]*?)\];/)?.[1] ?? "";
 const mock = read("../src/mock/install.ts");
 for (const r of ROWS) {
-  ok(`${r} is a bare HostConsole row`, new RegExp(`^\\s+${r}: HostConsole => workspaces::${r}\\(`, "m").test(dispatch));
-  ok(`${r} is in CONSOLE_ROWS`, consoleRows.includes(`"${r}"`));
+  if (r === "workspaces_list") {
+    // iOS workspaces phase 1 (the owner, 2026-11-25): a device reads it,
+    // projected by serve; a remote window still does not ask (CONSOLE_SHAPED).
+    ok(`${r} is a device's read, filtered by named_workspaces`, new RegExp(`^\\s+${r}: Engine \\[read, filtered\\(named_workspaces\\)\\] => workspaces::${r}\\(`, "m").test(dispatch));
+    ok(`${r} is not in CONSOLE_ROWS`, !consoleRows.includes(`"${r}"`));
+    const shaped = ipc.match(/export const CONSOLE_SHAPED[^=]*=\s*\[([\s\S]*?)\];/)?.[1] ?? "";
+    ok(`${r} is in CONSOLE_SHAPED, so a remote window does not ask`, shaped.includes(`"${r}"`) && /if \(CONSOLE_SHAPED\.includes\(cmd\)\) return `/.test(ipc));
+  } else {
+    ok(`${r} is a bare HostConsole row`, new RegExp(`^\\s+${r}: HostConsole => workspaces::${r}\\(`, "m").test(dispatch));
+    ok(`${r} is in CONSOLE_ROWS`, consoleRows.includes(`"${r}"`));
+  }
   ok(`the mock answers ${r}`, mock.includes(`case "${r}":`));
 }
 const mcp = read("../../crates/worktrees-cli/src/mcp.rs");
@@ -161,8 +170,8 @@ ok("no MCP tool reaches a workspace", !/workspace_(create|rename|remove|set_proj
     ok(`${m[2] ?? "tokyo-night (:root)"} defines its own shade of every color${missing.length ? `: missing ${missing}` : ""}`, missing.length === 0);
   }
   const css = read("../src/App.css");
-  const unmapped = page.filter((c) => !css.includes(`.ws-group[data-ws-color="${c}"] { --ws-hue: var(--hue-${c}); }`));
-  ok(`App.css maps every color onto the card${unmapped.length ? `: missing ${unmapped}` : ""}`, unmapped.length === 0);
+  const unmapped = page.filter((c) => !css.includes(`.ws-group[data-ws-color="${c}"], .wsf[data-ws-color="${c}"], .wsd-crumb[data-ws-color="${c}"] { --ws-hue: var(--hue-${c}); }`));
+  ok(`App.css maps every color onto the card and its view${unmapped.length ? `: missing ${unmapped}` : ""}`, unmapped.length === 0);
   eq("wsColorOf draws a palette name", W.wsColorOf({ color: "teal" }), "teal");
   eq("…and the accent for none or a name it does not know", [W.wsColorOf({ color: null }), W.wsColorOf({}), W.wsColorOf({ color: "pink" })], [null, null, null]);
   ok("the workspace menu offers Color ▸, with Default and every color", /<SubMenu label="Color" testId="ws-color"/.test(app0) && /WS_COLORS\.map\(\(c\) =>/.test(app0) && /wsSetColor\(id, null\)/.test(app0));
@@ -224,7 +233,7 @@ ok("…and never unregisters it", !/inWs[^\n]*confirmRemoveProject/.test(hdr));
 {
   const at = app.indexOf('data-testid="ee-group"');
   const card = at < 0 ? "" : app.slice(app.lastIndexOf("everythingElse(wsList", at), app.indexOf("})()}", at));
-  ok("Everything Else is drawn from the derived rule, after the named ones", /everythingElse\(wsList, /.test(app) && app.indexOf("everythingElse(wsList") > app.indexOf("{wsGapAt(null)"));
+  ok("Everything Else is drawn from the derived rule, after the named ones", /everythingElse\(wsList, /.test(app) && app.indexOf("const ee = everythingElse(wsList") > app.indexOf("{wsGapAt(null)"));
   ok("…its card is no drop target and no reorder row (no data-ws-id / data-drop)", card.length > 100 && !/data-ws-id|data-drop/.test(card));
   ok("…it folds under its reserved id", /toggleWs\(ee\.id\)/.test(card) && /settings\.ws_collapsed\?\.\[ee\.id\]/.test(card));
   const head = app.slice(app.indexOf("function EverythingElseHeader"), app.indexOf("function WsGoneRow") > 0 ? app.indexOf("function WsGoneRow") : undefined);

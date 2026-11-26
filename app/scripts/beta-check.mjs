@@ -5,10 +5,12 @@
 //     normalised, its own helper, and its own checkbox, which Settings →
 //     General draws FROM the table. The Settings map owns exactly the table's
 //     keys. Nothing but the helper reads a key.
-//  2. Ideas (#632) is the one beta today: with its flag OFF the main window
-//     shows no lightbulb in the rail, takes no ⌘⇧I and offers no workspace
-//     overview (a workspace's name folds its card), turning it off closes
-//     the Ideas window, and the shim's launch rule reads the same key.
+//  2. Ideas (#632): with its flag OFF the main window shows no lightbulb in the
+//     rail and takes no ⌘⇧I, turning it off closes the Ideas window, and the
+//     shim's launch rule reads the same key. The workspace view is drawn with
+//     Ideas OR workspace chats on, and each of its parts asks its own helper:
+//     Plan and Ideas are Ideas', Memory and Chats are workspace chats'. With
+//     both off a workspace's name folds its card.
 //  3. Named workspaces LEFT the beta on 2026-11-14: no workspace surface sits
 //     behind a beta helper any more (the switch, the menus, the list's fetch,
 //     the view), and the words from before "All projects" existed are gone.
@@ -53,6 +55,9 @@ for (const f of F) {
     for (const v of [false, undefined, "yes", 1, null]) ok(fn({ [f.key]: v }) === false, `${name}: off for ${JSON.stringify(v)}`);
   }
 }
+ok(F.find((f) => f.key === "beta_workspace_chats")?.label === "Workspace chats" && /still being built/i.test(F.find((f) => f.key === "beta_workspace_chats")?.what ?? "")
+  && B.workspaceChatsBeta({ beta_ideas: true }) === false && B.ideasBeta({ beta_workspace_chats: true }) === false,
+  "Workspace chats is a beta of its own, says it is still being built, and is neither Ideas' flag nor Ideas its");
 ok(keys.includes("beta_ideas") && F.find((f) => f.key === "beta_ideas")?.label === "Ideas",
   "Ideas is a beta feature of its own, labelled Ideas (no longer \"Ideas and workspaces\")");
 
@@ -113,16 +118,21 @@ ok(/import \{[^}]*\bideasBeta\b[^}]*\} from "\.\/beta";/.test(app) && /const ide
 /** The `{ideasOn && … (` or `{ideasOn && <x … />}` regions, start to the
  *  matching close. Comments are blanked first, so a paren in one cannot
  *  unbalance the walk. */
-const regions = [];
-for (const m of code.matchAll(/\{ideasOn && /g)) {
-  let depth = 0, i = m.index;
-  for (; i < code.length; i++) {
-    const c = code[i];
-    if (c === "{") depth++;
-    else if (c === "}" && --depth === 0) break;
+const regionsOf = (flag) => {
+  const out = [];
+  for (const m of code.matchAll(new RegExp(`\\{${flag} && `, "g"))) {
+    let depth = 0, i = m.index;
+    for (; i < code.length; i++) {
+      const c = code[i];
+      if (c === "{") depth++;
+      else if (c === "}" && --depth === 0) break;
+    }
+    out.push([m.index, i]);
   }
-  regions.push([m.index, i]);
-}
+  return out;
+};
+const regions = regionsOf("ideasOn"), frameRegions = regionsOf("frameOn");
+const gatedFrame = (needle) => { const a = at(needle); return a.length > 0 && a.every((p) => frameRegions.some(([x, y]) => p > x && p < y)); };
 const at = (needle) => [...code.matchAll(new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"))].map((m) => m.index);
 const gated = (needle) => { const a = at(needle); return a.length > 0 && a.every((p) => regions.some(([x, y]) => p > x && p < y)); };
 const ungated = (needle) => { const a = at(needle); return a.length > 0 && a.every((p) => !regions.some(([x, y]) => p > x && p < y)); };
@@ -131,16 +141,56 @@ ok(gated('data-testid="ideas-rail"'), "the rail's lightbulb renders only with Id
 const chord = code.match(/if \([^\n]*e\.code === "KeyI"\)\) \{/)?.[0] ?? "";
 ok(/^if \(keyRef\.current\.ideasOn && /.test(chord), "⌘⇧I is taken only with Ideas on");
 ok(/keyRef\.current = \{[\s\S]*?\bideasOn\b[\s\S]*?\};/.test(code), "…and keyRef carries ideasOn");
-ok((code.match(/openIdeas\(\)|onClick=\{openIdeas\}/g) ?? []).length === 3, "openIdeas has exactly its three callers, the chord, the rail and openIdeaDoc");
-// The third (phase 4): a workspace overview's plan ▸ / idea ▸ opens the
-// document in the Ideas window, and returns first with Ideas off.
-ok(/const openIdeaDoc = \(id: string\) => \{\s*if \(!ideasOn\) return;/.test(code), "…and openIdeaDoc opens nothing with Ideas off");
-// Phase 4's overview is Ideas', on a nav that is nobody's beta (#662).
-ok(gated('data-testid="ws-overview-open"'), "a workspace menu's Overview renders only with Ideas on");
-ok(/const openWsOverview = \(id: string\) => \{\s*if \(!ideasOn \|\| id === EVERYTHING_ELSE_ID\) return;/.test(code), "openWsOverview opens nothing with Ideas off, nor for Everything Else");
-ok(/onOpen=\{ideasOn \? \(\) => openWsOverview\(w\.id\) : undefined\}/.test(code) && /onClick=\{onOpen \?\? onToggle\}/.test(code), "with Ideas off a workspace's name folds its card, as before phase 4");
-ok(/\) : ideasOn && wsOpen && wsById\(wsOpen\) \? \(\s*<WorkspaceOverview/.test(code), "the overview is drawn only with Ideas on");
-ok((code.match(/<WorkspaceOverview\b/g) ?? []).length === 1, "…and in one place");
+ok((code.match(/openIdeas\(\)|onClick=\{openIdeas\}/g) ?? []).length === 2 && (code.match(/invoke\("open_companion"\)/g) ?? []).length === 2, "the Ideas window is opened by the chord and the rail, and by floatDoc");
+// The third: Float, on a document open in the main area, opens it in the
+// Ideas window, and returns first with Ideas off.
+ok(/if \(!ideasOn \|\| !doc\) return Promise\.resolve\([^;]*;\s*return ask\(windowEnv\(\), FLOAT, doc, \(\) => invoke\("open_companion"\)/.test(code) && /float=\{ideasOn \? \(to\) => floatDoc/.test(code), "…and floatDoc opens nothing with Ideas off, for a memory file too");
+// The workspace view: drawn with Ideas or workspace chats on, its parts by
+// their own helper (wsview.ts, run here for every combination).
+ok(/const wsChatsOn = workspaceChatsBeta\(settings\);/.test(code) && /const frameOn = wsFrameOn\(\{ ideas: ideasOn, chats: wsChatsOn \}\);/.test(code), "App.tsx: frameOn = Ideas or workspace chats, each from its own helper");
+const V = await load(read("../src/wsview.ts").replace(/^import type .*$/gm, ""), "wsview.ts");
+for (const [b, frame, tabs, chips] of [
+  [{ ideas: false, chats: false }, false, "overview", ""],
+  [{ ideas: true, chats: false }, true, "overview,plan,ideas", "plan,ideas"],
+  [{ ideas: false, chats: true }, true, "overview,memory,chats", "memory"],
+  [{ ideas: true, chats: true }, true, "overview,memory,plan,ideas,chats", "memory,plan,ideas"],
+]) ok(V.wsFrameOn(b) === frame && V.wsTabs(b).join() === tabs && V.docChips(b).join() === chips, `Ideas ${b.ideas ? "on" : "off"}, chats ${b.chats ? "on" : "off"}: the view ${frame ? `has ${tabs}` : "is not drawn"}, the nav row ${chips || "nothing"}`);
+ok(/const tabsOn = wsTabs\(\{ ideas: ideasOn, chats: wsChatsOn \}\);[\s\S]{0,400}?const docRescue = docStuck !== null && mainDoc \? \{ ws: mainDoc\.ws, tab: mainDoc\.tab \} : null;\s*const viewOn = frameOn \|\| docRescue !== null;\s*const tabsOf = \(id: string \| null\) => \(id \? tabsWith\(tabsOn, id, docRescue\) : tabsOn\);\s*const wsTabNow = tabOr\(wsTab, tabsOf\(wsOpen\)\);/.test(code) && /tabs=\{tabsOf\(wsShown\?\.id \?\? null\)\}\s*tab=\{wsTabNow\}/.test(code), "its tabs are those, and a tab that is not drawn is never the one shown");
+ok(/const wsShown = viewOn && !\(selected && sel\) && wsOpen \? wsById\(wsOpen\) : null;/.test(code) && /shown=\{wsShown !== null\}/.test(code), "the view is shown with either on, and with both off only for a text that is not saved");
+ok(/const showWs = async \([\s\S]{0,160}?\{\s*if \(!viewOn \|\| id === EVERYTHING_ELSE_ID\) return false;/.test(code) && /const openWsOverview = \(id: string\) => \{ void showWsRef\.current\(id, "overview", \{ chat: null \}\); \};/.test(code), "showWs opens nothing with both off, nor for Everything Else, and the overview goes through it");
+ok(/onOpen=\{frameOn \? \(\) => openWsOverview\(w\.id\) : docRescue\?\.ws === w\.id \? \(\) => void showWs\(w\.id, docRescue\.tab, \{ doc: mainDoc\?\.name \}\) : undefined\}/.test(code) && /onClick=\{onOpen \?\? onToggle\}/.test(code), "with both off a workspace's name folds its card, as before phase 4");
+ok(gatedFrame('data-testid="ws-overview-open"') && gatedFrame("<DocChips") && /chips=\{docChips\(\{ ideas: ideasOn, chats: wsChatsOn \}\)\.map/.test(code), "a workspace menu's Overview and its card's documents row render only with the view on, the row's chips by their own helpers");
+const overview = read("../src/WorkspaceOverview.tsx");
+ok(/const work = props\.ideasOn && <WorkCard/.test(overview) && /\{props\.ideasOn && <IdeasCard/.test(overview) && (overview.match(/<WorkCard|<IdeasCard/g) ?? []).length === 2, "the Overview's Work and Ideas are Ideas' alone");
+ok(/\{props\.chatsOn\s*\? <Card name="Memory"/.test(overview) && /\{props\.chatsOn && <Card name="Chats"/.test(overview) && (overview.match(/<Card name="(Memory|Chats)"/g) ?? []).length === 2, "…its Memory and Chats are workspace chats' alone");
+ok(/<WorkspaceOverview[\s\S]{0,200}?ideasOn=\{ideasOn\}\s*chatsOn=\{wsChatsOn\}/.test(code), "…and it is told each by its own");
+// Chats are workspace chats' alone, wherever they show.
+ok(/const wsChats = useWsChats\(wsChatsOn && !!wsList,/.test(code) && /if \(!on\) return;\s*for \(const id of key/.test(read("../src/useWsChats.ts")), "workspace_chats is asked for, and workspaces:sessions heard, only with workspace chats on");
+ok(/\{wsChatsOn && \(\s*<NavChats/.test(code) && (code.match(/<NavChats\b/g) ?? []).length === 1, "a card's Chats group is drawn only with it on");
+ok(/const wsMiddle = !wsShown \|\| !wsChatsOn \? null/.test(code) && (code.match(/<WorkspaceChatColumn\b/g) ?? []).length === 1 && /newChat=\{wsShown && wsChatsOn && /.test(code), "…and so are the middle column and New chat");
+ok(/waits=\{wsChatsOn && chatWaits\}/.test(code) && /\.\.\.\(wsChatsOn \? wsChats\.rows\(w\.id\) : \[\]\)\.map/.test(code), "…and the switch's dot and ⌘K's chats");
+// Slice 6: a place's crumb and dock tab, with the view on, its parts by their own.
+ok(/const placeWsAll = frameOn && selected && sel && wsList \?/.test(code) && /\(d\.key !== "workspace" \|\| placeWsAll\.length > 0\)/.test(code) && /\{placeWsAll\.length > 0 && \(\s*<span className="wsd-crumb"/.test(code), "a place's crumb and its dock tab are drawn only with the view on, for a project a workspace holds");
+ok(/const tabs = docChips\(\{ ideas: ideasOn, chats: wsChatsOn \}\);\s*const tab = tabs\.includes\(dockDoc\)/.test(code), "…and the tab's Memory, Plan and Ideas by their own helpers");
+{ const dock = read("../src/WorkspaceDock.tsx"); ok(!/useDoc\b|EditorHost|loadeditor|ChatPane|WorkspaceChat"|workspace_send|idea_write|memory_write/.test(dock), "…which read: no editor, no save and no chat in a place's dock"); }
+// A document opens in the view's tabs. The pane may stay mounted behind the
+// gate (a text that could not be saved waits in it), so what is held is that it
+// SHOWS and OPENS nothing.
+ok(/const openDocHere = \(id: string, startIn\?: "edit"(?: \| "title")?\) => \{\s*if \(!ideasOn \|\| !wsOpen\) return;/.test(code), "openDocHere opens nothing with Ideas off");
+ok(/const docShown = wsShown !== null && mainDoc !== null && wsShown\.id === mainDoc\.ws && wsTabNow === mainDoc\.tab && !\(memFile && memFile\.kind !== "text"\);/.test(code) && /<MainDocument\s[\s\S]{0,160}?shown=\{docShown\}/.test(code), "a document in the main area is shown only on its own tab, which its beta draws");
+ok(/const docBeta = !mainDoc \|\| \(mainDoc\.source === ideaSource \? ideasOn : wsChatsOn\);/.test(code) && /if \(!docBeta \|\| !docWs\) void leaveMainDoc\(\);/.test(code), "…and is closed, once saved, when ITS beta goes off (Ideas' documents, or a memory's files)");
+ok(/const wsMem = useWsMemory\(wsChatsOn && !!wsList,/.test(code) && /memory=\{!wsChatsOn \? null/.test(code), "workspace_memory is asked for, and the Overview's memory drawn, only with workspace chats on");
+ok(/if \(to\.source === ideaSource\) \{\s*if \(!ideasOn\)/.test(code), "an idea: link in a memory file opens nothing with Ideas off");
+ok((code.match(/<MainDocument\b/g) ?? []).length === 1 && (code.match(/setMainDoc\(\{/g) ?? []).length === 1, "…drawn in one place, and opened by showWs alone");
+ok((code.match(/<WorkspaceFrame\b/g) ?? []).length === 1 && (code.match(/<WorkspaceOverview\b/g) ?? []).length === 1, "the view is drawn in one place");
+// One parent for the document's life: the frame is mounted while a document is
+// open, whatever is shown, and the pane is the last child of its one slot.
+ok(/\{\(wsShown \|\| mainDoc\) && \(\s*<WorkspaceFrame\b/.test(code), "the frame stays mounted while a document is open, whatever is shown");
+{
+  const frame = read("../src/WorkspaceFrame.tsx");
+  ok((frame.match(/\{props\.doc\}/g) ?? []).length === 1 && /\{props\.doc\}\s*<\/div>\s*<\/div>\s*<\/div>\s*<\/div>\s*<\/section>/.test(frame) && /<section className="wsf"[^>]*hidden=\{!props\.shown\}>/.test(frame) && !/key=\{(props\.)?ws/.test(frame),
+    "…and the document's section has one parent there, hidden and never keyed to a workspace or a tab");
+}
 ok(/if \(was === true && !ideasOn\) \{\s*invoke\("close_companion"\)/.test(code), "turning Ideas off closes the Ideas window (close_companion)");
 // Workspaces: out of the beta (2026-11-14).
 ok(ungated("<NavViewSwitch"), "the Workspaces | All projects switch is behind no beta");
@@ -151,7 +201,7 @@ const eff = code.match(/useEffect\(\(\) => \{\s*let alive = true;\s*invoke<WsLis
 ok(eff.length > 0, "workspaces_list is fetched with no beta in its way (its effect keys on the registry alone)");
 // The overview's own read (Ideas) keys on the list, so a changed plan is read
 // again; it never writes it. That one effect apart, no line ties the two.
-const ovEff = code.match(/useEffect\(\(\) => \{\s*if \(!ideasOn \|\| !wsOpen\) \{ setWsOv\(null\); return; \}[\s\S]*?\}, \[ideasOn, wsOpen, wsList, ideasTick\]\);/)?.[0] ?? "";
+const ovEff = code.match(/useEffect\(\(\) => \{\s*if \(!ideasOn \|\| !wsFor\) \{ setWsOv\(null\); return; \}[\s\S]*?\}, \[ideasOn, wsFor, wsList, ideasTick\]\);/)?.[0] ?? "";
 ok(/"workspace_overview"/.test(ovEff) && !/setWsList|workspaces_list/.test(ovEff), "the overview's effect reads workspace_overview and leaves the workspace list alone");
 ok(!/ideasOn[^\n;]*\bwsList\b|\bwsList\b[^\n;]*ideasOn/.test(code.replace(ovEff, "")), "no line ties the workspace list to ideasOn");
 // The words from before "All projects" existed are gone.

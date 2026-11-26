@@ -751,6 +751,483 @@ fn idea_term_open_attaches_the_conversations_own_session() {
     assert_eq!(sb.terminate().code(), Some(0));
 }
 
+/// An executable `claude` in `dir` that answers `--help` (with `--session-id`
+/// unless `dir/nofloor` exists), keeps its folder and arguments in `dir/argv`
+/// and then waits. Written by a child, never by this process (ETXTBSY:
+/// `fsx::exec_fixture`'s reason).
+fn fake_chat_claude(dir: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    let d = dir.display();
+    let body = format!(
+        "#!/bin/sh\nif [ \"$1\" = --help ]; then [ -e '{d}/nofloor' ] || echo '  --session-id <uuid>'; exit 0; fi\n\
+         cat memory/MEMORY.md > '{d}/index' 2>/dev/null\n\
+         {{ pwd -P; for a in \"$@\"; do printf '%s\\n' \"$a\"; done; }} > '{d}/argv.tmp'\nmv '{d}/argv.tmp' '{d}/argv'\n\
+         if [ -e '{d}/works' ]; then\n\
+         mkdir -p \"$HOME/.claude/sessions\"; s=$2\n\
+         printf '{{\"pid\":%s,\"cwd\":\"%s\",\"status\":\"idle\",\"kind\":\"interactive\",\"entrypoint\":\"cli\",\"tmux\":\"%s:@1.%s\"}}' $$ \"$(pwd -P)\" \"$s\" \"$TMUX_PANE\" > \"$HOME/.claude/sessions/$$.json\"\n\
+         for last; do :; done; case \"$last\" in *'This is fold '*)\n\
+         t=\"$HOME/.claude/projects/$(pwd -P | sed 's/[^A-Za-z0-9]/-/g')\"; mkdir -p \"$t\"\n\
+         printf '%s\\n%s\\n' \"{{\\\"type\\\":\\\"user\\\",\\\"uuid\\\":\\\"u1\\\",\\\"timestamp\\\":\\\"2027-01-15T08:00:00Z\\\",\\\"message\\\":{{\\\"role\\\":\\\"user\\\",\\\"content\\\":\\\"$last\\\"}}}}\" '{{\"type\":\"assistant\",\"uuid\":\"a1\",\"timestamp\":\"2027-01-15T08:00:01Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"I wrote the note.\"}}]}}}}' > \"$t/$4.jsonl\";; esac; fi\n\
+         exec cat\n"
+    );
+    let mut c = Command::new("sh").arg("-c").arg("cat > \"$1\" && chmod 755 \"$1\"").arg("sh").arg(dir.join("claude")).stdin(Stdio::piped()).spawn().unwrap();
+    c.stdin.take().unwrap().write_all(body.as_bytes()).unwrap();
+    assert!(c.wait().unwrap().success());
+}
+
+/// Tidy… through the binary, with a fake Claude: the row takes the
+/// workspace's id alone, and the chat opens on the same fixed opener as any
+/// chat, its `start.md` the engine's tidy file. A second is refused while the
+/// first runs, the record says which chat it is, and the audit names it.
+#[test]
+fn a_tidy_chat_opens_on_the_engines_file_and_one_runs_at_a_time() {
+    if !PrivateTmux::available() {
+        eprintln!("skipped: no tmux on PATH");
+        return;
+    }
+    let mut sb = Sandbox::new("wstidy");
+    let tmux = PrivateTmux::new("wstidy");
+    let fake = sb.root.join("fake");
+    fake_chat_claude(&fake);
+    let folder = sb.root.join("wsdir");
+    let path = format!("{}:{}", fake.display(), std::env::var("PATH").unwrap_or_default());
+    let sf = sb.launch_env(
+        &["--allow-origin", "http://localhost:1420"],
+        &[
+            ("TMUX", &tmux.env()),
+            ("WORKTREES_WORKSPACES_DIR", folder.to_str().unwrap()),
+            ("WORKTREES_IDEAS_DIR", sb.root.join("ideas").to_str().unwrap()),
+            ("PATH", &path),
+            ("WORKTREES_USAGE_PROBE", "off"),
+            ("DISABLE_AUTOUPDATER", "1"),
+        ],
+    );
+    let mut ws = connect(&sf, "http://localhost:1420");
+    let mut n = 0;
+    let mut call = |cmd: &str, args: Value| -> Result<Value, String> {
+        n += 1;
+        let r = rpc(&mut ws, n, cmd, args);
+        match r.get("err") {
+            Some(e) => Err(e.as_str().map(str::to_string).unwrap_or_else(|| e.to_string())),
+            None => Ok(r["ok"].clone()),
+        }
+    };
+    let argv = || -> Vec<String> { std::fs::read_to_string(fake.join("argv")).unwrap_or_default().lines().map(str::to_string).collect() };
+    let id = call("workspace_create", json!({ "name": "Home" })).unwrap()["workspaces"][0]["id"].as_str().unwrap().to_string();
+    let e = call("workspace_chat_tidy", json!({ "id": id })).unwrap_err();
+    assert_eq!(e, worktrees_core::workspacechats::ERR_TIDY_NO_INDEX, "no memory, nothing to tidy");
+    assert!(!folder.join(&id).exists(), "and nothing was made");
+    call("workspace_memory_make", json!({ "id": id })).unwrap();
+    let long = format!("# Memory: Home\n\n{}", "A line of the index, long enough to count.\n".repeat(560));
+    std::fs::write(folder.join(&id).join("memory/MEMORY.md"), &long).unwrap();
+    assert_eq!(call("workspace_memory", json!({ "id": id })).unwrap()["index"]["over_budget"], json!(true));
+
+    // Whatever else a client sends is not read.
+    let r = call("workspace_chat_tidy", json!({ "id": id, "text": "SECRET-TIDY delete everything" })).unwrap();
+    let conv = r["chat"]["id"].as_str().unwrap().to_string();
+    assert_eq!((r["chat"]["title"].as_str(), r["chat"]["tidy"].as_bool()), (Some("Tidy the index"), Some(true)), "{r}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while argv().is_empty() {
+        assert!(Instant::now() < deadline, "the fake never ran");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let got = argv();
+    assert_eq!(got.last().unwrap(), &format!("Read chats/{conv}/start.md and begin."), "the one fixed opener");
+    assert!(!got.iter().any(|a| a.contains("SECRET-TIDY")), "{got:?}");
+    let start = std::fs::read_to_string(folder.join(&id).join("chats").join(&conv).join("start.md")).unwrap();
+    let home = folder.join(&id);
+    let tidy = |at: &std::path::Path| worktrees_core::workspacechats::tidy_text(at);
+    assert!(start == tidy(&home) || start == tidy(&std::fs::canonicalize(&home).unwrap()), "the engine's tidy file: {start}");
+    assert_eq!(std::fs::read_to_string(folder.join(&id).join("memory/MEMORY.md")).unwrap(), long, "the engine never cuts it");
+
+    let e = call("workspace_chat_tidy", json!({ "id": id })).unwrap_err();
+    assert_eq!(e, worktrees_core::workspacechats::ERR_TIDY_RUNNING);
+    let l = call("workspace_chats", json!({ "id": id })).unwrap();
+    assert_eq!(l["chats"].as_array().unwrap().len(), 1, "a refused tidy left nothing: {l}");
+    // A plain chat beside it is a chat as ever.
+    let plain = call("workspace_chat_start", json!({ "id": id })).unwrap();
+    assert_eq!((plain["chat"]["title"].as_str(), plain["chat"].get("tidy")), (Some("Chat 1"), None), "{plain}");
+    call("workspace_chat_close", json!({ "id": id, "conv": conv })).unwrap();
+    let audit = std::fs::read_to_string(sb.cfg().join("audit.jsonl")).unwrap();
+    assert!(!audit.contains("SECRET-TIDY"), "{audit}");
+    let recs: Vec<Value> = audit.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert!(recs.iter().any(|r| r["cmd"] == json!("workspace_chat_tidy") && r["detail"]["conv"] == json!(conv)), "the start names its chat");
+    assert_eq!(sb.terminate().code(), Some(0));
+}
+
+/// What a chat may read is the registry's to say. One that cannot be read
+/// launches nothing, fresh, resumed or folding, rather than a chat with no
+/// rules; and a chat that is live under rules a launch would no longer get
+/// says so, with what changed.
+#[test]
+fn a_chat_is_not_launched_on_a_registry_that_cannot_be_read_and_stale_access_is_said() {
+    if !PrivateTmux::available() {
+        eprintln!("skipped: no tmux on PATH");
+        return;
+    }
+    let mut sb = Sandbox::new("wsaccess");
+    let tmux = PrivateTmux::new("wsaccess");
+    let fake = sb.root.join("fake");
+    fake_chat_claude(&fake);
+    let folder = sb.root.join("wsdir");
+    let ideas = sb.root.join("ideas");
+    let idea = worktrees_core::ideas::create_at(&ideas, "Jellyfin sharing").unwrap().idea;
+    let (a, b) = (sb.project("alpha"), sb.project("beta"));
+    let reg = sb.root.join("xdg/worktrees/projects.json");
+    let path = format!("{}:{}", fake.display(), std::env::var("PATH").unwrap_or_default());
+    let sf = sb.launch_env(
+        &["--allow-origin", "http://localhost:1420"],
+        &[
+            ("TMUX", &tmux.env()),
+            ("WORKTREES_WORKSPACES_DIR", folder.to_str().unwrap()),
+            ("WORKTREES_IDEAS_DIR", ideas.to_str().unwrap()),
+            ("PATH", &path),
+            ("WORKTREES_USAGE_PROBE", "off"),
+            ("DISABLE_AUTOUPDATER", "1"),
+        ],
+    );
+    let mut ws = connect(&sf, "http://localhost:1420");
+    let mut n = 0;
+    let mut call = |cmd: &str, args: Value| -> Result<Value, String> {
+        n += 1;
+        let r = rpc(&mut ws, n, cmd, args);
+        match r.get("err") {
+            Some(e) => Err(e.as_str().map(str::to_string).unwrap_or_else(|| e.to_string())),
+            None => Ok(r["ok"].clone()),
+        }
+    };
+    let id = call("workspace_create", json!({ "name": "Home" })).unwrap()["workspaces"][0]["id"].as_str().unwrap().to_string();
+    call("workspace_set_projects", json!({ "id": id, "roots": [a, b] })).unwrap();
+    call("workspace_link_idea", json!({ "id": id, "idea": idea.id })).unwrap();
+    let conv = call("workspace_chat_start", json!({ "id": id })).unwrap()["chat"]["id"].as_str().unwrap().to_string();
+    let l = call("workspace_chats", json!({ "id": id })).unwrap();
+    assert_eq!((&l["chats"][0]["access"], &l["chats"][0]["access_changes"]), (&json!("current"), &json!([])), "{l}");
+    assert!(l["limits"].as_str().is_some_and(|s| s.contains("file tools") && s.contains("not every program")), "{l}");
+
+    // Private, taken out, and a document unlinked: said of the LIVE chat, one
+    // by one, and it is not ended.
+    call("set_project_private", json!({ "root": b, "private": true })).unwrap();
+    call("workspace_unlink_idea", json!({ "id": id, "idea": idea.id })).unwrap();
+    let l = call("workspace_chats", json!({ "id": id })).unwrap();
+    assert_eq!((l["chats"][0]["access"].as_str(), l["chats"][0]["state"].as_str()), (Some("stale"), Some("running")), "{l}");
+    let what: Vec<(&str, &str, &str)> = l["chats"][0]["access_changes"].as_array().unwrap().iter().map(|c| (c["kind"].as_str().unwrap(), c["name"].as_str().unwrap(), c["change"].as_str().unwrap())).collect();
+    assert_eq!(what, [("project", "beta", "private"), ("document", "Jellyfin sharing", "unlinked")]);
+    // A relaunch takes the rules of now.
+    call("workspace_chat_close", json!({ "id": id, "conv": conv })).unwrap();
+    let l = call("workspace_chats", json!({ "id": id })).unwrap();
+    assert_eq!(l["chats"][0]["access"], Value::Null, "an ended chat has none: {l}");
+    call("workspace_chat_resume", json!({ "id": id, "conv": conv })).unwrap();
+    assert_eq!(call("workspace_chats", json!({ "id": id })).unwrap()["chats"][0]["access"], json!("current"));
+    call("workspace_set_projects", json!({ "id": id, "roots": [b] })).unwrap();
+    let l = call("workspace_chats", json!({ "id": id })).unwrap();
+    assert_eq!(l["chats"][0]["access_changes"], json!([{ "kind": "project", "name": "alpha", "path": a, "change": "removed" }]), "{l}");
+    call("workspace_chat_close", json!({ "id": id, "conv": conv })).unwrap();
+
+    // The registry lost, three ways: nothing is launched, and it is said.
+    let good = std::fs::read(&reg).unwrap();
+    let told = folder.join(&id).join("chats").join(&conv).join("context.md");
+    std::fs::write(&told, "as it was").unwrap();
+    for (how, text) in [("broken", Some(&b"{ not json"[..])), ("empty", Some(&b""[..])), ("gone", None)] {
+        match text {
+            Some(t) => std::fs::write(&reg, t).unwrap(),
+            None => std::fs::remove_file(&reg).unwrap(),
+        }
+        for (cmd, args) in [
+            ("workspace_chat_start", json!({ "id": id })),
+            ("workspace_chat_resume", json!({ "id": id, "conv": conv })),
+            ("workspace_chat_fold", json!({ "id": id, "conv": conv })),
+        ] {
+            let e = call(cmd, args).err().unwrap_or_else(|| panic!("{how}: {cmd} launched a chat with no rules"));
+            assert!(e.contains("list of projects"), "{how}: {cmd}: {e}");
+        }
+        let l = call("workspace_chats", json!({ "id": id })).unwrap();
+        assert_eq!(l["chats"].as_array().unwrap().len(), 1, "{how}: a refused start left its chat: {l}");
+        // Asked before anything is done: a live chat would not have been ended.
+        assert_eq!(l["chats"][0].get("fold"), None, "{how}: {l}");
+        assert_eq!(std::fs::read_to_string(&told).unwrap(), "as it was", "{how}");
+        assert_eq!((l["projects"][0]["reads"].as_str(), l["projects"][0]["why"].as_str()), (Some("no"), Some("the list of projects could not be read")), "{how}: {l}");
+        let live = tmux.try_run(&["list-sessions", "-F", "#{session_name}"]).map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+        assert!(!live.contains("~ws~"), "{how}: {live}");
+        std::fs::write(&reg, &good).unwrap();
+    }
+    call("workspace_chat_resume", json!({ "id": id, "conv": conv })).unwrap();
+    assert_eq!(sb.terminate().code(), Some(0));
+}
+
+/// A workspace chat's whole life through the binary, with a fake Claude and a
+/// tmux server of its own: the launch (folder, argv, files), the list and the
+/// event, the terminal, close and resume, a refused start that leaves nothing,
+/// and the workspace's removal, which ends its chats and moves its folder.
+/// Nothing of it is a project's: no place's session changes, and nothing under
+/// the workspaces folder can be registered.
+#[test]
+fn a_workspace_chat_from_start_to_the_workspaces_removal() {
+    if !PrivateTmux::available() {
+        eprintln!("skipped: no tmux on PATH");
+        return;
+    }
+    let mut sb = Sandbox::new("wschat");
+    let tmux = PrivateTmux::new("wschat");
+    let fake = sb.root.join("fake");
+    fake_chat_claude(&fake);
+    let folder = sb.root.join("wsdir");
+    let ideas = sb.root.join("ideas");
+    let linked = worktrees_core::ideas::create_at(&ideas, "Jellyfin sharing").unwrap().idea;
+    worktrees_core::ideas::create_at(&ideas, "Nobody linked it").unwrap();
+    let ideas = std::fs::canonicalize(ideas).unwrap();
+    let a = sb.project("alpha");
+    let private = sb.project("priv");
+    let reg = sb.root.join("xdg/worktrees/projects.json");
+    let mut v: Value = serde_json::from_slice(&std::fs::read(&reg).unwrap()).unwrap();
+    for p in v["projects"].as_array_mut().unwrap() {
+        if p["root"] == json!(private) {
+            p["private"] = json!(true);
+        }
+    }
+    std::fs::write(&reg, v.to_string()).unwrap();
+    let path = format!("{}:{}", fake.display(), std::env::var("PATH").unwrap_or_default());
+    let sf = sb.launch_env(
+        &["--allow-origin", "http://localhost:1420"],
+        &[
+            ("TMUX", &tmux.env()),
+            ("WORKTREES_WORKSPACES_DIR", folder.to_str().unwrap()),
+            ("WORKTREES_IDEAS_DIR", ideas.to_str().unwrap()),
+            ("PATH", &path),
+            ("WORKTREES_USAGE_PROBE", "off"),
+            ("DISABLE_AUTOUPDATER", "1"),
+        ],
+    );
+    let mut ws = connect(&sf, "http://localhost:1420");
+    let mut n = 0;
+    let mut call = |cmd: &str, args: Value| -> Result<Value, String> {
+        n += 1;
+        let r = rpc(&mut ws, n, cmd, args);
+        match r.get("err") {
+            Some(e) => Err(e.as_str().map(str::to_string).unwrap_or_else(|| e.to_string())),
+            None => Ok(r["ok"].clone()),
+        }
+    };
+    let wait = |what: &str, done: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < deadline, "{what}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let up = |s: &str| tmux.try_run(&["has-session", "-t", &format!("={s}")]).is_ok_and(|o| o.status.success());
+    let argv = || -> Vec<String> { std::fs::read_to_string(fake.join("argv")).unwrap_or_default().lines().map(str::to_string).collect() };
+
+    let id = call("workspace_create", json!({ "name": "Home" })).unwrap()["workspaces"][0]["id"].as_str().unwrap().to_string();
+    call("workspace_set_projects", json!({ "id": id, "roots": [a, private] })).unwrap();
+    call("workspace_link_idea", json!({ "id": id, "idea": linked.id })).unwrap();
+    let doc = ideas.join(&linked.file);
+
+    // Nothing under the workspaces folder is ever a project.
+    let mem = folder.join(&id).join("memory");
+    std::fs::create_dir_all(&mem).unwrap();
+    git_in(&mem, &["init", "-q"]);
+    for (cmd, args) in [
+        ("add_project", json!({ "dir": mem })),
+        ("init_repo", json!({ "dir": mem })),
+        ("create_project", json!({ "location": folder, "name": "new" })),
+    ] {
+        let e = call(cmd, args).unwrap_err();
+        assert!(e.contains("never a project"), "{cmd}: {e}");
+    }
+    let e = call("clone_project", json!({ "id": "c1", "url": "https://example.invalid/x.git", "parent": folder, "name": "cl", "onProgress": "__CHANNEL__:9" })).unwrap_err();
+    assert!(e.contains("never a project"), "{e}");
+    let cli = |args: &[&str]| Command::new(bin()).args(args).env("HOME", sb.root.join("home")).env("XDG_CONFIG_HOME", sb.root.join("xdg")).env("WORKTREES_WORKSPACES_DIR", &folder).output().unwrap();
+    let o = cli(&["projects", "add", mem.to_str().unwrap()]);
+    assert!(!o.status.success() && String::from_utf8_lossy(&o.stderr).contains("never a project"), "{o:?}");
+    assert!(!mem.join(".git/refs/heads/main").exists() && std::fs::read_dir(mem.join(".git/refs/heads")).unwrap().count() == 0, "init_repo committed before it refused");
+    std::fs::remove_dir_all(folder.join(&id)).unwrap();
+
+    // A refused start (no `--session-id`) leaves nothing of the chat. The
+    // memory it made, before the launch, stays.
+    std::fs::write(fake.join("nofloor"), "").unwrap();
+    let e = call("workspace_chat_start", json!({ "id": id })).unwrap_err();
+    assert!(e.contains("--session-id") && e.contains("a workspace chat"), "{e}");
+    assert_eq!(call("workspace_chats", json!({ "id": id })).unwrap()["chats"], json!([]));
+    assert_eq!(std::fs::read_dir(folder.join(&id).join("chats")).map(|d| d.count()).unwrap_or(0), 0, "a refused start left its chat");
+    let log = |v: Value| -> Vec<String> { v["changes"].as_array().unwrap().iter().map(|c| c["subject"].as_str().unwrap().to_string()).collect() };
+    assert_eq!(log(call("workspace_memory_log", json!({ "id": id })).unwrap()), ["Memory made"]);
+    assert!(std::fs::read_to_string(mem.join("MEMORY.md")).unwrap().starts_with("# Memory: Home\n"));
+    // Both halves: the folder and the engine's, which has the memory's history.
+    std::fs::remove_dir_all(folder.join(&id)).unwrap();
+    std::fs::remove_dir_all(folder.join(".engine").join(&id)).unwrap();
+    std::fs::remove_file(fake.join("nofloor")).unwrap();
+
+    // The start.
+    let r = call("workspace_chat_start", json!({ "id": id })).unwrap();
+    let conv = r["chat"]["id"].as_str().unwrap().to_string();
+    let session = format!("worktrees~ws~{conv}");
+    assert_eq!((r["session"].as_str(), r["chat"]["title"].as_str()), (Some(session.as_str()), Some("Chat 1")), "{r}");
+    wait("the fake never ran", &|| !argv().is_empty());
+    let sid = r["chat"]["session_id"].as_str().unwrap();
+    let got = argv();
+    let home = std::fs::canonicalize(folder.join(&id)).unwrap();
+    assert_eq!(got[0], home.to_string_lossy(), "the cwd is the workspace's folder");
+    assert_eq!(std::fs::read_to_string(fake.join("index")).unwrap().lines().next(), Some("# Memory: Home"), "the memory is there when Claude starts");
+    assert_eq!(&got[1..5], ["--name", &session, "--session-id", sid]);
+    assert_eq!(got.last().unwrap(), &format!("Read chats/{conv}/start.md and begin."));
+    let rules = format!(r#"{{"autoMemoryEnabled":false,"permissions":{{"allow":["Read(/{a}/**)","Read(/{})"],"deny":["Edit(/{a}/**)","Edit(/{}/**)","Edit(/{}/.engine/**)","Read(/{private}/**)"]}}}}"#, doc.display(), ideas.display(), std::fs::canonicalize(&folder).unwrap().display());
+    assert!(got.windows(2).any(|w| w == ["--settings", rules.as_str()]), "{got:?}");
+    assert!(!got.iter().any(|w| w.starts_with("--add-dir")), "{got:?}");
+    let own = folder.join(&id).join("chats").join(&conv);
+    assert!(std::fs::read_to_string(own.join("start.md")).unwrap().contains("memory/MEMORY.md"));
+    let ctx = std::fs::read_to_string(own.join("context.md")).unwrap();
+    assert!(ctx.contains(&format!("- `alpha`: `{a}` — registered, read\n  - place `(main)`")), "{ctx}");
+    assert!(ctx.contains(&format!("- `priv`: `{private}` — registered, NOT READ (private)\n\n")), "{ctx}");
+
+    assert!(ctx.contains(&format!("## Linked ideas\n\n- `{}`: `Jellyfin sharing` in `{}`\n", linked.id.as_deref().unwrap(), doc.display())), "{ctx}");
+
+    // The list, from the record and tmux.
+    let l = call("workspace_chats", json!({ "id": id })).unwrap();
+    assert_eq!((l["name"].as_str(), l["folder"].as_str()), (Some("Home"), folder.join(&id).to_str()), "{l}");
+    assert_eq!((l["chats"][0]["state"].as_str(), l["chats"][0]["note_exists"].as_bool()), (Some("running"), Some(false)), "{l}");
+    assert_eq!((l["projects"][0]["reads"].as_str(), l["projects"][1]["reads"].as_str(), l["projects"][1]["why"].as_str()), (Some("yes"), Some("no"), Some("private")), "{l}");
+    let d = &l["documents"][0];
+    assert_eq!((d["kind"].as_str(), d["title"].as_str(), d["path"].as_str(), d["reads"].as_str(), l["documents"].as_array().unwrap().len()), (Some("idea"), Some("Jellyfin sharing"), doc.to_str(), Some("yes"), 1), "{l}");
+    let places = call("list_places", json!({ "repo": a })).unwrap();
+    assert_eq!(places["places"][0]["tmux_session"]["up"], json!(false), "a chat is no place's session: {places}");
+
+    // The terminal: by the chat, never by a session.
+    let term = |id: &str, conv: &str| json!({ "id": id, "conv": conv, "cols": 80, "rows": 24, "onBytes": "__CHANNEL__:4" });
+    let e = call("term_open", json!({ "session": session, "cols": 80, "rows": 24, "onBytes": "__CHANNEL__:3" })).unwrap_err();
+    assert!(!e.is_empty());
+    let other = call("workspace_create", json!({ "name": "Other" })).unwrap()["workspaces"][1]["id"].as_str().unwrap().to_string();
+    let e = call("workspace_term_open", term(&other, &conv)).unwrap_err();
+    assert!(e.contains("has no chat"), "{e}");
+    let t = call("workspace_term_open", term(&id, &conv)).unwrap();
+    wait("nothing attached", &|| tmux.attached() == vec![session.clone()]);
+    call("term_close", json!({ "id": t })).unwrap();
+    wait("the close left a client attached", &|| tmux.attached().is_empty());
+
+    // A resume of a running one is refused; a close ends it and keeps it.
+    let e = call("workspace_chat_resume", json!({ "id": id, "conv": conv })).unwrap_err();
+    assert!(e.contains("already running"), "{e}");
+    assert_eq!(call("workspace_chat_close", json!({ "id": id, "conv": conv })).unwrap()["closed"], json!(true));
+    assert!(!up(&session));
+    let l = call("workspace_chats", json!({ "id": id })).unwrap();
+    assert_eq!(l["chats"][0]["state"], json!("ended"), "{l}");
+    // A resume: a new context.md, the same conversation, no opener.
+    std::fs::remove_file(fake.join("argv")).unwrap();
+    std::fs::write(own.join("context.md"), "stale").unwrap();
+    call("workspace_rename", json!({ "id": id, "name": "Homelab" })).unwrap();
+    // A hand's edit is committed before the resume, so the chat's are its own.
+    std::fs::write(mem.join("MEMORY.md"), "by hand\n").unwrap();
+    call("workspace_chat_resume", json!({ "id": id, "conv": conv })).unwrap();
+    assert_eq!(log(call("workspace_memory_log", json!({ "id": id })).unwrap()), ["Edited: MEMORY.md", "Memory made"]);
+    wait("the fake never ran again", &|| !argv().is_empty());
+    assert!(argv().windows(2).any(|w| w == ["--resume", sid]) && !argv().iter().any(|w| w.contains("start.md") || w == "--session-id"), "{:?}", argv());
+    assert!(std::fs::read_to_string(own.join("context.md")).unwrap().contains("Workspace: `Homelab`"));
+
+    // The event, whole, to a connection that declares it.
+    let mut ev = connect(&sf, "http://localhost:1420");
+    listen(&mut ev, &["workspaces:sessions"]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let payload = loop {
+        assert!(Instant::now() < deadline, "no workspaces:sessions with the chat in it");
+        let f: Value = serde_json::from_str(ev.read().unwrap().to_text().unwrap()).unwrap();
+        if f["event"] == json!("workspaces:sessions") && f["payload"]["live"] == json!([session]) {
+            break f["payload"].clone();
+        }
+    };
+    assert_eq!(payload["chat_of"][&session], json!({ "workspace": id, "chat": conv }), "{payload}");
+    assert_eq!(payload["fold"], json!({}), "{payload}");
+    drop(ev);
+
+    // The fold. Its Claude says nothing of itself (the fake has no probe), so a
+    // running one is refused; ended, it is launched again on the fold's opener
+    // with the same rules, and stopping it commits what it left.
+    let e = call("workspace_chat_fold", json!({ "id": id, "conv": conv })).unwrap_err();
+    assert!(e.contains("has not started yet"), "{e}");
+    let mem_file = |p: &str, t: &str| std::fs::write(folder.join(&id).join("memory").join(p), t).unwrap();
+    call("workspace_chat_close", json!({ "id": id, "conv": conv })).unwrap();
+    std::fs::remove_file(fake.join("argv")).unwrap();
+    let r = call("workspace_chat_fold", json!({ "id": id, "conv": conv })).unwrap();
+    assert_eq!((&r["reattach"], &r["fold"]["state"]), (&json!(false), &json!("folding")), "{r}");
+    wait("the fold never launched", &|| !argv().is_empty());
+    let got = argv();
+    let abs = folder.join(&id).join("chats").join(&conv).join("fold.md");
+    assert_eq!(got.last().unwrap(), &format!("Read {} and do what it says. This is fold {}.", abs.display(), r["fold"]["attempt"].as_str().unwrap()));
+    assert!(got.windows(2).any(|w| w == ["--resume", sid]) && got.windows(2).any(|w| w == ["--settings", rules.as_str()]), "{got:?}");
+    mem_file("topics/half.md", "half\n");
+    let e = call("workspace_memory_revert", json!({ "id": id, "commit": "a".repeat(40) })).unwrap_err();
+    assert!(e.contains("folding"), "{e}");
+    let r = call("workspace_chat_close", json!({ "id": id, "conv": conv })).unwrap();
+    assert_eq!((&r["closed"], &r["stopped_fold"], r["commit"].as_str().map(str::len)), (&json!(true), &json!(true), Some(40)), "{r}");
+    let top = call("workspace_memory_log", json!({ "id": id, "n": 1 })).unwrap();
+    assert_eq!(top["changes"][0]["subject"], json!("Fold stopped: Chat 1"), "{top}");
+    // Again: its note written, and its Claude gone, is a fold that landed.
+    let r = call("workspace_chat_fold", json!({ "id": id, "conv": conv })).unwrap();
+    assert_eq!(r["conv"], json!(conv));
+    let note = folder.join(&id).join(call("workspace_chats", json!({ "id": id })).unwrap()["chats"][0]["note"].as_str().unwrap());
+    std::fs::write(&note, "# Chat 1\n\n## Asked\n").unwrap();
+    // A note is not an end: its Claude gone before its last words is a failed
+    // fold, and what it wrote is there to keep or to fold again.
+    // Another session keeps the server up: with none left tmux could not say
+    // that this one is gone, only that it found nobody.
+    assert!(tmux.run(&["new-session", "-d", "-s", "keep", "cat"]).status.success());
+    assert!(tmux.run(&["kill-session", "-t", &format!("={session}")]).status.success());
+    let state = |call: &mut dyn FnMut(&str, Value) -> Result<Value, String>, want: &str| {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let l = call("workspace_chats", json!({ "id": id })).unwrap();
+            if l["chats"][0]["fold"]["state"] == json!(want) {
+                return l["chats"][0].clone();
+            }
+            assert!(Instant::now() < deadline, "the fold was never {want}: {l}");
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    };
+    let failed = state(&mut call, "failed");
+    assert!(failed["fold"]["why"].as_str().unwrap().starts_with("its Claude exited after it wrote its note"), "{failed}");
+    // Tried again, with a Claude that says it is done.
+    std::fs::write(fake.join("works"), "").unwrap();
+    call("workspace_chat_fold", json!({ "id": id, "conv": conv })).unwrap();
+    std::fs::write(&note, "# Chat 1\n\n## Asked\n\n## Decided\n").unwrap();
+    let landed = state(&mut call, "done");
+    assert_eq!((&landed["fold"]["files"], &landed["state"], &landed["fold_now"]), (&json!(1), &json!("ended"), &Value::Null), "{landed}");
+    let commit = landed["fold"]["commit"].as_str().unwrap().to_string();
+    // Undone, and redone, by the memory's own row.
+    let undo = call("workspace_memory_revert", json!({ "id": id, "commit": commit })).unwrap()["change"]["commit"].as_str().unwrap().to_string();
+    assert_eq!(call("workspace_chats", json!({ "id": id })).unwrap()["chats"][0]["fold"]["reverted"], json!(true));
+    call("workspace_memory_revert", json!({ "id": id, "commit": undo })).unwrap();
+    assert_eq!(call("workspace_chats", json!({ "id": id })).unwrap()["chats"][0]["fold"]["reverted"], json!(false));
+    let audit = std::fs::read_to_string(sb.cfg().join("audit.jsonl")).unwrap();
+    let recs: Vec<Value> = audit.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert!(recs.iter().any(|r| r["kind"] == json!("fold") && r["detail"] == json!({ "event": "landed", "workspace": id, "chat": conv, "commit": commit })), "the poll's landing is a record");
+    assert!(recs.iter().any(|r| r["cmd"] == json!("workspace_chat_close") && r["detail"]["stopped_fold"] == json!(true)), "and so is a stop");
+    call("workspace_chat_resume", json!({ "id": id, "conv": conv })).unwrap();
+
+    // A second chat, and one deleted: its session, its entry, its folder.
+    std::fs::write(mem.join("topics/t.md"), "by hand\n").unwrap();
+    let c2 = call("workspace_chat_start", json!({ "id": id })).unwrap()["chat"]["id"].as_str().unwrap().to_string();
+    call("workspace_chat_remove", json!({ "id": id, "conv": c2 })).unwrap();
+    assert!(!up(&format!("worktrees~ws~{c2}")) && !folder.join(&id).join("chats").join(&c2).exists());
+
+    assert_eq!(log(call("workspace_memory_log", json!({ "id": id, "n": 1 })).unwrap()), ["Edited: topics/t.md"]);
+
+    // Removing the workspace ends its live chat and MOVES its folder, its
+    // memory and the memory's history with it.
+    std::fs::write(mem.join("MEMORY.md"), "kept").unwrap();
+    let r = call("workspace_remove", json!({ "id": id })).unwrap();
+    let to = folder.join(".removed").join(&id);
+    assert_eq!(r["moved_to"].as_str(), to.to_str(), "{r}");
+    assert_eq!(r["workspaces"].as_array().unwrap().len(), 1, "{r}");
+    assert!(!up(&session) && !folder.join(&id).exists());
+    assert_eq!(std::fs::read_to_string(to.join("memory/MEMORY.md")).unwrap(), "kept");
+    assert!(to.join("chats").join(&conv).join("start.md").exists());
+    assert!(!folder.join(".engine").join(&id).exists(), "its engine half went too");
+    let o = Command::new("git").arg("--git-dir").arg(to.join(".engine/memory.git")).env_remove("GIT_WORK_TREE").args(["log", "--format=%s"]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&o.stdout).lines().count(), 8, "its history went with it: {o:?}");
+    let e = call("workspace_chats", json!({ "id": id })).unwrap_err();
+    assert!(e.contains("no workspace"), "{e}");
+    assert_eq!(call("workspace_remove", json!({ "id": other })).unwrap()["moved_to"], Value::Null);
+    assert_eq!(sb.terminate().code(), Some(0));
+}
+
 /// The whole life of a `serve`, end to end through the binary.
 #[test]
 fn serve_writes_its_file_answers_the_workspace_and_cleans_up_on_sigterm() {
@@ -1095,8 +1572,17 @@ fn the_flags_are_checked_at_launch() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("--config-dir"));
 }
 
+/// A fixture's git, with an identity of its own and no signing: a runner has no
+/// global identity (ubuntu-latest: "Author identity unknown"), and a
+/// developer's `commit.gpgsign` would make the fixture need a key agent.
 fn git_in(dir: &Path, args: &[&str]) {
-    let o = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+    let o = Command::new("git")
+        .args(["-c", "user.name=fixture", "-c", "user.email=fixture@localhost", "-c", "commit.gpgsign=false"])
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap();
     assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
 }
 
@@ -1311,6 +1797,179 @@ fn remove_project_names_the_sessions_it_leaves_running() {
     // Nothing was closed: removing a project only unregisters it.
     assert!(tmux.run(&["has-session", "-t", "=busy-(main)"]).status.success());
     assert_eq!(sb.terminate().code(), Some(0));
+}
+
+/// A memory of the earlier layout, with its repository in the folder a chat
+/// writes, in a SPAWNED serve: the first thing asked moves it, its history
+/// reads, undoes and takes a save, and nothing that was planted in the old
+/// repository comes along or runs.
+#[test]
+fn a_spawned_serve_moves_an_earlier_memory_and_reads_its_history() {
+    let mut sb = Sandbox::new("wsmig");
+    let folder = sb.root.join("ws-here");
+    let env = [("WORKTREES_WORKSPACES_DIR", folder.to_str().unwrap())];
+    let sf = sb.launch_env(&[], &env);
+    let mut ws = connect(&sf, "tauri://localhost");
+    let made = rpc(&mut ws, 1, "workspace_create", json!({ "name": "Personal" }))["ok"].clone();
+    let id = made["workspaces"][0]["id"].as_str().unwrap_or_else(|| panic!("{made}")).to_string();
+    drop(ws);
+    assert_eq!(sb.terminate().code(), Some(0));
+
+    // As the earlier engine made it, then edited by hand.
+    let mem = folder.join(&id).join("memory");
+    std::fs::create_dir_all(mem.join("topics")).unwrap();
+    std::fs::write(mem.join("MEMORY.md"), "# Memory: Personal\n").unwrap();
+    git_in(&mem, &["init", "-q", "--template=", "-b", "main"]);
+    git_in(&mem, &["add", "-A"]);
+    git_in(&mem, &["commit", "-q", "-m", "Memory made"]);
+    std::fs::write(mem.join("topics/nas.md"), "# NAS\n").unwrap();
+    git_in(&mem, &["add", "-A"]);
+    git_in(&mem, &["commit", "-q", "-m", "fold: Storage"]);
+    let ran = sb.root.join("ran");
+    let config = std::fs::read_to_string(mem.join(".git/config")).unwrap();
+    std::fs::write(mem.join(".git/config"), format!("{config}[hook \"x\"]\n\tevent = pre-commit\n\tcommand = \"touch {}\"\n[core]\n\tfsmonitor = \"touch {}\"\n", ran.display(), ran.display())).unwrap();
+
+    let sf = sb.launch_env(&[], &env);
+    let mut ws = connect(&sf, "tauri://localhost");
+    let m = rpc(&mut ws, 1, "workspace_memory", json!({ "id": id }))["ok"].clone();
+    assert_eq!((&m["made"], &m["last"]["subject"], &m["count"], &m["commit_error"]), (&json!(true), &json!("fold: Storage"), &json!(2), &Value::Null), "{m}");
+    let git = folder.join(".engine").join(&id).join("memory.git");
+    assert!(git.join("objects").is_dir() && !mem.join(".git").exists());
+    let config = std::fs::read_to_string(git.join("config")).unwrap();
+    assert!(!config.contains("hook") && !config.contains("fsmonitor"), "{config}");
+    let l = rpc(&mut ws, 2, "workspace_memory_log", json!({ "id": id }))["ok"].clone();
+    let fold = l["changes"][0]["commit"].clone();
+    let d = rpc(&mut ws, 3, "workspace_memory_diff", json!({ "id": id, "commit": fold, "path": "topics/nas.md" }))["ok"].clone();
+    assert!(d["file"]["diff"]["patch"].as_str().is_some_and(|p| p.contains("+# NAS")), "{d}");
+    let f = rpc(&mut ws, 4, "workspace_memory_file", json!({ "id": id, "path": "MEMORY.md" }))["ok"].clone();
+    let w = rpc(&mut ws, 5, "workspace_memory_write", json!({ "id": id, "path": "MEMORY.md", "content": "# Memory: mine\n", "expectedRev": f["rev"], "keepHistory": true }));
+    assert!(w["ok"]["rev"].is_string(), "{w}");
+    let r = rpc(&mut ws, 6, "workspace_memory_revert", json!({ "id": id, "commit": fold }))["ok"].clone();
+    assert_eq!(r["change"]["subject"], json!("Undo: fold: Storage"), "{r}");
+    assert!(!mem.join("topics/nas.md").exists() && std::fs::read_to_string(mem.join("MEMORY.md")).unwrap() == "# Memory: mine\n");
+    drop(ws);
+    assert_eq!(sb.terminate().code(), Some(0));
+
+    // Once more: it is where it was put, and nothing is moved again.
+    let sf = sb.launch_env(&[], &env);
+    let mut ws = connect(&sf, "tauri://localhost");
+    let l = rpc(&mut ws, 1, "workspace_memory_log", json!({ "id": id }))["ok"].clone();
+    let subjects: Vec<&str> = l["changes"].as_array().unwrap().iter().map(|c| c["subject"].as_str().unwrap()).collect();
+    assert_eq!(subjects, ["Undo: fold: Storage", "Edited: MEMORY.md", "fold: Storage", "Memory made"]);
+    assert!(!ran.exists(), "something planted ran");
+    // Removing the workspace takes both halves, history and all.
+    let gone = rpc(&mut ws, 2, "workspace_remove", json!({ "id": id }))["ok"].clone();
+    let to = std::path::PathBuf::from(gone["moved_to"].as_str().unwrap_or_else(|| panic!("{gone}")));
+    assert!(to.join("memory/MEMORY.md").is_file() && to.join(".engine/memory.git/objects").is_dir() && !git.exists());
+    drop(ws);
+    assert_eq!(sb.terminate().code(), Some(0));
+}
+
+/// A workspace's memory over the wire, in a SPAWNED serve: made under the
+/// folder `WORKTREES_WORKSPACES_DIR` names and never `$HOME`'s, a save the next
+/// tick names by the rev the row answered with, an edit made outside at one no
+/// row did, a commit and its event, its diff, an undo. The audit log has the workspace,
+/// the change and a save's hash, never its text; the reads are no records.
+#[test]
+fn a_spawned_serves_workspace_memory_end_to_end() {
+    let mut sb = Sandbox::new("wsmem");
+    let folder = sb.root.join("ws-here");
+    let sf = sb.launch_env(&[], &[("WORKTREES_WORKSPACES_DIR", folder.to_str().unwrap()), ("GIT_DIR", "/nonexistent"), ("GIT_AUTHOR_NAME", "Somebody")]);
+    let mut ws = connect(&sf, "tauri://localhost");
+    listen(&mut ws, &["workspaces:memory", "workspaces:history"]);
+    let mut n = 0;
+    let mut call = |ws: &mut WebSocket<TcpStream>, cmd: &str, args: Value| {
+        n += 1;
+        rpc(ws, n, cmd, args)
+    };
+    let made = call(&mut ws, "workspace_create", json!({ "name": "Personal" }))["ok"].clone();
+    let id = made["workspaces"][0]["id"].as_str().unwrap_or_else(|| panic!("{made}")).to_string();
+    assert_eq!(call(&mut ws, "workspace_memory", json!({ "id": id }))["ok"]["made"], json!(false));
+    assert!(!folder.exists(), "asking makes nothing");
+    let m = call(&mut ws, "workspace_memory_make", json!({ "id": id }))["ok"].clone();
+    assert!(m["index"]["content"].as_str().is_some_and(|t| t.starts_with("# Memory: Personal")), "{m}");
+    let mem = folder.join(&id).join("memory");
+    let git = folder.join(".engine").join(&id).join("memory.git");
+    assert!(git.is_dir() && !mem.join(".git").exists(), "the engine's half holds the history");
+    assert!(!sb.root.join("home/.local/share/worktrees/workspaces").exists(), "not under HOME");
+    // What the next event of `name` that answers says.
+    let until = |ws: &mut WebSocket<TcpStream>, name: &str, want: &dyn Fn(&Value) -> Option<Value>| -> Value {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            assert!(Instant::now() < deadline, "no {name}");
+            let v: Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
+            if v["event"] == json!(name) {
+                assert_eq!(v["payload"]["id"], json!(id));
+                if let Some(x) = want(&v["payload"]) {
+                    return x;
+                }
+            }
+        }
+    };
+    let wait = |ws: &mut WebSocket<TcpStream>, path: &str, want: &dyn Fn(&Value) -> bool| -> Value {
+        let of = |p: &Value| p["changed"].as_array().unwrap().iter().find(|c| c["path"] == json!(path) && want(c)).cloned();
+        until(ws, "workspaces:memory", &of)
+    };
+    // The memory's first sight is a baseline, so the poll must have had one:
+    // a file made now, and again until it is seen to move.
+    let probe = mem.join("topics/probe.md");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut i = 0;
+    loop {
+        assert!(Instant::now() < deadline, "the poll never saw the memory");
+        i += 1;
+        std::fs::write(&probe, "x".repeat(i)).unwrap();
+        ws.get_mut().set_read_timeout(Some(Duration::from_secs(4))).unwrap();
+        let Ok(msg) = ws.read() else { continue };
+        let v: Value = serde_json::from_str(msg.to_text().unwrap()).unwrap_or(Value::Null);
+        if v["event"] == json!("workspaces:memory") {
+            break;
+        }
+    }
+    ws.get_mut().set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    let secret = "# NAS\nSECRET-MEMORY\n";
+    let w = call(&mut ws, "workspace_memory_write", json!({ "id": id, "path": "topics/nas.md", "content": secret }))["ok"].clone();
+    let saved = w["rev"].as_str().unwrap_or_else(|| panic!("{w}")).to_string();
+    let seen = wait(&mut ws, "topics/nas.md", &|c| c["rev"] == json!(saved));
+    assert_eq!((&seen["mtime_ms"], &seen["size"]), (&w["mtime_ms"], &json!(secret.len())), "its own save");
+    std::fs::write(mem.join("topics/nas.md"), "# NAS\nan agent's\n").unwrap();
+    let theirs = wait(&mut ws, "topics/nas.md", &|c| c["rev"] != json!(saved))["rev"].clone();
+    let e = call(&mut ws, "workspace_memory_write", json!({ "id": id, "path": "topics/nas.md", "content": secret, "expectedRev": saved }));
+    assert!(e["err"].as_str().is_some_and(|e| e.contains("changed on disk")), "{e}");
+    let k = call(&mut ws, "workspace_memory_write", json!({ "id": id, "path": "topics/nas.md", "content": secret, "expectedRev": theirs, "keepHistory": true }));
+    assert!(k["ok"]["mtime_ms"].is_u64(), "{k}");
+    let told = until(&mut ws, "workspaces:history", &|p| Some(p["commit"].clone()));
+    let l = call(&mut ws, "workspace_memory_log", json!({ "id": id }))["ok"].clone();
+    let kept = l["changes"][0].clone();
+    assert!(kept["subject"].as_str().is_some_and(|s| s.starts_with("Before keeping your text")), "{l}");
+    let commit = kept["commit"].as_str().unwrap();
+    assert_eq!(told, json!(commit), "the commit that landed");
+    let d = call(&mut ws, "workspace_memory_diff", json!({ "id": id, "commit": commit, "path": "topics/nas.md" }))["ok"].clone();
+    assert!(d["file"]["diff"]["patch"].as_str().is_some_and(|p| p.contains("+an agent's")), "{d}");
+    let old = call(&mut ws, "workspace_memory_file", json!({ "id": id, "path": "topics/nas.md", "commit": commit }))["ok"].clone();
+    assert_eq!(old["content"], json!("# NAS\nan agent's\n"));
+    let r = call(&mut ws, "workspace_memory_revert", json!({ "id": id, "commit": commit }))["ok"].clone();
+    assert_eq!((r["change"].is_null(), &r["conflicts"]), (true, &json!(["topics/nas.md"])), "the file was saved over since: {r}");
+    let l = call(&mut ws, "workspace_memory_log", json!({ "id": id, "n": 1 }))["ok"].clone();
+    let edit = l["changes"][0]["commit"].as_str().unwrap().to_string();
+    assert_eq!(l["changes"][0]["kind"], json!("edit"), "the dirty tree was committed first: {l}");
+    let r = call(&mut ws, "workspace_memory_revert", json!({ "id": id, "commit": edit }))["ok"].clone();
+    assert_eq!(r["change"]["kind"], json!("undo"), "{r}");
+    assert_eq!(std::fs::read_to_string(mem.join("topics/nas.md")).unwrap(), "# NAS\nan agent's\n");
+    let p = call(&mut ws, "workspace_memory_file", json!({ "id": id, "path": "../chats.json" }));
+    assert!(p["err"].is_string(), "{p}");
+    drop(ws);
+    assert_eq!(sb.terminate().code(), Some(0));
+    let log = std::fs::read_to_string(sb.cfg().join("audit.jsonl")).unwrap();
+    assert!(!log.contains("SECRET-MEMORY"), "the memory's text reached the log");
+    let recs: Vec<Value> = log.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    let of = |row: &str| recs.iter().filter(|r| r["cmd"] == json!(row)).cloned().collect::<Vec<_>>();
+    assert_eq!((of("workspace_memory_make").len(), of("workspace_memory_write").len(), of("workspace_memory_revert").len()), (1, 3, 2));
+    assert_eq!((&of("workspace_memory_revert")[1]["detail"]["commit"], &of("workspace_memory_revert")[1]["detail"]["workspace"]), (&json!(edit), &json!(id)));
+    assert!(of("workspace_memory_write")[0]["detail"]["sha256"].is_string());
+    for r in ["workspace_memory", "workspace_memory_file", "workspace_memory_log", "workspace_memory_diff"] {
+        assert!(of(r).is_empty(), "{r} is a read");
+    }
 }
 
 /// The ideas folder of a SPAWNED serve is the one `WORKTREES_IDEAS_DIR`
