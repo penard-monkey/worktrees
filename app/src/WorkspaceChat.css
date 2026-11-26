@@ -3,6 +3,7 @@
 .wsc-dot { flex: none; display: inline-block; box-sizing: border-box; width: 8px; height: 8px; border-radius: 50%; border: 2px solid transparent; }
 .wsc-dot.waiting { background: var(--warn); border-color: var(--warn); }
 .wsc-dot.fold-failed { background: var(--danger); border-color: var(--danger); }
+.wsc-dot.done { background: var(--done); border-color: var(--done); } /* the All projects switch: unread work in a hidden project */
 .wsc-dot.busy { background: var(--ok); border-color: var(--ok); }
 .wsc-dot.folding { background: var(--done); border-color: var(--done); box-shadow: 0 0 0 3px color-mix(in srgb, var(--done) 30%, transparent); }
 .wsc-dot.running { border-color: var(--ok); }

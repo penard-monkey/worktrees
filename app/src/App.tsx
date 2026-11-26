@@ -1114,9 +1114,12 @@ function TitleEditor({ initial, slug, onCommit, onCancel }: {
  *  each segment is a drop zone (`data-ws-switch`): a project held over
  *  "Workspaces" flips the view to it (spring-load), and a project dragged out
  *  of a workspace onto "All projects" is taken out of that workspace. */
-function NavViewSwitch({ view, onPick, dropOn, waits }: {
+function NavViewSwitch({ view, onPick, dropOn, waits, needs }: {
   /** A workspace's chat waits on the person (an amber dot on Workspaces). */
   waits: boolean;
+  /** What a project the Workspaces view does not show needs (Everything Else
+   *  hidden): a dot on All projects, amber for waiting, purple for unread. */
+  needs: Rollup;
   view: NavView;
   onPick: (v: NavView) => void;
   /** The segment the drag in flight would drop on, lit. */
@@ -1135,7 +1138,7 @@ function NavViewSwitch({ view, onPick, dropOn, waits }: {
           data-testid={`nav-view-${v}`}
           data-track={v === "projects" ? "nav.view.projects" : "nav.view.workspaces"}
           onClick={() => onPick(v)}
-        >{VIEW_LABEL[v]}{v === "workspaces" && waits && <span className="wsc-dot waiting" data-testid="nav-ws-waits" title="a workspace chat is waiting on you" />}</button>
+        >{VIEW_LABEL[v]}{v === "workspaces" && waits && <span className="wsc-dot waiting" data-testid="nav-ws-waits" title="a workspace chat is waiting on you" />}{v === "projects" && needs && <span className={"wsc-dot " + needs} data-testid="nav-all-needs" title={needs === "waiting" ? "a project in no workspace is waiting on you" : "a project in no workspace has work you have not seen"} />}</button>
       ))}
     </div>
   );
@@ -6694,6 +6697,19 @@ function App() {
   // Named workspaces left the beta on 2026-11-14 (beta.ts): no flag decides
   // this any more.
   const navView: NavView = wsList && settings.nav_view === "workspaces" ? "workspaces" : "projects";
+  // Settings → Layout → "Show Everything Else in Workspaces", off: the view
+  // holds named workspaces only. With none it is empty (the owner chose that
+  // over the group), and its empty line offers All projects.
+  const eeHidden = !settings.nav_ee_in_workspaces;
+  /** What a hidden project needs of the person, for the switch's All
+   *  projects side: a waiting place first, then work not seen yet. A busy one
+   *  needs nobody, so it marks nothing. Over every place, not the filtered
+   *  ones (the attention count's rule). */
+  const hiddenNeeds = (places: readonly Place[]): Rollup => places.some((p) => activityOf(p) === "waiting") ? "waiting" : places.some((p) => unreadOf(p)) ? "done" : "";
+  const eeNeeds: Rollup = eeHidden && navView === "workspaces" ? hiddenNeeds(
+    (everythingElse(wsList, (ws?.projects ?? []).map((v) => v.root))?.projects ?? [])
+      .flatMap((p) => ws?.projects.find((v) => v.root === p.root)?.snapshot?.places ?? []),
+  ) : "";
   const setNavView = (v: NavView) => { if (v !== settings.nav_view) updateSettings({ nav_view: v }); };
   /** Every row answers with the whole list; a failure is the error banner
    *  and leaves the list as it was. */
@@ -6757,8 +6773,11 @@ function App() {
     const prev = w.projects.map((p) => p.root);
     void wsRun("workspace_set_projects", { id, roots: rootsWithout(w, root) }).then((l) => {
       if (!l) return;
+      // With Everything Else hidden, a project in no workspace any more
+      // leaves this view: say where it is.
+      const gone = !settings.nav_ee_in_workspaces && !l.workspaces.some((x) => x.projects.some((p) => p.root === root));
       setUndo({
-        text: `${basename(root)} taken out of ${w.name}`,
+        text: `${basename(root)} taken out of ${w.name}` + (gone ? ", now only in All projects" : ""),
         run: () => { setUndo(null); void wsRun("workspace_set_projects", { id, roots: prev }); },
       });
     });
@@ -9948,6 +9967,11 @@ function App() {
             No workspaces yet. A workspace gathers projects that belong together.
             <button className="ws-new-btn" data-testid="ws-new-first" data-track="nav.workspace.new"
               onClick={() => startNewWorkspace()}><Icons.Plus size={12} /> New workspace</button>
+            {/* Everything Else hidden: this view is empty, and every project is
+                one click away, where the switch would take you. */}
+            {eeHidden && (
+              <button className="ws-new-btn" data-testid="ws-empty-all" data-track="nav.view.projects" onClick={() => setNavView("projects")}>All projects</button>
+            )}
           </div>
         )}
         {list.map((w) => {
@@ -10059,18 +10083,15 @@ function App() {
           // The built-in last group (`everythingElse`): derived each render,
           // folded like any card under its reserved id.
           const ee = everythingElse(wsList, (ws?.projects ?? []).map((v) => v.root));
-          if (!ee) return null;
-          // Settings → Layout: off hides the header only. With no named
-          // workspace it is the view's one title, so it stays; hidden, the
-          // group is open whatever fold it stored (nothing is left to unfold
-          // it), and the stored fold is back when the header is.
-          const eeHeader = settings.nav_ee_header || list.length === 0;
-          const open = !eeHeader || !settings.ws_collapsed?.[ee.id];
+          // Settings → Layout: off, the view holds named workspaces only
+          // (`eeHidden`); these projects are in All projects.
+          if (!ee || eeHidden) return null;
+          const open = !settings.ws_collapsed?.[ee.id];
           const places = ee.projects.flatMap((p) => (pvOf(p.root)?.snapshot?.places ?? []).filter(visiblePlace));
           const rollup = rollupOf(places, activityOf, (p) => doneOf(p) === 1);
           return (
-            <div className={"ws-group ee" + (eeHeader ? "" : " bare")} data-ee data-testid="ee-group">
-              {eeHeader && <EverythingElseHeader w={ee} open={open} rollup={rollup} onToggle={() => toggleWs(ee.id)} />}
+            <div className="ws-group ee" data-ee data-testid="ee-group">
+              <EverythingElseHeader w={ee} open={open} rollup={rollup} onToggle={() => toggleWs(ee.id)} />
               {open && (
                 <div className="ws-kids">
                   {ee.projects.map((p) => {
@@ -10341,6 +10362,7 @@ function App() {
             view={navView}
             onPick={setNavView}
             waits={wsChatsOn && chatWaits}
+            needs={eeNeeds}
             dropOn={drag?.target?.kind === "ws-remove" ? "projects" : null}
           />
         )}
