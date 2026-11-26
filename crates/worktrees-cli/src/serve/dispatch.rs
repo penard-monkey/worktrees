@@ -1,4 +1,4 @@
-//! The 294 commands, each with its exposure, capability and objects, in ONE
+//! The 295 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -804,22 +804,24 @@ pub const GLOBAL_OK: &[&str] = &[
 /// widen a guest without a second, deliberate edit here. None may ever reach
 /// an agent.
 #[cfg_attr(not(test), allow(dead_code))]
-pub const GUEST_ROWS: &[&str] = &["shares_list", "share_join", "guest_places", "share_request", "thread_read", "thread_post", "shared_turns", "shared_tool_call", "shared_image"];
+pub const GUEST_ROWS: &[&str] = &["shares_list", "share_join", "guest_places", "share_request", "thread_read", "thread_post", "shared_turns", "shared_tool_call", "shared_image", "shared_call_image"];
 
 /// The guest rows a client POLLS (§2's trap): exempt from the per-request
 /// audit record and the audit gate, as `read` rows are, or a guest's poll
 /// would write a line each time and spend its device's audit budget. The
 /// later rows (`shared_turns`, `shared_tool_call`, `thread_read`, PRs B and
 /// C) are named now so they join by being added to the table as guest rows.
-/// `shared_image` is a read of the same session: a view asks once a picture.
+/// `shared_image` and `shared_call_image` are reads of the same session: a
+/// view asks once a picture.
 /// Every act — a join, a request — is recorded.
-pub const GUEST_READS: &[&str] = &["shares_list", "guest_places", "shared_turns", "shared_tool_call", "shared_image", "thread_read"];
+pub const GUEST_READS: &[&str] = &["shares_list", "guest_places", "shared_turns", "shared_tool_call", "shared_image", "shared_call_image", "thread_read"];
 
 /// The guest rows the CONSOLE may also make (group chat §2: "an allowed
 /// guest, and the owner"): the owner reads and posts in a thread and reads
 /// the shared session, as the console. A test holds it against the table.
 /// Nothing else widens: a paired owner device is not the console. Not
-/// `shared_image`: the owner's chat reads the place's own (`read_place_image`).
+/// `shared_image` or `shared_call_image`: the owner's chat reads the place's
+/// own (`read_place_image`, `agent_call_image`).
 pub const CONSOLE_GUEST_ROWS: &[&str] = &["thread_read", "thread_post", "shared_turns", "shared_tool_call"];
 
 /// The lane a request runs on, or `None` for the concurrent pool.
@@ -1427,6 +1429,10 @@ commands! { cx, a;
     // one that turn `turn` of the bound transcript draws, and is then judged
     // under the shared place's root exactly as `read_place_image` judges it.
     shared_image: Engine [guest, share(share)] => super::shareimage::rows::image(cx, a.get("share")?, a.get("binding")?, a.get("turn")?, a.get("path")?, a.get("etag")?),
+    // The picture a Claude Read of a file OUTSIDE the place was shown, from the
+    // shared session's transcript by call id (`serve::shareimage`): never a
+    // file the host opens, and only a call that session holds.
+    shared_call_image: Engine [guest, share(share)] => super::shareimage::rows::call_image(cx, a.get("share")?, a.get("binding")?, a.get("call_id")?),
 
     // ── remote access (§4.1): the host's own acts, never a device's ──────────
     remote_enable: HostConsole => remote(cx)?.enable(&a.get::<String>("address")?, a.get("iface")?, a.get("port")?, a.get("advertise")?),
@@ -1510,7 +1516,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 294 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 295 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1537,7 +1543,7 @@ mod tests {
     /// idea-session console rows (`idea_conversation*`, `idea_*` over the agent bodies, `idea_term_open`), and group
     /// chat's eighteen share rows (fourteen console with PR D's `share_used` and `share_check`, four
     /// `guest`), its thread's two (`thread_read`, `thread_post`, `guest`) and PR C's
-    /// two `guest` history rows (`shared_turns`, `shared_tool_call`), the guest's `shared_image`, the host's sleep
+    /// two `guest` history rows (`shared_turns`, `shared_tool_call`), the guest's `shared_image` and `shared_call_image`, the host's sleep
     /// hold (`get_keep_awake`, `set_keep_awake`), and lane children's adoption
     /// (`set_place_under`); the check scripts
     /// hold the page's commands against them.
@@ -1545,7 +1551,7 @@ mod tests {
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 294, "the table has 294 commands");
+        assert_eq!(TABLE.len(), 295, "the table has 295 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1967,7 +1973,7 @@ mod tests {
     /// `shares_all`, `guests_list`, `guest_remove`, `owner_set_name`) and the
     /// four `guest` rows (`GUEST_ROWS`), the capability's first, the thread's
     /// two `guest` rows (`thread_read`, `thread_post`) and PR C's two
-    /// (`shared_turns`, `shared_tool_call`), then `shared_image`; and lane children's `set_place_under` (`write`). A row that moves group
+    /// (`shared_turns`, `shared_tool_call`), then `shared_image` and `shared_call_image`; and lane children's `set_place_under` (`write`). A row that moves group
     /// fails here until the count (and the proposal's table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
@@ -1985,7 +1991,7 @@ mod tests {
         }
         let want: BTreeMap<&str, usize> = [
             ("read", 72), ("write", 24), ("admin", 42), ("console", 113), ("stream", 10), ("instruct", 8), ("answer", 2),
-            ("client-local", 6), ("loopback-only", 1), ("own", 7), ("guest", 9),
+            ("client-local", 6), ("loopback-only", 1), ("own", 7), ("guest", 10),
         ]
         .into();
         assert_eq!(groups, want);

@@ -340,18 +340,28 @@ pub(crate) fn turns_at(config: &Path, b: &Binding, seq: usize) -> Result<Vec<tur
     Ok(turns::history_turns(&b.harness, &lines, turns::TURN_TEXT_MAX).into_iter().map(|(t, _)| t).collect())
 }
 
-/// `shared_tool_call`'s answer for binding `b`: the call's input as
-/// `agent_tool_call` gives it, read from the turn the index found it in and
-/// only below the binding's limit.
-pub fn tool_call(config: &Path, b: &Binding, call_id: &str) -> Result<Value, String> {
-    let gone = || "not found: no such call in this shared session".to_string();
+/// A call id this shared session does not hold below its limit.
+pub(crate) const ERR_NO_CALL: &str = "not found: no such call in this shared session";
+
+/// The turn of binding `b` that holds call `call_id` (the index's), and its
+/// lines below the binding's limit; [`ERR_NO_CALL`] when it holds none.
+pub(crate) fn call_lines(config: &Path, b: &Binding, call_id: &str) -> Result<(usize, Vec<String>), String> {
+    let gone = || ERR_NO_CALL.to_string();
     let (ix, f, to) = INDEXES.read_to(config, &b.harness, &b.transcript, limit_of(b))?;
     let ix = ix.lock().unwrap();
     let turn = *ix.calls.get(call_id).ok_or_else(gone)?;
     if turn >= ix.visible(to) {
         return Err(gone());
     }
-    let lines = ix.lines(&f, turn, to)?;
+    Ok((turn, ix.lines(&f, turn, to)?))
+}
+
+/// `shared_tool_call`'s answer for binding `b`: the call's input as
+/// `agent_tool_call` gives it, read from the turn the index found it in and
+/// only below the binding's limit.
+pub fn tool_call(config: &Path, b: &Binding, call_id: &str) -> Result<Value, String> {
+    let gone = || ERR_NO_CALL.to_string();
+    let (_, lines) = call_lines(config, b, call_id)?;
     let c = turns::history_tool_call(&b.harness, &lines, call_id).ok_or_else(gone)?;
     Ok(json!({ "tool": c.tool, "input": c.input, "truncated": c.truncated, "bytes": c.bytes, "call_id": call_id, "harness": b.harness }))
 }

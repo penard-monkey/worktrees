@@ -574,6 +574,62 @@ pub(crate) fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (y, m, d)
 }
 
+// ── the host's record of what it stored ──────────────────────────────────────
+
+/// The file in serve's config dir where the host records the images it stored
+/// for a person (`agent_attach`): never in the place, where an agent can write.
+/// A guest of a shared session sees a picture a PERSON's message names only
+/// when it is here (`serve::shareimage`): a guest's own words can reach the
+/// transcript as a person's message (*Use these*), but never this file.
+pub const LEDGER: &str = "attachments.json";
+/// The most records the ledger keeps; the oldest go first.
+const LEDGER_MAX: usize = 4096;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct Upload {
+    /// The place's root, canonical.
+    place: String,
+    /// As [`Stored::path`] says it.
+    path: String,
+    /// When the host recorded it (ms), after the file was in place.
+    at_ms: i64,
+}
+
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct Ledger {
+    #[serde(default)]
+    uploads: Vec<Upload>,
+}
+
+fn read_ledger(file: &Path) -> Ledger {
+    fs::read(file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+fn place_key(place: &Path) -> Option<String> {
+    fs::canonicalize(place).ok().map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Record that the host stored the image `path` in `place` at `at_ms`, in the
+/// ledger `file`. Records older than [`KEEP`] are dropped (their files are
+/// swept), and past [`LEDGER_MAX`] the oldest. The caller serializes writers.
+pub fn record_upload(file: &Path, place: &Path, path: &str, at_ms: i64) -> Result<(), String> {
+    let place = place_key(place).ok_or_else(|| format!("no place at {}", place.display()))?;
+    let mut l = read_ledger(file);
+    let keep_ms = KEEP.as_millis() as i64;
+    l.uploads.retain(|u| at_ms - u.at_ms <= keep_ms && !(u.place == place && u.path == path));
+    l.uploads.push(Upload { place, path: path.to_string(), at_ms });
+    let over = l.uploads.len().saturating_sub(LEDGER_MAX);
+    l.uploads.drain(..over);
+    let bytes = serde_json::to_vec(&l).map_err(|e| e.to_string())?;
+    crate::fsx::write_atomic(file, &bytes, Some(Permissions::from_mode(0o600))).map_err(|e| format!("{}: {e}", file.display()))
+}
+
+/// When the host recorded the image `path` in `place` (ms), if it did.
+pub fn uploaded(file: &Path, place: &Path, path: &str) -> Option<i64> {
+    let place = place_key(place)?;
+    read_ledger(file).uploads.into_iter().rev().find(|u| u.place == place && u.path == path).map(|u| u.at_ms)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -918,4 +974,26 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&outside);
     }
+
+    /// The ledger keeps what the host stored, by place and path, drops a
+    /// record past [`KEEP`], and reads as nothing when it is missing or torn.
+    #[test]
+    fn the_ledger_answers_by_place_and_path() {
+        let (a, b) = (repo("ledger-a"), repo("ledger-b"));
+        let file = a.join("ledger.json");
+        assert_eq!(uploaded(&file, &a, "x.png"), None, "no file");
+        let day = DAY.as_millis() as i64;
+        record_upload(&file, &a, "x.png", 10 * day).unwrap();
+        record_upload(&file, &b, "y.png", 10 * day + 1).unwrap();
+        assert_eq!(uploaded(&file, &a, "x.png"), Some(10 * day));
+        assert_eq!(uploaded(&file, &b, "x.png"), None, "another place");
+        assert_eq!(uploaded(&file, &a.join("."), "x.png"), Some(10 * day), "by the canonical place");
+        record_upload(&file, &a, "z.png", 18 * day).unwrap();
+        assert_eq!((uploaded(&file, &a, "x.png"), uploaded(&file, &a, "z.png")), (None, Some(18 * day)), "older than KEEP goes");
+        assert_eq!(fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+        fs::write(&file, "{torn").unwrap();
+        assert_eq!(uploaded(&file, &a, "z.png"), None);
+        let _ = (fs::remove_dir_all(&a), fs::remove_dir_all(&b));
+    }
+
 }

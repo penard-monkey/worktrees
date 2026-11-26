@@ -1303,7 +1303,18 @@ pub fn agent_attach(ctx: &Ctx, repo: String, slug: String, name: String, data: S
     let place = PathBuf::from(project.place_dir(&slug));
     let stored = {
         let _one = ATTACH.lock().unwrap_or_else(|e| e.into_inner());
-        attach::store(&place, Path::new(&project.git_common), &name, &bytes)?
+        let stored = attach::store(&place, Path::new(&project.git_common), &name, &bytes)?;
+        // The host's own word that IT stored this picture for a person, kept
+        // where no agent writes: what lets a guest of a shared session see the
+        // pictures in a person's message (`serve::shareimage`). A failed record
+        // costs the guest the picture, never the upload.
+        if stored.kind == attach::Kind::Image {
+            let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+            if let Err(e) = attach::record_upload(&ctx.config_dir.join(attach::LEDGER), &place, &stored.path, now_ms) {
+                crate::log::log("warn", &format!("agent_attach: could not record {}: {e}", stored.path));
+            }
+        }
+        stored
     };
     if let Some(by) = ctx.by().filter(store::By::is_device) {
         let stamp = RemoteAttach { by, path: stored.path.clone(), at: worktrees_core::sysclock::now_epoch() };
