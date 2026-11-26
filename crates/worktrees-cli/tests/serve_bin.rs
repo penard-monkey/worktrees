@@ -1492,8 +1492,17 @@ fn the_flags_are_checked_at_launch() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("--config-dir"));
 }
 
+/// A fixture's git, with an identity of its own and no signing: a runner has no
+/// global identity (ubuntu-latest: "Author identity unknown"), and a
+/// developer's `commit.gpgsign` would make the fixture need a key agent.
 fn git_in(dir: &Path, args: &[&str]) {
-    let o = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+    let o = Command::new("git")
+        .args(["-c", "user.name=fixture", "-c", "user.email=fixture@localhost", "-c", "commit.gpgsign=false"])
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap();
     assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
 }
 
