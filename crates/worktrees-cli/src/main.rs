@@ -28,7 +28,9 @@ worktrees — one git worktree per branch, one active agent per worktree.
   worktrees close <name> [name...]      end the tmux session (worktree stays; also: main)
                                         (-y to kill an adopted session; --session <s> binds that answer)
   worktrees ls [--json]                 list worktrees + state (--json = machine-readable)
-  worktrees rm <name> [name...]         tear one (or more) down
+  worktrees rm <name> [name...]         tear one (or more) down (its lanes move up one level)
+  worktrees place under <name> <target|--top|--reset>  draw a lane under another place, at the
+                                        top level, or back under its starter (display only; not from a lane)
   worktrees relink [<name>|--all]       re-apply .worktrees.toml's files (--force to overwrite)
   worktrees provision [<name>|--all]    allocate a port slot + write .worktree.env (--reallocate)
   worktrees doctor [<name>]             report file drift, declared and un- (--json --strict --config-only)
@@ -209,7 +211,7 @@ fn run() -> i32 {
     // tree is, and `doctor` is where the finding is reported.
     const MUTATING: &[&str] = &[
         "new", "create", "co", "checkout", "switch", "sw", "branch", "open", "reopen", "attach",
-        "a", "close", "rm", "remove", "delete", "relink", "provision", "init",
+        "a", "close", "rm", "remove", "delete", "relink", "provision", "init", "place",
     ];
     if MUTATING.contains(&sub) {
         if let Some(msg) =
@@ -237,6 +239,7 @@ fn run() -> i32 {
         "open" | "reopen" | "attach" | "a" => ops::cmd_open(&project, &mut ui, rest),
         "close" => ops::cmd_close(&project, &mut ui, rest),
         "rm" | "remove" | "delete" => ops::cmd_rm(&project, &mut ui, rest),
+        "place" => ops::cmd_place(&project, &mut ui, rest),
         "relink" => ops::cmd_relink(&project, &mut ui, rest),
         "provision" => ops::cmd_provision(&project, &mut ui, rest),
         "doctor" => ops::cmd_doctor(&project, &mut ui, rest),

@@ -2303,6 +2303,103 @@ pub(crate) fn remove_tree(p: &Project, ui: &mut dyn Ui, wt: &str) -> Result<Vec<
     Ok(sessions)
 }
 
+/// Where `set_under` puts a place (lane-children §8).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UnderTarget {
+    /// The top level: `under = (main)`.
+    Top,
+    /// Under another place of this project.
+    Place(String),
+    /// Clear `under`: back on the line its starter (or a removal) gave it.
+    Reset,
+}
+
+/// Adoption, the ONE core call behind the nav menu, serve's
+/// `set_place_under`, CLI `place under` and MCP `adopt_place`: where a place
+/// is DRAWN. Writes `under` only — never `started_by`, never a report route
+/// (§6). Refuses `(main)`, an unknown place or target, and a move that would
+/// make a cycle (`lineage::Index::check_under`). `by` is who moved it:
+/// `(main)` (its agent) or a principal. Answers with a sentence that says
+/// where it is drawn now.
+pub fn set_under(p: &Project, slug: &str, target: UnderTarget, by: &str) -> Result<String, String> {
+    use crate::lineage::{Index, MAIN};
+    let store = crate::store::read_lenient(&p.main_root);
+    let births = p.place_births();
+    let index = Index::new(births.iter().map(|(s, b)| (s.as_str(), *b)), &store.places);
+    let place = match &target {
+        UnderTarget::Top => Some(MAIN.to_string()),
+        UnderTarget::Place(t) => Some(t.clone()),
+        UnderTarget::Reset => None,
+    };
+    match &place {
+        Some(t) => index.check_under(slug, t)?,
+        None => index.check_under(slug, MAIN)?,
+    }
+    let now = crate::sysclock::now_epoch();
+    let link = place.map(|t| crate::store::Link { by: Some(by.to_string()), ..crate::store::Link::to(&t, now) });
+    crate::store::edit(&p.main_root, slug, |d| d.under = link)?;
+    let store = crate::store::read_lenient(&p.main_root);
+    let index = Index::new(births.iter().map(|(s, b)| (s.as_str(), *b)), &store.places);
+    let reports = index.up(slug).unwrap_or_else(|| MAIN.to_string());
+    Ok(match index.parent(slug) {
+        None => format!("{slug} is drawn at the top level now. Its reports still go up its own line ({reports} first)."),
+        Some(parent) => format!("{slug} is drawn under {parent} now. Its reports still go up its own line ({reports} first)."),
+    })
+}
+
+/// `worktrees place under <slug> <target | --top | --reset>` — the owner's
+/// adoption at a terminal. Refused when run inside a lane: a lane moves
+/// nothing (§8). A courtesy, not a boundary — an agent with a shell can `cd`
+/// out — and the stake is only where a row is drawn.
+pub fn cmd_place(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
+    const USE: &str = "Usage: worktrees place under <slug> <target | --top | --reset>";
+    let (opts, rest) = crate::argv::split_options(args);
+    let mut pos: Vec<String> = Vec::new();
+    let (mut top, mut reset) = (false, false);
+    for a in opts {
+        match a.as_str() {
+            "--top" => top = true,
+            "--reset" => reset = true,
+            s if s.starts_with('-') => {
+                ui.error(&format!("Unknown flag: {s}"));
+                return 1;
+            }
+            s => pos.push(s.to_string()),
+        }
+    }
+    pos.extend(rest.iter().cloned());
+    if pos.first().map(String::as_str) != Some("under") {
+        ui.error(USE);
+        return 1;
+    }
+    let target = match (&pos[1..], top, reset) {
+        ([slug], true, false) => (slug.clone(), UnderTarget::Top),
+        ([slug], false, true) => (slug.clone(), UnderTarget::Reset),
+        ([slug, t], false, false) => (slug.clone(), UnderTarget::Place(t.clone())),
+        _ => {
+            ui.error(USE);
+            return 1;
+        }
+    };
+    if let Some(here) = std::env::current_dir().ok().and_then(|d| p.place_containing(&d).ok()).filter(|r| !r.is_main) {
+        ui.error(&format!(
+            "You are in the lane {}: a lane cannot move places in the tree. Run this from (main), or ask (main) to.",
+            here.slug
+        ));
+        return 1;
+    }
+    match set_under(p, &target.0, target.1, crate::authz::PrincipalId::OWNER) {
+        Ok(said) => {
+            ui.info(&said);
+            0
+        }
+        Err(e) => {
+            ui.error(&e);
+            1
+        }
+    }
+}
+
 /// What removing `slug` does to the places that hang from it (lane-children
 /// §7): `(lanes, the place they move up to)`. Never a cascade — no lane is
 /// closed or removed because its starter was.

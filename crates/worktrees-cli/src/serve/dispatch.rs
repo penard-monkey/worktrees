@@ -1,4 +1,4 @@
-//! The 293 commands, each with its exposure, capability and objects, in ONE
+//! The 294 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -885,6 +885,7 @@ commands! { cx, a;
     set_lifecycle: Engine [write, place(repo, slug)] => ops::set_lifecycle(a.get("repo")?, a.get("slug")?, a.get("label")?),
     set_pin: Engine [write, place(repo, slug)] => ops::set_pin(a.get("repo")?, a.get("slug")?, a.get("on")?),
     set_note: Engine [write, place(repo, slug)] => ops::set_note(&cx.ctx, a.get("repo")?, a.get("slug")?, a.get("note")?),
+    set_place_under: Engine [write, place(repo, slug)] => ops::set_place_under(&cx.ctx, a.get("repo")?, a.get("slug")?, a.get("under")?),
     drop_reference: Engine [write, place(repo, slug), place(into_repo, into_slug), session_of(into_session, into_repo, into_slug)] => ops::drop_reference(
         a.get("repo")?, a.get("slug")?, a.get("into_repo")?, a.get("into_slug")?, a.get("into_session")?, a.get("provider")?,
     ),
@@ -1509,7 +1510,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 293 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 294 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1536,14 +1537,15 @@ mod tests {
     /// idea-session console rows (`idea_conversation*`, `idea_*` over the agent bodies, `idea_term_open`), and group
     /// chat's eighteen share rows (fourteen console with PR D's `share_used` and `share_check`, four
     /// `guest`), its thread's two (`thread_read`, `thread_post`, `guest`) and PR C's
-    /// two `guest` history rows (`shared_turns`, `shared_tool_call`), the guest's `shared_image`, and the host's sleep
-    /// hold (`get_keep_awake`, `set_keep_awake`); the check scripts
+    /// two `guest` history rows (`shared_turns`, `shared_tool_call`), the guest's `shared_image`, the host's sleep
+    /// hold (`get_keep_awake`, `set_keep_awake`), and lane children's adoption
+    /// (`set_place_under`); the check scripts
     /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 293, "the table has 293 commands");
+        assert_eq!(TABLE.len(), 294, "the table has 294 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.

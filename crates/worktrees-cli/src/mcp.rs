@@ -1297,6 +1297,27 @@ impl Server {
         }
         if self.mutations {
             t.push(tool(
+                "adopt_place",
+                "Move where a place is DRAWN in the nav's tree (lane-children): under another \
+                 place of this project, at the top level (`under` omitted or \"(main)\"), or back \
+                 under the lane that started it (`reset: true`). Display only: it never changes \
+                 who started the place, and its default reports still go up its own line. Only \
+                 (main)'s agent may call it; from a lane it is refused. A move that would put a \
+                 place under itself or its own lanes is refused.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "place": { "type": "string", "description": "The slug of the place to move." },
+                        "under": { "type": "string", "description": "A place of this project, or (main) for the top level. Default (main)." },
+                        "reset": { "type": "boolean", "description": "true: clear the move, back under its starter. Excludes under." }
+                    },
+                    "required": ["place"],
+                    "additionalProperties": false
+                }),
+                false,
+                false,
+            ));
+            t.push(tool(
                 "send",
                 "Deliver a message INTO another place's agent, as if typed at its prompt — for a \
                  Codex, pi or kimi place, none of which has messaging of its own. Mid-turn, each \
@@ -1683,6 +1704,43 @@ impl Server {
                     d.note = if note.is_empty() { None } else { Some(note.clone()) };
                     d.note_by = None;
                 })
+            }
+            "adopt_place" => {
+                // §8: (main) and the owner move lanes; a lane moves nothing.
+                // Who is calling is the server's own place, never an argument.
+                match self.caller_place() {
+                    Ok(me) if me.is_main => {}
+                    Ok(me) => {
+                        return Ok(text_err(&format!(
+                            "adopt_place is (main)'s alone: a lane cannot move places in the tree, and this \
+                             server runs in the lane {}. Ask (main) with report, naming the place and where it \
+                             should hang.",
+                            me.slug
+                        )))
+                    }
+                    Err(e) => return Ok(text_err(&format!("adopt_place is (main)'s alone, and {e}"))),
+                }
+                let reset = match a.get("reset") {
+                    None | Some(serde_json::Value::Null) => false,
+                    Some(serde_json::Value::Bool(b)) => *b,
+                    Some(_) => return Ok(text_err("reset must be true or false")),
+                };
+                let under = s("under");
+                if reset && !under.trim().is_empty() {
+                    return Ok(text_err("pass under or reset: true, not both"));
+                }
+                let target = if reset {
+                    ops::UnderTarget::Reset
+                } else {
+                    match under.trim() {
+                        "" | worktrees_core::lineage::MAIN => ops::UnderTarget::Top,
+                        t => ops::UnderTarget::Place(t.to_string()),
+                    }
+                };
+                match ops::set_under(self.proj()?, s("place").trim(), target, worktrees_core::lineage::MAIN) {
+                    Ok(said) => Ok(text_ok(&said)),
+                    Err(e) => Ok(text_err(&e)),
+                }
             }
             "set_pin" => {
                 let (root, slug) = match self.mutable_target(&s("slug"), name) {
@@ -4385,6 +4443,41 @@ mod tests {
         store::edit(&root, "b", |d| d.started_by = Some(store::Link::to("a", at))).unwrap();
         store::edit(&root, "c", |d| d.started_by = Some(store::Link::to("b", at))).unwrap();
         std::fs::canonicalize(sc.root.join(".worktrees/c")).unwrap()
+    }
+
+    /// Adoption over MCP (§8): (main) may move any lane, at any depth, and
+    /// put it back; a lane is refused in words that name the rule, and a
+    /// cycle is refused. `started_by` survives every move.
+    #[test]
+    fn adopt_place_is_mains_alone_and_never_rewrites_the_starter() {
+        let sc = scratch("adopt");
+        let c = family(&sc);
+        let root = sc.root.to_string_lossy().to_string();
+        let mut kid = server_in(&sc.root, &c, true);
+        let r = call(&mut kid, "adopt_place", serde_json::json!({ "place": "c" }));
+        assert_eq!(r["isError"], true);
+        assert!(r["content"][0]["text"].as_str().unwrap().contains("(main)'s alone: a lane cannot move places"), "{}", r["content"][0]["text"]);
+        assert!(store::read_lenient(&root).places["c"].under.is_none(), "a refused move writes nothing");
+
+        let mut main = server_in(&sc.root, &sc.root, true);
+        let r = call(&mut main, "adopt_place", serde_json::json!({ "place": "c", "under": "feat" }));
+        assert_eq!(r["isError"], false, "{}", r["content"][0]["text"]);
+        assert!(r["content"][0]["text"].as_str().unwrap().contains("c is drawn under feat now"));
+        let d = store::read_lenient(&root).places["c"].clone();
+        assert_eq!(d.under.as_ref().map(|u| (u.place.as_str(), u.by.as_deref())), Some(("feat", Some("(main)"))));
+        assert_eq!(d.started_by.as_ref().map(|s| s.place.as_str()), Some("b"), "started_by survives adoption");
+        // To the top, then back under its starter.
+        let r = call(&mut main, "adopt_place", serde_json::json!({ "place": "c" }));
+        assert!(r["content"][0]["text"].as_str().unwrap().contains("c is drawn at the top level now"));
+        let r = call(&mut main, "adopt_place", serde_json::json!({ "place": "c", "reset": true }));
+        assert!(r["content"][0]["text"].as_str().unwrap().contains("c is drawn under b now"), "{}", r["content"][0]["text"]);
+        assert!(store::read_lenient(&root).places["c"].under.is_none());
+        // A cycle: a under its own grandchild.
+        let r = call(&mut main, "adopt_place", serde_json::json!({ "place": "a", "under": "c" }));
+        assert_eq!(r["isError"], true);
+        assert!(r["content"][0]["text"].as_str().unwrap().contains("cycle"), "{}", r["content"][0]["text"]);
+        let r = call(&mut main, "adopt_place", serde_json::json!({ "place": "(main)", "under": "a" }));
+        assert_eq!(r["isError"], true);
     }
 
     fn with_live<T>(live: &[&str], f: impl FnOnce() -> T) -> T {

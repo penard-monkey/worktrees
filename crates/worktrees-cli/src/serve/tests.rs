@@ -4590,3 +4590,37 @@ fn a_test_serve_cannot_write_the_users_workspaces() {
     let e = r["err"].as_str().unwrap_or_default();
     assert!(e.contains("real workspaces.json"), "the refusal says why: {r}");
 }
+
+/// Lane children §8: the app's "Move under…" reaches core's one adoption
+/// call through `set_place_under`, recorded as the console's principal, and
+/// `null` puts the lane back under its starter.
+#[test]
+fn set_place_under_moves_where_a_lane_is_drawn_and_back() {
+    let l = live("under");
+    let mut ws = client(&l);
+    let repo = scratch_repo("under");
+    let git = |args: &[&str]| {
+        let st = std::process::Command::new("git").args(["-c", "user.name=t", "-c", "user.email=t@t", "-C"]).arg(&repo).args(args).status().unwrap();
+        assert!(st.success(), "git {args:?}");
+    };
+    git(&["commit", "-q", "--allow-empty", "-m", "init"]);
+    for b in ["a", "b", "x"] {
+        git(&["worktree", "add", "-q", "-b", b, &repo.join(".worktrees").join(b).to_string_lossy()]);
+    }
+    let root = std::fs::canonicalize(&repo).unwrap().to_string_lossy().to_string();
+    let at = worktrees_core::sysclock::now_epoch() + 5;
+    worktrees_core::store::edit(&root, "b", |d| d.started_by = Some(worktrees_core::store::Link::to("a", at))).unwrap();
+
+    let r = rpc(&mut ws, json!(1), "set_place_under", json!({ "repo": root, "slug": "b", "under": "x" }));
+    assert!(r["ok"].as_str().is_some_and(|s| s.contains("b is drawn under x now")), "{r}");
+    let d = worktrees_core::store::read_lenient(&root).places["b"].clone();
+    assert_eq!(d.under.as_ref().map(|u| (u.place.as_str(), u.by.as_deref())), Some(("x", Some("owner"))));
+    assert_eq!(d.started_by.as_ref().map(|s| s.place.as_str()), Some("a"));
+
+    let r = rpc(&mut ws, json!(2), "set_place_under", json!({ "repo": root, "slug": "x", "under": "b" }));
+    assert!(r["err"].as_str().is_some_and(|s| s.contains("cycle")), "{r}");
+
+    let r = rpc(&mut ws, json!(3), "set_place_under", json!({ "repo": root, "slug": "b", "under": null }));
+    assert!(r["ok"].as_str().is_some_and(|s| s.contains("b is drawn under a now")), "{r}");
+    assert!(worktrees_core::store::read_lenient(&root).places["b"].under.is_none());
+}

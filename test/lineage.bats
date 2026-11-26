@@ -197,3 +197,36 @@ PY
   run_wt rm -y a
   ! grep -qF "moved up" <<<"$output" || false
 }
+
+@test "lineage: place under — (main) moves a lane, a lane is refused, started_by survives" {
+  run_wt new a --no-tmux
+  run_wt new x --no-tmux
+  run_wt -C "$REPO/.worktrees/a" new b --no-tmux
+  run_wt -C "$REPO/.worktrees/a" place under b x
+  [ "$status" -eq 1 ]
+  grep -qF "a lane cannot move places in the tree" <<<"$output"
+  [ "$(decl b under)" = - ]
+  run_wt place under b x
+  [ "$status" -eq 0 ]
+  grep -qF "b is drawn under x now" <<<"$output"
+  [ "$(decl b under place)" = x ]
+  [ "$(decl b under by)" = owner ]
+  [ "$(decl b started_by place)" = a ]
+  ls_json
+  [ "$(lineage b parent)" = x ]
+  [ "$(lineage b reports_to)" = "(main)" ]
+  [ "$(lineage b up)" = a ]
+  run_wt place under b --top
+  grep -qF "b is drawn at the top level now" <<<"$output"
+  ls_json
+  [ "$(lineage b parent)" = - ]
+  run_wt place under b --reset
+  grep -qF "b is drawn under a now" <<<"$output"
+  [ "$(decl b under)" = - ]
+  # A cycle is refused, and so is (main).
+  run_wt place under a b
+  [ "$status" -eq 1 ]
+  grep -qF "cycle" <<<"$output"
+  run_wt place under '(main)' a
+  [ "$status" -eq 1 ]
+}
