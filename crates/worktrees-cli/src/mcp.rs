@@ -6144,7 +6144,11 @@ mod tests {
             (out(&["branch", "--list"]), out(&["worktree", "list", "--porcelain"]))
         };
         let before = git_state();
-        let sessions = || worktrees_core::tmux::session_names().into_iter().filter(|n| n.contains(&f.conv) || n.contains("docs")).count();
+        // What the call ADDS: the reachable tmux server may be a person's, with
+        // sessions of its own whose names hold "docs" (one did, and this read 1).
+        let names = || worktrees_core::tmux::session_names().into_iter().filter(|n| n.contains(&f.conv) || n.contains("docs")).collect::<std::collections::BTreeSet<_>>();
+        let had = names();
+        let sessions = || names().difference(&had).count();
         let r = call(&mut s, "plan_propose_work", serde_json::json!({ "title": "Docs", "project": "proj", "branch": "docs", "brief": "Write the docs.\n\nStop when done." }));
         assert_eq!(r["isError"], serde_json::json!(false), "{}", says(&r));
         let v = body(&r);
