@@ -31,7 +31,7 @@ const BRET = GUEST_HOST.principal_id;
 const OWNER = "David";
 
 /** dispatch.rs's `GUEST_ROWS`. */
-const ROWS = new Set(["shares_list", "share_join", "guest_places", "share_request", "thread_read", "thread_post", "shared_turns", "shared_tool_call", "shared_image"]);
+const ROWS = new Set(["shares_list", "share_join", "guest_places", "share_request", "thread_read", "thread_post", "shared_turns", "shared_tool_call", "shared_image", "shared_call_image"]);
 
 type Binding = { harness: string; state: "active" | "ended"; bound_at: number; ended_at: number | null };
 type Share = {
@@ -79,10 +79,11 @@ transcripts.s_livechataaaaaaaaaaaaaaaaaa[44].steps = [
   { kind: "question", at: T0 + 44 * 120 + 6, questions: [{ header: "Layout", question: "Side by side or stacked?", multi: false, options: [{ label: "Side" }, { label: "Stacked" }] }] },
 ];
 // Pictures (`serve/shareimage.rs`): a reply that shows four and names two it
-// may not, and Reads inside the place and outside it.
+// may not, and Reads inside the place and outside it; the owner's message
+// attaches one the host stored and draws one it did not.
 const LANE = "/Users/david/work/worktrees/.worktrees/feat-chat-redesign";
 transcripts.s_livechataaaaaaaaaaaaaaaaaa[43] = {
-  ...transcripts.s_livechataaaaaaaaaaaaaaaaaa[43], user: "Show me the mockups. ![mine](shots/mine.png)", tools: ["Read", "Read"],
+  ...transcripts.s_livechataaaaaaaaaaaaaaaaaa[43], user: "Show me the mockups. ![mine](shots/mine.png) [attached: .worktrees-attachments/20261124-00000000000000aa.png]", tools: ["Read", "Read"],
   steps: [
     { kind: "text", at: T0 + 43 * 120 + 5, text: "I made two mockups.\n\n**Home**: every project\n![Home view](.worktrees-attachments/agent/wide-home.svg)\n\n**Place**: the treemap\n![Place view](shots/wide%20place.svg)\n\n![Gone](shots/missing.png)\n\n![Logo](https://example.com/logo.png)" },
     { kind: "tool", at: T0 + 43 * 120 + 6, name: "Read", call_id: "call_r1", summary: `${LANE}/shots/wide-read.svg`, detail: true },
@@ -118,7 +119,10 @@ async function sharedImage(args: Record<string, unknown>) {
   const s = admitted(args.share);
   const path = String(args.path);
   const t = (transcripts[s.id] ?? []).find((x) => x.seq === Number(args.turn));
-  const draws = (t?.steps as { kind: string; text?: string; name?: string; summary?: string }[] | undefined)?.some((st) =>
+  // A person's message: only what the host stored (its upload ledger), which
+  // the mock reads as an upload's own name in the `[attached: …]` tail.
+  const stored = /^\.worktrees-attachments\/\d{8}-[0-9a-f]{16}\.png$/.test(path) && String(t?.user ?? "").includes(` [attached: ${path}`);
+  const draws = stored || (t?.steps as { kind: string; text?: string; name?: string; summary?: string }[] | undefined)?.some((st) =>
     st.kind === "text" ? [...(st.text ?? "").matchAll(/!\[[^\]]*\]\(([^)\s]+)\)/g)].some((m) => decodeURIComponent(m[1]) === path) : st.kind === "tool" && st.name === "Read" && st.summary === path);
   images.calls.push(path);
   images.most = Math.max(images.most, ++images.now);
@@ -193,6 +197,16 @@ export function guestInvoke(cmd: string, args: Record<string, unknown>, emitEven
     }
     case "shared_image":
       return sharedImage(args);
+    case "shared_call_image": {
+      // The picture a Read was shown, from the transcript by call id.
+      if (new URLSearchParams(location.search).get("guestimage") === "old") throw `unknown command: ${cmd}`;
+      admitted(args.share);
+      const id = String(args.call_id);
+      const read = (transcripts[String(args.share)] ?? []).some((t) => (t.steps as { call_id?: string; name?: string; failed?: boolean }[]).some((st) => st.call_id === id && st.name === "Read" && !st.failed));
+      if (!read) throw "not shown: no picture of this call in this shared session";
+      images.calls.push(`call:${id}`);
+      return { call_id: id, mime: "image/svg+xml", b64: SVG, size: 300, truncated: false };
+    }
     case "shared_tool_call": {
       admitted(args.share);
       const id = String(args.call_id);
