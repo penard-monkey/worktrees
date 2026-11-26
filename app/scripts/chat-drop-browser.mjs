@@ -32,7 +32,14 @@ async function open(browser, query = "") {
 /** Press on a nav row, travel to `to` ({x, y}), and return what is under the
  *  pointer and what the page shows mid-drag; `drop` false presses Escape first, with the button still held. */
 async function drag(page, slug, to, drop = true, keep = FIELD) {
-  const box = await page.locator(`li.row[data-slug="${slug}"]`).first().boundingBox();
+  // Into view first: a row cut by the nav's scroller has its centre on
+  // whatever is below it (the usage strip, at 1280×900 in Chromium), and the
+  // press there starts no drag at all.
+  const row = page.locator(`li.row[data-slug="${slug}"]`).first();
+  await row.scrollIntoViewIfNeeded();
+  const box = await row.boundingBox();
+  const hit = await page.evaluate(({ x, y, slug }) => !!document.elementFromPoint(x, y)?.closest(`li.row[data-slug="${slug}"]`), { x: box.x + box.width / 2, y: box.y + box.height / 2, slug });
+  if (!hit) throw new Error(`the row ${slug} is not what its centre hits: the drag would start nowhere`);
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();
   await page.mouse.move(box.x + box.width / 2 + 12, box.y + box.height / 2 + 12, { steps: 3 });
