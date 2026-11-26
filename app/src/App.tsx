@@ -50,6 +50,7 @@ import { StatusBody, StatusSheet, type StatusReport } from "./StatusSheet";
 import { installUsage, setSurface, trackChord } from "./usage";
 import { fileInfo } from "./filekind";
 import { fromDevice, instructionLine, instructionTitle, launchedTitle, deviceLabel, type By, type LaunchedBy, type RemoteInstruction } from "./provenance";
+import type { Elsewhere, Lineage, Link } from "./lineage";
 import { canStep as canStepNav, empty as emptyHistory, goTo as goToNav, label as labelNav, locKey, prune as pruneNav, reachable as reachableNav, record as recordNav, whereKey, WS_TAB_LABEL, type History as NavHistory, type Loc, type WsTab } from "./navHistory";
 import { agentViewFor, applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, lowerFits, lowerFracFor, lowerRange, panelsFor, placeKey, railsMerged, railsWidth, saveSettings, stepMdZoom, stepZoom, upperTab, viewportWidth, withAgentView, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
 import {
@@ -323,6 +324,11 @@ type Declared = {
   last_remote_instruction?: RemoteInstruction;
   note_by?: By;
   title_by?: By;
+  /// Lane children (store.rs, ./lineage): read through `Place.lineage`, which
+  /// core resolves — never from these links directly.
+  started_by?: Link | Elsewhere;
+  handed_to?: Link;
+  under?: Link;
 } | null;
 
 type AgentSession = { name: string; up: boolean; model?: string | null };
@@ -356,6 +362,9 @@ type Place = {
   profile_stale?: boolean;
   declared: Declared;
   lifecycle_effective: string;
+  /// Who started this place and where it hangs, resolved by core
+  /// (`lineage::Lineage`). The nav's tree is `lineage.parent` alone.
+  lineage?: Lineage;
 };
 /** `unborn`: the repo was `git init`ed but has no commits — it lists fine, yet
  *  no worktree can be created off an unborn branch. The nav offers the first

@@ -1,4 +1,4 @@
-//! The 324 commands, each with its exposure, capability and objects, in ONE
+//! The 325 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -889,6 +889,7 @@ commands! { cx, a;
     set_lifecycle: Engine [write, place(repo, slug)] => ops::set_lifecycle(a.get("repo")?, a.get("slug")?, a.get("label")?),
     set_pin: Engine [write, place(repo, slug)] => ops::set_pin(a.get("repo")?, a.get("slug")?, a.get("on")?),
     set_note: Engine [write, place(repo, slug)] => ops::set_note(&cx.ctx, a.get("repo")?, a.get("slug")?, a.get("note")?),
+    set_place_under: Engine [write, place(repo, slug)] => ops::set_place_under(&cx.ctx, a.get("repo")?, a.get("slug")?, a.get("under")?),
     drop_reference: Engine [write, place(repo, slug), place(into_repo, into_slug), session_of(into_session, into_repo, into_slug)] => ops::drop_reference(
         a.get("repo")?, a.get("slug")?, a.get("into_repo")?, a.get("into_slug")?, a.get("into_session")?, a.get("provider")?,
     ),
@@ -1576,7 +1577,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 324 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 325 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1606,14 +1607,15 @@ mod tests {
     /// `guest`), its thread's two (`thread_read`, `thread_post`, `guest`) and PR C's
     /// two `guest` history rows (`shared_turns`, `shared_tool_call`), the guest's `shared_image` and `shared_call_image`, and the host's sleep
     /// hold (`get_keep_awake`, `set_keep_awake`), disk usage's three (`disk_usage`,
-    /// `disk_place_tree`, `disk_delete`), and a workspace's memory's nine
-    /// console rows (`workspace_memory*`); the check scripts
+    /// `disk_place_tree`, `disk_delete`), a workspace's memory's nine
+    /// console rows (`workspace_memory*`), and lane children's adoption
+    /// (`set_place_under`); the check scripts
     /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 324, "the table has 324 commands");
+        assert_eq!(TABLE.len(), 325, "the table has 325 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -2041,7 +2043,7 @@ mod tests {
     /// `shares_all`, `guests_list`, `guest_remove`, `owner_set_name`) and the
     /// four `guest` rows (`GUEST_ROWS`), the capability's first, the thread's
     /// two `guest` rows (`thread_read`, `thread_post`) and PR C's two
-    /// (`shared_turns`, `shared_tool_call`), then `shared_image` and `shared_call_image`. A row that moves group
+    /// (`shared_turns`, `shared_tool_call`), then `shared_image` and `shared_call_image`; and lane children's `set_place_under` (`write`). A row that moves group
     /// fails here until the count (and the proposal's table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
@@ -2058,7 +2060,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 74), ("write", 24), ("admin", 42), ("console", 140), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 74), ("write", 25), ("admin", 42), ("console", 140), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7), ("guest", 10),
         ]
         .into();

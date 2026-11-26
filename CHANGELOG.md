@@ -46,6 +46,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `doctor`) report each allowed repo and whether a launch there would be trusted.
 - **A waiting workspace chat is told like a waiting agent (Workspace chats, beta).** With Settings → Agents → Notifications on, a workspace chat that stops on a question while the window is hidden raises the same system notification a place's agent does, naming the chat and its workspace; so does a chat's fold that stops on a question, and a fold that did not finish. Once per wait, never for what already waited when the window opened, and never while you are looking.
 - **A workspace chat's header names its model (Workspace chats, beta).** As a place's agent label does ("Claude Opus 5.5"), from the chat's transcript, and a `/model` switch shows within a few seconds, with no restart.
+- **A lane started by a lane is recorded as its child, and its reports go to it.** A place created from inside another lane —
+  MCP `create_worktree` from that lane's agent, or `worktrees new` typed in its pane — records that lane as its starter
+  (`started_by` in `.worktrees.places.json`, written once when the worktree is made and never by a launch). A place made from
+  `(main)`, the app, a phone or a plan's Start records none, and every place that exists today has none, so they behave
+  exactly as before. `worktrees ls --json`, MCP `list_places` and `place_status` carry the resolved `lineage` on every row
+  (who started it, where it hangs, where its reports go, the lanes it started). MCP `report` with no `to` now goes to the
+  nearest place above the sender with an agent running (its starter, then the next one up), else `(main)`; an answer with
+  `reply_to` and no `to` goes back to whoever asked; an explicit `to` is unchanged; the reply says where the message went and
+  why, and the stored message carries `routed` for the recipient. Removing a starter (`rm`, MCP `remove_worktree`, the app)
+  moves its lanes up one level, says so before and after, and never closes or removes them. `(main)` and the owner can move
+  where a lane is drawn — `worktrees place under <slug> <target|--top|--reset>` (refused inside a lane), MCP `adopt_place`
+  (refused from any place but `(main)`), and serve's `set_place_under` for the app's menu — which never changes who started it
+  or where its reports go. The nested nav that draws all this comes next; the mock (`?lanes`) carries a tree to build it on.
 
 ### Changed
 

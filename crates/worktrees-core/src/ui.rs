@@ -42,12 +42,36 @@ pub trait Ui {
     fn launched_by(&self) -> Option<crate::store::LaunchedBy> {
         None
     }
+    /// Which place, if any, is starting the place an op CREATES
+    /// (lane-children §2): `cmd_new` records it as `started_by` when it makes
+    /// the worktree, and never otherwise. Nobody by default — the app, a
+    /// phone and a plan's Start are a person, and a person is no starter.
+    fn started_from(&self) -> StartedFrom {
+        StartedFrom::Nobody
+    }
+}
+
+/// `Ui::started_from`: who starts a new place.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum StartedFrom {
+    /// A person, or `(main)`, which is not a starter.
+    #[default]
+    Nobody,
+    /// The CLI: the place the process's working directory lies in, if any —
+    /// `worktrees new` typed in a lane's pane makes a child of that lane.
+    Cwd,
+    /// A place an MCP server runs in: `project` is set when the new place is
+    /// in ANOTHER registered project, and names the starter's.
+    Place { slug: String, project: Option<String> },
 }
 
 /// The CLI's terminal UI — byte-parity with the bash helpers.
 pub struct CliUi;
 
 impl Ui for CliUi {
+    fn started_from(&self) -> StartedFrom {
+        StartedFrom::Cwd
+    }
     fn info(&mut self, msg: &str) {
         println!("{GREEN}▸{NC} {msg}");
     }
@@ -108,6 +132,8 @@ pub struct CaptureUi {
     /// What `Ui::launched_by` answers: set by a caller that knows who it is
     /// acting for (serve's api, an MCP server inheriting its own lane's).
     pub launched_by: Option<crate::store::LaunchedBy>,
+    /// What `Ui::started_from` answers: set only by an MCP `create_worktree`.
+    pub started_from: StartedFrom,
 }
 
 impl CaptureUi {
@@ -154,6 +180,9 @@ impl Ui for CaptureUi {
     }
     fn launched_by(&self) -> Option<crate::store::LaunchedBy> {
         self.launched_by.clone()
+    }
+    fn started_from(&self) -> StartedFrom {
+        self.started_from.clone()
     }
 }
 
