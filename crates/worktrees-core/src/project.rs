@@ -585,6 +585,14 @@ impl Project {
         out
     }
 
+    /// Every place's slug and birth epoch — what `lineage`'s rules need to
+    /// know about places, for one `git worktree list` and a stat per place,
+    /// no per-place git. `ls` has these already; a removal or a report that
+    /// has no snapshot reads them here.
+    pub fn place_births(&self) -> Vec<(String, Option<i64>)> {
+        self.place_index().into_iter().map(|r| (r.slug, Some(self.clock.stat_birth(&r.path)))).collect()
+    }
+
     /// The place `here` lies in — the deepest, since places nest under the
     /// main checkout. `.worktrees/` itself is the container, not a place.
     pub fn place_containing(&self, here: &Path) -> std::result::Result<PlaceRef, String> {

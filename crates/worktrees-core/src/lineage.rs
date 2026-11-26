@@ -71,6 +71,11 @@ pub struct Lineage {
     /// The drawn parent's slug. Absent: top level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// The next place up by `handed_to`, else `started_by`: where a removal
+    /// of this place moves its `lanes`, and the first step of the report
+    /// walk. Absent: `(main)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub up: Option<String>,
     /// Where a `report` with no `to` goes now. Absent only for `(main)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reports_to: Option<String>,
@@ -227,6 +232,7 @@ impl<'a> Index<'a> {
             under: holding(d.and_then(|d| d.under.as_ref())),
             handed_to: holding(d.and_then(|d| d.handed_to.as_ref())),
             parent: self.parent(slug),
+            up: self.up(slug),
             reports_to: (slug != MAIN).then(|| self.route(slug, live).to),
             started: others()
                 .filter(|s| {
@@ -442,6 +448,8 @@ mod tests {
         assert_eq!(l.handed_to.and_then(|h| h.from), Some("b".into()));
         assert_eq!(i.lineage("a", &nobody).lanes, vec!["c".to_string()]);
         assert!(i.lineage("a", &nobody).started.is_empty());
+        assert_eq!(i.lineage("c", &nobody).up.as_deref(), Some("a"));
+        assert_eq!(i.lineage("a", &nobody).up, None);
     }
 
     #[test]

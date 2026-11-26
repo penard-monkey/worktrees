@@ -2202,6 +2202,9 @@ fn remove_one(p: &Project, ui: &mut dyn Ui, name: &str, del_branch: bool, force:
     let live = live_session(p, &slug, &path, None);
     let session = live.clone().unwrap_or_else(|| p.session_name(&slug));
 
+    // Lane-children §7: the lanes that hang from this place move up one
+    // level when it goes. Said before the prompt, written after the removal.
+    let handoff = handoff_plan(p, &slug);
     if !dirty.is_empty() && !force {
         ui.warn(&format!("Worktree '{slug}' has uncommitted changes:"));
         ui.plain(&indent(&dirty));
@@ -2216,6 +2219,9 @@ fn remove_one(p: &Project, ui: &mut dyn Ui, name: &str, del_branch: bool, force:
             String::new()
         };
         ui.plain(&format!("Remove {} → tmux {} · worktree dir{branch_part}", fmt::cyan(&slug), fmt::yellow(&session)));
+        if let Some(line) = handoff_sentence(&handoff) {
+            ui.plain(&line);
+        }
         if !ui.confirm("Proceed? [y/N] ") {
             ui.info(&format!("Skipped {slug}."));
             return Ok(());
@@ -2245,6 +2251,9 @@ fn remove_one(p: &Project, ui: &mut dyn Ui, name: &str, del_branch: bool, force:
         ui.info(&format!("deleted stale dir {slug}"));
     }
     let _ = git::git(&p.main_root, &["worktree", "prune"]);
+    if !Path::new(&path).exists() {
+        apply_handoff(p, ui, &slug, &handoff);
+    }
 
     if del_branch && !branch.is_empty() {
         let flag = if force { "-D" } else { "-d" };
@@ -2267,6 +2276,7 @@ fn remove_one(p: &Project, ui: &mut dyn Ui, name: &str, del_branch: bool, force:
 /// halfway. No prompt and no dirty check: the caller has both.
 pub(crate) fn remove_tree(p: &Project, ui: &mut dyn Ui, wt: &str) -> Result<Vec<String>, i32> {
     let slug = basename(wt);
+    let handoff = handoff_plan(p, &slug);
     let canonical = p.session_name(&slug);
     let mut sessions: Vec<String> = Vec::new();
     if let Some(s) = live_session(p, &slug, wt, None) {
@@ -2289,7 +2299,48 @@ pub(crate) fn remove_tree(p: &Project, ui: &mut dyn Ui, wt: &str) -> Result<Vec<
     }
     ui.info(&format!("removed worktree {slug}"));
     let _ = git::git(&p.main_root, &["worktree", "prune"]);
+    apply_handoff(p, ui, &slug, &handoff);
     Ok(sessions)
+}
+
+/// What removing `slug` does to the places that hang from it (lane-children
+/// §7): `(lanes, the place they move up to)`. Never a cascade — no lane is
+/// closed or removed because its starter was.
+pub fn handoff_plan(p: &Project, slug: &str) -> (Vec<String>, String) {
+    let store = crate::store::read_lenient(&p.main_root);
+    let births = p.place_births();
+    let index = crate::lineage::Index::new(births.iter().map(|(s, b)| (s.as_str(), *b)), &store.places);
+    index.handoff(slug)
+}
+
+/// The remove path's sentence for a handoff, `None` when nothing hangs from
+/// the place.
+pub fn handoff_sentence((lanes, to): &(Vec<String>, String)) -> Option<String> {
+    match lanes.len() {
+        0 => None,
+        1 => Some(format!("1 lane hangs from it ({}). It moves up to {to}; it is not closed or removed.", lanes[0])),
+        n => Some(format!("{n} lanes hang from it ({}). They move up to {to}; none is closed or removed.", lanes.join(", "))),
+    }
+}
+
+/// Write `handed_to` on each lane of a removed place. `started_by` is never
+/// touched, so a header still says who really started a lane.
+fn apply_handoff(p: &Project, ui: &mut dyn Ui, slug: &str, (lanes, to): &(Vec<String>, String)) {
+    if lanes.is_empty() {
+        return;
+    }
+    let now = crate::sysclock::now_epoch();
+    let mut moved = Vec::new();
+    for lane in lanes {
+        let link = crate::store::Link { from: Some(slug.to_string()), ..crate::store::Link::to(to, now) };
+        match crate::store::edit(&p.main_root, lane, |d| d.handed_to = Some(link)) {
+            Ok(()) => moved.push(lane.as_str()),
+            Err(e) => ui.warn(&format!("could not move {lane} up to {to}: {e}")),
+        }
+    }
+    if !moved.is_empty() {
+        ui.info(&format!("moved up to {to}: {}", moved.join(", ")));
+    }
 }
 
 // ── relink / doctor — the `[[file]]` surface (proposal §7) ───────────────────

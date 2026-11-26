@@ -120,3 +120,80 @@ ls_json() { LS="$(cd "$REPO" && "$WT_BIN" ls --json)"; }
   got="$(printf '%s' "$output" | python3 -c 'import json,sys; r=json.loads(sys.stdin.read()); print(json.loads(r["result"]["content"][0]["text"])["lineage"]["started"])')"
   [ "$got" = "['b']" ]
 }
+
+# Set `under` by hand, as an adoption would (the adopt verbs have their own tests).
+put_under() {
+  python3 - "$REPO/.worktrees.places.json" "$1" "$2" <<'PY'
+import json, sys, time
+path, slug, to = sys.argv[1:]
+d = json.load(open(path))
+d["places"].setdefault(slug, {})["under"] = {"place": to, "at": int(time.time()) + 1, "by": "owner"}
+json.dump(d, open(path, "w"))
+PY
+}
+
+@test "lineage: removing a starter moves its lane up to (main), started_by kept" {
+  run_wt new a --no-tmux
+  run_wt -C "$REPO/.worktrees/a" new b --no-tmux
+  run_wt rm a
+  grep -qF "1 lane hangs from it (b). It moves up to (main)" <<<"$output"
+  grep -qF "Skipped a." <<<"$output"
+  [ "$(decl b handed_to)" = - ]
+  run_wt rm -y a
+  [ "$status" -eq 0 ]
+  grep -qF "moved up to (main): b" <<<"$output"
+  [ "$(decl b handed_to place)" = "(main)" ]
+  [ "$(decl b handed_to from)" = a ]
+  [ "$(decl b started_by place)" = a ]
+  ls_json
+  [ "$(lineage b parent)" = - ]
+  [ "$(lineage b reports_to)" = "(main)" ]
+  [ -d "$REPO/.worktrees/b" ]
+}
+
+@test "lineage: removing the middle of a chain hands its lanes to its own starter" {
+  run_wt new a --no-tmux
+  run_wt -C "$REPO/.worktrees/a" new b --no-tmux
+  run_wt -C "$REPO/.worktrees/b" new c --no-tmux
+  run_wt -C "$REPO/.worktrees/b" new d --no-tmux
+  run_wt rm -y b
+  grep -qF "moved up to a: c, d" <<<"$output"
+  ls_json
+  [ "$(lineage c parent)" = a ]
+  [ "$(lineage d parent)" = a ]
+  [ "$(lineage a lanes)" = c,d ]
+  [ "$(lineage c starter)" = b ]
+  # And again: removing a hands c and d (now handed to a) on to (main).
+  run_wt rm -y a
+  [ "$(decl c handed_to place)" = "(main)" ]
+  [ "$(decl c handed_to from)" = a ]
+}
+
+@test "lineage: a lane only drawn under the removed place gets no write" {
+  run_wt new a --no-tmux
+  run_wt new x --no-tmux
+  run_wt -C "$REPO/.worktrees/x" new e --no-tmux
+  put_under e a
+  ls_json
+  [ "$(lineage e parent)" = a ]
+  run_wt rm -y a
+  ! grep -qF "moved up" <<<"$output" || false
+  [ "$(decl e handed_to)" = - ]
+  ls_json
+  # Its `under` no longer holds, so it falls back to its starter.
+  [ "$(lineage e parent)" = x ]
+}
+
+@test "lineage: a slug made again after removal inherits no lanes" {
+  run_wt new a --no-tmux
+  run_wt -C "$REPO/.worktrees/a" new b --no-tmux
+  run_wt rm -y a
+  sleep 1
+  run_wt new a2 --name a --no-tmux
+  ls_json
+  [ "$(lineage a lanes)" = - ]
+  [ "$(lineage a started)" = - ]
+  [ "$(lineage b parent)" = - ]
+  run_wt rm -y a
+  ! grep -qF "moved up" <<<"$output" || false
+}
