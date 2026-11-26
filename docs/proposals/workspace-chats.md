@@ -71,7 +71,7 @@ whose git history the engine keeps in its own half, outside the folder
    (locks)                            every lock the chats and the memory take
 
  tmux: worktrees~ws~<conv>            one session per live chat; never a place
- --add-dir <root>                     each of the workspace's projects, to read
+ Read(/<root>/**) allowed, Edit denied   each of the workspace's projects, read by the session's own permission rules (no --add-dir)
 ```
 
 - **Memory grows.** `MEMORY.md` is the only part a chat always reads. It is
