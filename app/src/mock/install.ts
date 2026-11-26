@@ -6767,6 +6767,13 @@ Phase 3: Frontend pane and mock harness
     case "plugin:event|listen": {
       (eventListeners[args.event] ??= new Set()).add(args.handler);
       if (args.event === "app:open-doc") releaseShows();
+      // serve hands a socket that declares a SNAPSHOT event its last push at
+      // once (`Clients::declare`), so a listener added after the push still
+      // has the state; on a macrotask, as the door hands parked events on.
+      if (snapshotLast.has(args.event)) {
+        const h = args.handler as number, payload = snapshotLast.get(args.event);
+        setTimeout(() => { if (eventListeners[args.event]?.has(h)) callbacks[h]?.({ event: args.event, id: h, payload }); }, 0);
+      }
       return args.handler;
     }
     case "plugin:event|unlisten": {
@@ -6879,7 +6886,12 @@ Phase 3: Frontend pane and mock harness
 let cbId = 0;
 const callbacks: Record<number, (v: unknown) => void> = {};
 const eventListeners: Record<string, Set<number>> = {};
+/** `scope::SNAPSHOT`: the change-gated state events whose last push serve
+ *  projects to a socket that declares them late. */
+const SNAPSHOT_EVENTS = new Set(["sessions:busy", "ideas:sessions", "workspaces:sessions"]);
+const snapshotLast = new Map<string, unknown>();
 function emitEvent(event: string, payload: unknown) {
+  if (SNAPSHOT_EVENTS.has(event)) snapshotLast.set(event, payload);
   for (const id of eventListeners[event] ?? []) callbacks[id]?.({ event, id, payload });
 }
 

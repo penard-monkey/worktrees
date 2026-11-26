@@ -102,6 +102,24 @@ async function run(engine, name) {
   const browser = await engine.launch();
   const tag = `[${name}]`;
   try {
+    // ── the harness's own contract first: serve hands a socket that declares a
+    // SNAPSHOT event (`scope::SNAPSHOT`: `sessions:busy` among them) its last
+    // push at once, so a listener added after the poll's push still has the
+    // waiting set. The mock's `?activity=<n>` pushes once at 400 ms; on a cold
+    // vite App listens later than that, and every waiting place read idle
+    // (the integrator's "wsc-dot done", 2026-11-25).
+    {
+      const p = await open(browser, {}, "workspaces=1&activity=2", { free: false });
+      const late = await p.evaluate(() => new Promise((done) => {
+        const T = window.__TAURI_INTERNALS__;
+        const handler = T.transformCallback((e) => done(e.payload?.waiting ?? null));
+        T.invoke("plugin:event|listen", { event: "sessions:busy", target: { kind: "Any" }, handler });
+        setTimeout(() => done("nothing"), 500);
+      }));
+      ok(Array.isArray(late) && late.length > 0, `${tag} the mock replays the held sessions:busy to a listener added after its push (${JSON.stringify(late)})`);
+      await p.close();
+    }
+
     // ── on: the default, as before ──
     let page = await open(browser);
     const on = await view(page);
