@@ -1,0 +1,912 @@
+{
+  "note": "Lane-children lineage cases. Core's lineage tests and app/scripts/lineage-check.mjs (the mock's resolver) both judge these; `expect` is core's answer. Regenerate with WT_BLESS_LINEAGE=1 cargo test -p worktrees-core --lib lineage, then review the diff.",
+  "cases": [
+    {
+      "name": "a family three deep, nothing live",
+      "places": [
+        {
+          "slug": "(main)",
+          "born": 1
+        },
+        {
+          "slug": "a",
+          "born": 10
+        },
+        {
+          "slug": "b",
+          "born": 20
+        },
+        {
+          "slug": "c",
+          "born": 30
+        }
+      ],
+      "declared": {
+        "b": {
+          "started_by": {
+            "place": "a",
+            "at": 15
+          }
+        },
+        "c": {
+          "started_by": {
+            "place": "b",
+            "at": 25
+          }
+        }
+      },
+      "live": [],
+      "expect": {
+        "(main)": {},
+        "a": {
+          "reports_to": "(main)",
+          "started": [
+            "b"
+          ],
+          "lanes": [
+            "b"
+          ]
+        },
+        "b": {
+          "starter": {
+            "place": "a",
+            "at": 15
+          },
+          "parent": "a",
+          "up": "a",
+          "reports_to": "(main)",
+          "started": [
+            "c"
+          ],
+          "lanes": [
+            "c"
+          ]
+        },
+        "c": {
+          "starter": {
+            "place": "b",
+            "at": 25
+          },
+          "parent": "b",
+          "up": "b",
+          "reports_to": "(main)"
+        }
+      }
+    },
+    {
+      "name": "a family, the starter live",
+      "places": [
+        {
+          "slug": "(main)",
+          "born": 1
+        },
+        {
+          "slug": "a",
+          "born": 10
+        },
+        {
+          "slug": "b",
+          "born": 20
+        },
+        {
+          "slug": "c",
+          "born": 30
+        }
+      ],
+      "declared": {
+        "b": {
+          "started_by": {
+            "place": "a",
+            "at": 15
+          }
+        },
+        "c": {
+          "started_by": {
+            "place": "b",
+            "at": 25
+          }
+        }
+      },
+      "live": [
+        "b",
+        "a"
+      ],
+      "expect": {
+        "(main)": {},
+        "a": {
+          "reports_to": "(main)",
+          "started": [
+            "b"
+          ],
+          "lanes": [
+            "b"
+          ]
+        },
+        "b": {
+          "starter": {
+            "place": "a",
+            "at": 15
+          },
+          "parent": "a",
+          "up": "a",
+          "reports_to": "a",
+          "started": [
+            "c"
+          ],
+          "lanes": [
+            "c"
+          ]
+        },
+        "c": {
+          "starter": {
+            "place": "b",
+            "at": 25
+          },
+          "parent": "b",
+          "up": "b",
+          "reports_to": "b"
+        }
+      }
+    },
+    {
+      "name": "a family, a closed middle",
+      "places": [
+        {
+          "slug": "(main)",
+          "born": 1
+        },
+        {
+          "slug": "a",
+          "born": 10
+        },
+        {
+          "slug": "b",
+          "born": 20
+        },
+        {
+          "slug": "c",
+          "born": 30
+        }
+      ],
+      "declared": {
+        "b": {
+          "started_by": {
+            "place": "a",
+            "at": 15
+          }
+        },
+        "c": {
+          "started_by": {
+            "place": "b",
+            "at": 25
+          }
+        }
+      },
+      "live": [
+        "a"
+      ],
+      "expect": {
+        "(main)": {},
+        "a": {
+          "reports_to": "(main)",
+          "started": [
+            "b"
+          ],
+          "lanes": [
+            "b"
+          ]
+        },
+        "b": {
+          "starter": {
+            "place": "a",
+            "at": 15
+          },
+          "parent": "a",
+          "up": "a",
+          "reports_to": "a",
+          "started": [
+            "c"
+          ],
+          "lanes": [
+            "c"
+          ]
+        },
+        "c": {
+          "starter": {
+            "place": "b",
+            "at": 25
+          },
+          "parent": "b",
+          "up": "b",
+          "reports_to": "a"
+        }
+      }
+    },
+    {
+      "name": "a place with no record",
+      "places": [
+        {
+          "slug": "(main)",
+          "born": 1
+        },
+        {
+          "slug": "old",
+          "born": 10
+        }
+      ],
+      "declared": {},
+      "live": [
+        "old"
+      ],
+      "expect": {
+        "(main)": {},
+        "old": {
+          "reports_to": "(main)"
+        }
+      }
+    },
+    {
+      "name": "rule 1: the starter is gone",
+      "places": [
+        {
+          "slug": "(main)",
+          "born": 1
+        },
+        {
+          "slug": "c",
+          "born": 30
+        }
+      ],
+      "declared": {
+        "c": {
+          "started_by": {
+            "place": "gone",
+            "at": 25
+          }
+        }
+      },
+      "live": [
+        "c"
+      ],
+      "expect": {
+        "(main)": {},
+        "c": {
+          "starter": {
+            "place": "gone",
+            "at": 25,
+            "removed": true
+          },
+          "reports_to": "(main)"
+        }
+      }
+    },
+    {
+      "name": "rule 2: the starter's slug was made again",
+      "places": [
+        {
+          "slug": "(main)",
+          "born": 1
+        },
+        {
+          "slug": "a",
+          "born": 50
+        },
+        {
+          "slug": "b",
+          "born": 20
+        }
+      ],
+      "declared": {
+        "b": {
+          "started_by": {
+            "place": "a",
+            "at": 15
+          }
+        }
+      },
+      "live": [
+        "a"
+      ],
+      "expect": {
+        "(main)": {},
+        "a": {
+          "reports_to": "(main)"
+        },
+        "b": {
+          "starter": {
+            "place": "a",
+            "at": 15,
+            "removed": true
+          },
+          "reports_to": "(main)"
+        }
+      }
+    },
+    {
+      "name": "rule 2 passes with no birth time",
+      "places": [
+        {
+          "slug": "(main)",
+          "born": 1
+        },
+        {
+          "slug": "a",
+          "born": null
+        },
+        {
+          "slug": "b",
+          "born": 20
+        }
+      ],
+      "declared": {
+        "b": {
+          "started_by": {
+            "place": "a",
+            "at": 15
+          }
+        }
+      },
+      "live": [],
+      "expect": {
+        "(main)": {},
+        "a": {
+          "reports_to": "(main)",
+          "started": [
+            "b"
+          ],
+          "lanes": [
+            "b"
+          ]
+        },
+        "b": {
+          "starter": {
+            "place": "a",
+            "at": 15
+          },
+          "parent": "a",
+          "up": "a",
+          "reports_to": "(main)"
+        }
+      }
+    },
+    {
+      "name": "rule 3: a tie loop fails both",
+      "places": [
+        {
+          "slug": "(main)",
+          "born": 1
+        },
+        {
+          "slug": "a",
+          "born": 10
+        },
+        {
+          "slug": "b",
+          "born": 20
+        }
+      ],
+      "declared": {
+        "a": {
+          "under": {
+            "place": "b",
+            "at": 30
+          }
+        },
+        "b": {
+          "under": {
+            "place": "a",
+            "at": 30
+          }
+        }
+      },
+      "live": [],
+      "expect": {
+        "(main)": {},
+        "a": {
+          "reports_to": "(main)"
+        },
+        "b": {
+          "reports_to": "(main)"
+        }
+      }
+    },
+    {
+      "name": "rule 3: the newest link of a loop fails",
+      "places": [
+        {
+          "slug": "(main)",
+          "born": 1
+        },
+        {
+          "slug": "a",
+          "born": 10
+        },
+        {
+          "slug": "b",
+          "born": 20
+        }
+      ],
+      "declared": {
+        "b": {
+          "started_by": {
+            "place": "a",
+            "at": 15
+          }
+        },
+        "a": {
+          "under": {
+            "place": "b",
+            "at": 30
+          }
+        }
+      },
+      "live": [],
+      "expect": {
+        "(main)": {},
+        "a": {
+          "reports_to": "(main)",
+          "started": [
+            "b"
+          ],
+          "lanes": [
+            "b"
+          ]
+        },
+        "b": {
+          "starter": {
+            "place": "a",
+            "at": 15
+          },
+          "parent": "a",
+          "up": "a",
+          "reports_to": "(main)"
+        }
+      }
+    },
+    {
+      "name": "a self link",
+      "places": [
+        {
+          "slug": "(main)",
+          "born": 1
+        },
+        {
+          "slug": "a",
+          "born": 10
+        }
+      ],
+      "declared": {
+        "a": {
+          "started_by": {
+            "place": "a",
+            "at": 20
+          }
+        }
+      },
+      "live": [],
+      "expect": {
+        "(main)": {},
+        "a": {
+          "reports_to": "(main)"
+        }
+      }
+    },
+    {
+      "name": "under wins the drawing, not the report",
+      "places": [
+        {
+          "slug": "(main)",
+          "born": 1
+        },
+        {
+          "slug": "a",
+          "born": 10
+        },
+        {
+          "slug": "b",
+          "born": 20
+        },
+        {
+          "slug": "c",
+          "born": 30
+        },
+        {
+          "slug": "x",
+          "born": 5
+        }
+      ],
+      "declared": {
+        "b": {
+          "started_by": {
+            "place": "a",
+            "at": 15
+          }
+        },
+        "c": {
+          "started_by": {
+            "place": "b",
+            "at": 25
+          },
+          "under": {
+            "place": "x",
+            "at": 40,
+            "by": "owner"
+          }
+        }
+      },
+      "live": [
+        "b",
+        "x"
+      ],
+      "expect": {
+        "(main)": {},
+        "a": {
+          "reports_to": "(main)",
+          "started": [
+            "b"
+          ],
+          "lanes": [
+            "b"
+          ]
+        },
+        "b": {
+          "starter": {
+            "place": "a",
+            "at": 15
+          },
+          "parent": "a",
+          "up": "a",
+          "reports_to": "(main)",
+          "started": [
+            "c"
+          ],
+          "lanes": [
+            "c"
+          ]
+        },
+        "c": {
+          "starter": {
+            "place": "b",
+            "at": 25
+          },
+          "under": {
+            "place": "x",
+            "at": 40,
+            "by": "owner"
+          },
+          "parent": "x",
+          "up": "b",
+          "reports_to": "b"
+        },
+        "x": {
+          "reports_to": "(main)"
+        }
+      }
+    },
+    {
+      "name": "adopted to the top level",
+      "places": [
+        {
+          "slug": "(main)",
+          "born": 1
+        },
+        {
+          "slug": "a",
+          "born": 10
+        },
+        {
+          "slug": "b",
+          "born": 20
+        },
+        {
+          "slug": "c",
+          "born": 30
+        }
+      ],
+      "declared": {
+        "b": {
+          "started_by": {
+            "place": "a",
+            "at": 15
+          }
+        },
+        "c": {
+          "started_by": {
+            "place": "b",
+            "at": 25
+          },
+          "under": {
+            "place": "(main)",
+            "at": 40,
+            "by": "(main)"
+          }
+        }
+      },
+      "live": [
+        "b"
+      ],
+      "expect": {
+        "(main)": {},
+        "a": {
+          "reports_to": "(main)",
+          "started": [
+            "b"
+          ],
+          "lanes": [
+            "b"
+          ]
+        },
+        "b": {
+          "starter": {
+            "place": "a",
+            "at": 15
+          },
+          "parent": "a",
+          "up": "a",
+          "reports_to": "(main)",
+          "started": [
+            "c"
+          ],
+          "lanes": [
+            "c"
+          ]
+        },
+        "c": {
+          "starter": {
+            "place": "b",
+            "at": 25
+          },
+          "under": {
+            "place": "(main)",
+            "at": 40,
+            "by": "(main)"
+          },
+          "up": "b",
+          "reports_to": "b"
+        }
+      }
+    },
+    {
+      "name": "handed to outranks the starter",
+      "places": [
+        {
+          "slug": "(main)",
+          "born": 1
+        },
+        {
+          "slug": "a",
+          "born": 10
+        },
+        {
+          "slug": "c",
+          "born": 30
+        }
+      ],
+      "declared": {
+        "c": {
+          "started_by": {
+            "place": "b",
+            "at": 25
+          },
+          "handed_to": {
+            "place": "a",
+            "at": 50,
+            "from": "b"
+          }
+        }
+      },
+      "live": [
+        "a"
+      ],
+      "expect": {
+        "(main)": {},
+        "a": {
+          "reports_to": "(main)",
+          "lanes": [
+            "c"
+          ]
+        },
+        "c": {
+          "starter": {
+            "place": "b",
+            "at": 25,
+            "removed": true
+          },
+          "handed_to": {
+            "place": "a",
+            "at": 50,
+            "from": "b"
+          },
+          "parent": "a",
+          "up": "a",
+          "reports_to": "a"
+        }
+      }
+    },
+    {
+      "name": "a starter in another project",
+      "places": [
+        {
+          "slug": "(main)",
+          "born": 1
+        },
+        {
+          "slug": "c",
+          "born": 30
+        }
+      ],
+      "declared": {
+        "c": {
+          "started_by": {
+            "place": "design",
+            "at": 25,
+            "project": "other"
+          }
+        }
+      },
+      "live": [
+        "c"
+      ],
+      "expect": {
+        "(main)": {},
+        "c": {
+          "starter": {
+            "place": "design",
+            "at": 25,
+            "project": "other"
+          },
+          "reports_to": "(main)"
+        }
+      }
+    },
+    {
+      "name": "a chain six deep, only the top live",
+      "places": [
+        {
+          "slug": "(main)",
+          "born": 1
+        },
+        {
+          "slug": "d1",
+          "born": 10
+        },
+        {
+          "slug": "d2",
+          "born": 20
+        },
+        {
+          "slug": "d3",
+          "born": 30
+        },
+        {
+          "slug": "d4",
+          "born": 40
+        },
+        {
+          "slug": "d5",
+          "born": 50
+        },
+        {
+          "slug": "d6",
+          "born": 60
+        }
+      ],
+      "declared": {
+        "d2": {
+          "started_by": {
+            "place": "d1",
+            "at": 25
+          }
+        },
+        "d3": {
+          "started_by": {
+            "place": "d2",
+            "at": 35
+          }
+        },
+        "d4": {
+          "started_by": {
+            "place": "d3",
+            "at": 45
+          }
+        },
+        "d5": {
+          "started_by": {
+            "place": "d4",
+            "at": 55
+          }
+        },
+        "d6": {
+          "started_by": {
+            "place": "d5",
+            "at": 65
+          }
+        }
+      },
+      "live": [
+        "d1"
+      ],
+      "expect": {
+        "(main)": {},
+        "d1": {
+          "reports_to": "(main)",
+          "started": [
+            "d2"
+          ],
+          "lanes": [
+            "d2"
+          ]
+        },
+        "d2": {
+          "starter": {
+            "place": "d1",
+            "at": 25
+          },
+          "parent": "d1",
+          "up": "d1",
+          "reports_to": "d1",
+          "started": [
+            "d3"
+          ],
+          "lanes": [
+            "d3"
+          ]
+        },
+        "d3": {
+          "starter": {
+            "place": "d2",
+            "at": 35
+          },
+          "parent": "d2",
+          "up": "d2",
+          "reports_to": "d1",
+          "started": [
+            "d4"
+          ],
+          "lanes": [
+            "d4"
+          ]
+        },
+        "d4": {
+          "starter": {
+            "place": "d3",
+            "at": 45
+          },
+          "parent": "d3",
+          "up": "d3",
+          "reports_to": "d1",
+          "started": [
+            "d5"
+          ],
+          "lanes": [
+            "d5"
+          ]
+        },
+        "d5": {
+          "starter": {
+            "place": "d4",
+            "at": 55
+          },
+          "parent": "d4",
+          "up": "d4",
+          "reports_to": "d1",
+          "started": [
+            "d6"
+          ],
+          "lanes": [
+            "d6"
+          ]
+        },
+        "d6": {
+          "starter": {
+            "place": "d5",
+            "at": 65
+          },
+          "parent": "d5",
+          "up": "d5",
+          "reports_to": "d1"
+        }
+      }
+    }
+  ]
+}

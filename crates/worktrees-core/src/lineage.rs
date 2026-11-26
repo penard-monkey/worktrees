@@ -225,12 +225,14 @@ impl<'a> Index<'a> {
             project: l.project.clone(),
             removed: l.project.is_none() && !self.names_live_place(slug, l),
         });
-        let holding = |l: Option<&'a Link>| l.filter(|l| self.names_live_place(slug, l)).cloned();
+        // All three rules: a link a loop voids is not shown, or a header would
+        // say "moved under X" for a move that draws nothing.
+        let holding = |l: Option<&'a Link>, chain: fn(&Self, &str) -> Option<&'a Link>| self.first_holding(slug, &[l], chain).cloned();
         let others = || self.nodes.keys().filter(|s| **s != slug);
         Lineage {
             starter,
-            under: holding(d.and_then(|d| d.under.as_ref())),
-            handed_to: holding(d.and_then(|d| d.handed_to.as_ref())),
+            under: holding(d.and_then(|d| d.under.as_ref()), Self::raw_draw),
+            handed_to: holding(d.and_then(|d| d.handed_to.as_ref()), Self::raw_up),
             parent: self.parent(slug),
             up: self.up(slug),
             reports_to: (slug != MAIN).then(|| self.route(slug, live).to),
@@ -568,6 +570,40 @@ mod tests {
         let w = World::new().place("old", 10);
         let i = w.index();
         assert_eq!(route_note(&i.route("old", &nobody), &i.lineage("old", &nobody)), None);
+    }
+
+    /// The shared cases (`tests/fixtures/lineage/cases.json`): this rule's
+    /// answer for each is its `expect`, and `app/scripts/lineage-check.mjs`
+    /// holds the mock's resolver to the same file — the drift check for the
+    /// mock's copy of the rule. `WT_BLESS_LINEAGE=1` rewrites `expect`.
+    #[test]
+    fn the_shared_cases_are_this_rules_answers() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/lineage/cases.json");
+        let mut file: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let bless = std::env::var("WT_BLESS_LINEAGE").is_ok_and(|v| v == "1");
+        let mut wrong = Vec::new();
+        for case in file["cases"].as_array_mut().unwrap() {
+            let born: Vec<(String, Option<i64>)> = case["places"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| (p["slug"].as_str().unwrap().to_string(), p["born"].as_i64()))
+                .collect();
+            let decl: BTreeMap<String, Declared> = serde_json::from_value(case["declared"].clone()).unwrap();
+            let live: Vec<String> = serde_json::from_value(case["live"].clone()).unwrap();
+            let index = Index::new(born.iter().map(|(s, b)| (s.as_str(), *b)), &decl);
+            let got: BTreeMap<String, Lineage> = index.resolve_all(&|s| live.iter().any(|l| l == s)).into_iter().collect();
+            let got = serde_json::to_value(got).unwrap();
+            if bless {
+                case["expect"] = got;
+            } else if case["expect"] != got {
+                wrong.push(format!("{}: expected {} got {}", case["name"], case["expect"], got));
+            }
+        }
+        if bless {
+            std::fs::write(path, serde_json::to_string_pretty(&file).unwrap() + "\n").unwrap();
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
     #[test]

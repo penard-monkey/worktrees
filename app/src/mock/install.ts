@@ -271,9 +271,10 @@ function mockPiHostEdit(e: Record<string, unknown>) {
 // The mock stands in for core, so it resolves `Place.lineage` from the declared
 // links the way `lineage::Index` does: a link holds when it names (main) or a
 // place that exists and was not born after the link, is not into another
-// project, and does not loop back. (Core reads the NEWEST link of a hand-made
-// loop as absent; this guard drops any looping link, which only a hand edit can
-// make.) Live = an agent session up. The app never computes any of this.
+// project, and does not loop back — or, in a loop only a hand edit can make, is
+// not the NEWEST link in it (a tie fails all). Live = an agent session up. The
+// app never computes any of this. `app/scripts/lineage-check.mjs` holds this
+// function to core's answers (crates/worktrees-core/tests/fixtures/lineage/).
 const LINEAGE_MAIN = "(main)";
 type LinkKey = "under" | "handed_to" | "started_by";
 function lineageOf(places: Place[]): Map<string, Lineage> {
@@ -287,24 +288,27 @@ function lineageOf(places: Place[]): Map<string, Lineage> {
     return !!p && (p.created_epoch ?? 0) <= l.at;
   };
   const raw = (slug: string, keys: LinkKey[]) => keys.find((k) => holds(slug, k));
-  const loops = (slug: string, start: string, keys: LinkKey[]) => {
+  // Rule 3 for `slug`'s link `k`: walk the raw chain from its target; a walk
+  // back to `slug` voids the link unless another link in the loop is newer.
+  const voided = (slug: string, k: LinkKey, keys: LinkKey[]) => {
+    const at = link(slug, k)!.at;
     const seen = new Set<string>();
-    for (let cur: string | undefined = start; cur && cur !== LINEAGE_MAIN && !seen.has(cur); ) {
-      if (cur === slug) return true;
+    const others: number[] = [];
+    for (let cur: string | undefined = link(slug, k)!.place; cur && cur !== LINEAGE_MAIN && !seen.has(cur); ) {
+      if (cur === slug) return !others.some((o) => o > at);
       seen.add(cur);
-      const k = raw(cur, keys);
-      cur = k ? link(cur, k)!.place : undefined;
+      const next = raw(cur, keys);
+      if (!next) break;
+      others.push(link(cur, next)!.at);
+      cur = link(cur, next)!.place;
     }
     return false;
   };
+  const effective = (slug: string, k: LinkKey, keys: LinkKey[]) => holds(slug, k) && !voided(slug, k, keys);
   const pick = (slug: string, keys: LinkKey[]) => {
-    for (const k of keys) {
-      if (holds(slug, k) && !loops(slug, link(slug, k)!.place, keys)) {
-        const to = link(slug, k)!.place;
-        return to === LINEAGE_MAIN ? undefined : to;
-      }
-    }
-    return undefined;
+    const k = keys.find((k) => effective(slug, k, keys));
+    const to = k && link(slug, k)!.place;
+    return to === LINEAGE_MAIN ? undefined : to;
   };
   const DRAW: LinkKey[] = ["under", "handed_to", "started_by"];
   const UP: LinkKey[] = ["handed_to", "started_by"];
@@ -326,8 +330,8 @@ function lineageOf(places: Place[]): Map<string, Lineage> {
     const sb = d?.started_by && d.started_by.place !== s ? d.started_by : undefined;
     const l: Lineage = {};
     if (sb) l.starter = { place: sb.place, at: sb.at, ...(sb.project ? { project: sb.project } : { ...(holds(s, "started_by") ? {} : { removed: true }) }) };
-    if (holds(s, "under")) l.under = d!.under;
-    if (holds(s, "handed_to")) l.handed_to = d!.handed_to;
+    if (effective(s, "under", DRAW)) l.under = d!.under;
+    if (effective(s, "handed_to", UP)) l.handed_to = d!.handed_to;
     const parent = pick(s, DRAW), up = pick(s, UP);
     if (parent) l.parent = parent;
     if (up) l.up = up;
