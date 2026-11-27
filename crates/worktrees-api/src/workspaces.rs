@@ -186,6 +186,9 @@ pub fn workspace_remove(ctx: &crate::Ctx, id: String) -> Result<RemovedWs, Strin
         Ok(workspaces) => {
             // A fold that held it is gone with its chat.
             ctx.memory.release(&id);
+            // …and its dock shells, with the directories and history they
+            // kept, as removing a place does (`prefs::remove_place`).
+            crate::term::forget_shell_scope(ctx, crate::term::WORKSPACE_SCOPE, &id);
             Ok(RemovedWs { workspaces, moved_to: moved.map(|p| p.to_string_lossy().into_owned()) })
         }
         Err(e) => {
