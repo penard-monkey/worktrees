@@ -19,7 +19,8 @@ export type PlaceUsage = {
 export type Volume = { free: number; total: number; snapshots: number | null };
 export type ProjectUsage = { root: string; scanned_epoch: number; scan_ms: number; places: PlaceUsage[]; unique: number; volume: Volume };
 /** `diskusage::Node`: `n` empty = small entries folded together; `id` is
- *  `"<dev>:<ino>"`, the identity a delete is checked against. */
+ *  `"<dev>:<ino>:b<ns>"` (or `c<ns>`, a ctime), opaque here: the identity a
+ *  delete is checked against (`diskusage::Ident`). */
 export type DNode = { n: string; p?: string; own: number; shared: number; files: number; c: Cat; dir?: boolean; id?: string; k?: DNode[] };
 export type PlaceTree = { usage: PlaceUsage; tree: DNode; scanned_epoch: number; scan_ms: number; volume: Volume };
 export type Deleted = { path: string; bytes: number; files: number; dir: boolean };
@@ -50,6 +51,88 @@ export function ago(nowSec: number, epoch: number | null | undefined): string {
   return d < 1 ? "today" : d === 1 ? "1 day ago" : `${d} days ago`;
 }
 
+/** How long ago a scan was taken, in words a header can carry. */
+export function scannedAgo(nowSec: number, epoch: number): string {
+  const s = Math.max(0, nowSec - epoch);
+  if (s < 60) return "just now";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m === 1 ? "1 minute ago" : `${m} minutes ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return h === 1 ? "1 hour ago" : `${h} hours ago`;
+  const d = Math.floor(h / 24);
+  return d === 1 ? "1 day ago" : `${d} days ago`;
+}
+
+// ── what a kept scan no longer matches ─────────────────────────────────────
+//
+// A scan is kept until Rescan (`diskusage::project_usage`). It records, per
+// project, WHEN (`scanned_epoch`) and WHICH places (`places[].slug`); the live
+// workspace snapshot says which places exist now. Comparing the two names is
+// certain and costs nothing: a slug in the scan and not in the snapshot was
+// removed after it, a slug in the snapshot and not in the scan was added. What
+// it cannot see: a place removed and made again under the same name, and bytes
+// that changed inside a place that is still there (a build, a delete by hand).
+// Those only a walk can find, and nothing here walks.
+
+/** A project's kept scan against the places that exist now. */
+export type StaleProject = { root: string; gone: string[]; added: string[] };
+
+export function staleProject(u: ProjectUsage, live: { slug: string }[]): StaleProject {
+  const now = new Set(live.map((p) => p.slug));
+  const had = new Set(u.places.map((p) => p.slug));
+  return {
+    root: u.root,
+    gone: u.places.filter((p) => !now.has(p.slug)).map((p) => p.slug),
+    added: live.filter((p) => !had.has(p.slug)).map((p) => p.slug),
+  };
+}
+
+/** One screen's staleness: every scanned project's, plus the projects in
+ *  scope that have no scan. */
+export type Stale = { gone: { root: string; slug: string }[]; added: { root: string; slug: string }[]; unscanned: string[] };
+
+export function staleOf(
+  roots: string[],
+  usage: Record<string, ProjectUsage>,
+  live: (root: string) => { slug: string }[] | null,
+): Stale {
+  const out: Stale = { gone: [], added: [], unscanned: [] };
+  for (const r of roots) {
+    const u = usage[r];
+    if (!u) { out.unscanned.push(r); continue; }
+    const now = live(r);
+    if (!now) continue;
+    const s = staleProject(u, now);
+    out.gone.push(...s.gone.map((slug) => ({ root: r, slug })));
+    out.added.push(...s.added.map((slug) => ({ root: r, slug })));
+  }
+  return out;
+}
+
+export const isGone = (st: Stale, root: string, slug: string): boolean => st.gone.some((g) => g.root === root && g.slug === slug);
+
+/** The notice's sentences, or none when the scan still matches. Short
+ *  sentences, no dashes; a place is named while there is one. */
+export function staleWords(st: Stale, projectName: (root: string) => string): string[] {
+  const w: string[] = [];
+  if (st.gone.length === 1) w.push(`${st.gone[0].slug} was removed after this scan. These numbers still include it.`);
+  else if (st.gone.length > 1) w.push(`${st.gone.length} places were removed after this scan. These numbers still include them.`);
+  if (st.added.length === 1) w.push(`${st.added[0].slug} was added after this scan and is not counted.`);
+  else if (st.added.length > 1) w.push(`${st.added.length} places were added after this scan and are not counted.`);
+  if (st.unscanned.length === 1) w.push(`${projectName(st.unscanned[0])} has not been scanned and is not counted.`);
+  else if (st.unscanned.length > 1) w.push(`${st.unscanned.length} projects have not been scanned and are not counted.`);
+  return w;
+}
+
+/** The oldest and newest scan among `us`, as one header phrase. */
+export function scansAgo(nowSec: number, us: ProjectUsage[]): string | null {
+  if (!us.length) return null;
+  const eps = us.map((u) => u.scanned_epoch);
+  const old = scannedAgo(nowSec, Math.min(...eps));
+  const neu = scannedAgo(nowSec, Math.max(...eps));
+  return old === neu ? `scanned ${old}` : `scanned ${old} to ${neu}`;
+}
+
 // ── the treemap's tree ─────────────────────────────────────────────────────
 
 /** One rectangle's worth: a group (workspace or project), a place, a folder or
@@ -62,6 +145,8 @@ export type TM = {
   cat?: Cat;
   shared?: boolean;
   box?: boolean;
+  /** A place removed after the scan: drawn, but not opened. */
+  gone?: boolean;
   kids?: TM[];
   ref?: { repo?: string; slug?: string; path?: string; id?: string; dir?: boolean; root?: string };
 };
@@ -79,12 +164,12 @@ export function findPath(t: TM, path: string): TM | null {
 
 /** A place as category leaves: its own bytes, and (with `shared`) the bytes
  *  it shares as one hatched leaf. */
-export function placeTM(repo: string, u: PlaceUsage, withShared: boolean): TM {
+export function placeTM(repo: string, u: PlaceUsage, withShared: boolean, gone = false): TM {
   const kids: TM[] = CATS.filter((c) => u.own[c] > 0).map((c) => ({
     key: `${repo}|${u.slug}|${c}`, label: CAT_LABEL[c], value: u.own[c], kind: "leaf", cat: c,
   }));
   if (withShared && u.shared > 0) kids.push({ key: `${repo}|${u.slug}|shared`, label: "Shared", value: u.shared, kind: "leaf", cat: "source", shared: true });
-  return { key: `${repo}|${u.slug}`, label: u.slug, value: 0, kind: "place", kids, ref: { repo, slug: u.slug } };
+  return { key: `${repo}|${u.slug}`, label: u.slug, value: 0, kind: "place", kids, ref: { repo, slug: u.slug }, ...(gone ? { gone } : {}) };
 }
 
 /** The engine's pruned tree as treemap nodes: a folder's children, or one
@@ -159,10 +244,13 @@ export function bulkRows(
   names: Record<string, string>,
   info: (repo: string, slug: string) => { last: number | null; busy: boolean },
   min = 100e6,
+  gone: (repo: string, slug: string) => boolean = () => false,
 ): BulkRow[] {
   const rows: BulkRow[] = [];
   for (const [repo, u] of Object.entries(usage)) {
     for (const p of u.places) {
+      // A place removed after the scan has nothing left to delete.
+      if (gone(repo, p.slug)) continue;
       const items = p.cleanable.filter((c) => c.cat === "build" && c.own > 0);
       const frees = items.reduce((a, c) => a + c.own, 0);
       if (frees < min) continue;

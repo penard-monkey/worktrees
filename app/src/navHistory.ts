@@ -22,15 +22,17 @@ export type DiskScope =
 export type DiskAt = { scope: DiskScope; path?: string };
 
 /** What the panes show. `place: null` is Home, or the workspace view when `ws`
- *  names one: its id, its tab, on Ideas the idea picked (on Memory the file), and the chat in its
- *  middle column. `dock.file` only means anything
- *  on the Files tab and `dock.shell` only on Terminal — `normalize` drops the
- *  other, so two locations that LOOK the same compare equal. */
+ *  names one: its id, its tab, on Ideas the idea picked (on Memory the file,
+ *  and `hist` when its History is open: `at`, the change shown in it), and the
+ *  chat in its middle column. `dock.file` only means anything on the Files
+ *  tab, `dock.doc` (the document chosen in the list) only on Docs and
+ *  `dock.shell` only on Terminal — `normalize` drops the others, so two
+ *  locations that LOOK the same compare equal. */
 export type Loc = {
   place: { repo: string; slug: string } | null;
-  ws?: { id: string; tab: WsTab; doc?: string; chat?: string };
+  ws?: { id: string; tab: WsTab; doc?: string; chat?: string; hist?: { at?: string } };
   agent?: string;
-  dock?: { tab: DockTab; file?: { path: string; line?: number; col?: number }; shell?: number };
+  dock?: { tab: DockTab; file?: { path: string; line?: number; col?: number }; doc?: string; shell?: number };
   /** Disk, drawn over what the rest of the location shows. That rest stays a
    *  part of the entry: closing Disk goes back to it, and so does Back from the
    *  first Disk screen, because that is the entry before. */
@@ -62,7 +64,7 @@ export const normalize = (l: Loc): Loc => {
   return l.disk ? { ...out, disk: diskAt(l.disk) } : out;
 };
 const under = (l: Loc): Loc => {
-  if (!l.place) return l.ws ? { place: null, ws: { id: l.ws.id, tab: l.ws.tab, ...((l.ws.tab === "ideas" || l.ws.tab === "memory") && l.ws.doc ? { doc: l.ws.doc } : {}), ...(l.ws.chat ? { chat: l.ws.chat } : {}) } } : { place: null };
+  if (!l.place) return l.ws ? { place: null, ws: { id: l.ws.id, tab: l.ws.tab, ...((l.ws.tab === "ideas" || l.ws.tab === "memory") && l.ws.doc ? { doc: l.ws.doc } : {}), ...(l.ws.chat ? { chat: l.ws.chat } : {}), ...(l.ws.tab === "memory" && l.ws.hist ? { hist: l.ws.hist.at ? { at: l.ws.hist.at } : {} } : {}) } } : { place: null };
   const out: Loc = { place: { repo: l.place.repo, slug: l.place.slug } };
   if (l.agent) out.agent = l.agent;
   if (l.dock) {
@@ -71,6 +73,7 @@ const under = (l: Loc): Loc => {
       const f = l.dock.file;
       d.file = { path: f.path, ...(f.line ? { line: f.line } : {}), ...(f.line && f.col ? { col: f.col } : {}) };
     }
+    if (l.dock.tab === "docs" && l.dock.doc) d.doc = l.dock.doc;
     if (l.dock.tab === "terminal" && l.dock.shell != null) d.shell = l.dock.shell;
     out.dock = d;
   }
@@ -183,13 +186,15 @@ export const label = (l: Loc, nameOf?: (repo: string, slug: string) => string, w
   if (!l.place) {
     if (!l.ws) return "Home";
     const chat = l.ws.chat ? chatName?.(l.ws.id, l.ws.chat) ?? "a chat" : null;
-    return [wsName?.(l.ws.id) ?? "A workspace", chat, WS_TAB_LABEL[l.ws.tab]].filter(Boolean).join(" · ");
+    const hist = l.ws.hist ? (l.ws.hist.at ? "A change in History" : "History") : null;
+    return [wsName?.(l.ws.id) ?? "A workspace", chat, WS_TAB_LABEL[l.ws.tab], hist].filter(Boolean).join(" · ");
   }
   const parts = [nameOf?.(l.place.repo, l.place.slug) ?? l.place.slug];
   const d = l.dock;
   if (d) {
     if (d.tab === "files" && d.file) parts.push(base(d.file.path) + (d.file.line ? `:${d.file.line}` : ""));
     else if (d.tab === "terminal" && d.shell != null) parts.push(`Terminal · sh ${d.shell}`);
+    else if (d.tab === "docs" && d.doc) parts.push(`Docs · ${base(d.doc)}`);
     // A bare Files tab is every place's default, dock open or not (⌘J is not
     // in the location), so naming it says nothing — the other tabs are news.
     else if (d.tab !== "files") parts.push(TAB_LABEL[d.tab]);

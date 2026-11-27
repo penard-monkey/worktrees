@@ -93,8 +93,15 @@ export type DocsPaneProps = {
    *  replaced showed. */
   collapsed: string[];
   onCollapsed: (paths: string[]) => void;
-  /** Open a document in the Files tab's renderer. */
+  /** Open a document in the Files tab's renderer. App records it as the one
+   *  chosen here (`sel`): a part of the Back / Forward location, as the Files
+   *  tab's open file is, so it outlives this pane's remounts. */
   onOpen: (path: string) => void;
+  /** The document chosen in this list, by path (App's, per place). */
+  sel: string | null;
+  /** The paths the index holds, on every answer: history skips a chosen
+   *  document that is no longer in it. */
+  onIndex?: (paths: string[]) => void;
   onError: (e: unknown) => void;
   /** ⌘F — the Docs tab's find surface is its name filter, so a press focuses
    *  and selects the box rather than mounting a second bar. The token bumps on
@@ -273,11 +280,10 @@ function DocRows(p: {
   );
 }
 
-export function DocsPane({ root, repo, slug, place, reloadToken, pageVisible, seenEpoch, collapsed, onCollapsed, onOpen, onError, findOpen, findToken, onFindClose }: DocsPaneProps) {
+export function DocsPane({ root, repo, slug, place, reloadToken, pageVisible, seenEpoch, collapsed, onCollapsed, onOpen, sel, onIndex, onError, findOpen, findToken, onFindClose }: DocsPaneProps) {
   const [idx, setIdx] = useState<DocsIndex | null>(null);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
-  const [sel, setSel] = useState<string | null>(null);
   // THE BASELINE, frozen for this visit. Captured when the place changes and
   // held for as long as you stay, so the marks do not disappear out from under
   // you while you are reading the list — ordinary "new since last visit".
@@ -315,6 +321,8 @@ export function DocsPane({ root, repo, slug, place, reloadToken, pageVisible, se
   // The mock resolves in a microtask and cannot express that (CLAUDE.md), which
   // is exactly why the guard is written rather than discovered.
   const seq = useRef(0);
+  const indexed = useRef(onIndex);
+  indexed.current = onIndex;
   const load = useCallback(() => {
     const mine = ++seq.current;
     setLoading(true);
@@ -326,6 +334,8 @@ export function DocsPane({ root, repo, slug, place, reloadToken, pageVisible, se
         // crash.
         setIdx(r ?? { base: "", entries: [], truncated: false });
         setLoading(false);
+        // A truncated index is not the whole list: nothing is said gone from it.
+        if (r && !r.truncated) indexed.current?.(r.entries.map((e) => e.path));
       })
       .catch((e) => {
         if (seq.current !== mine) return;
@@ -361,7 +371,7 @@ export function DocsPane({ root, repo, slug, place, reloadToken, pageVisible, se
   // example; since #302 it is reset and then RESTORED per place from
   // `files_open`, because a file you were reading is a different kind of state
   // from something half-typed. A filter has nothing to restore.)
-  useEffect(() => { setQ(""); setSel(null); }, [root]);
+  useEffect(() => { setQ(""); }, [root]);
 
   useEffect(() => {
     if (!findOpen) return;
@@ -398,7 +408,7 @@ export function DocsPane({ root, repo, slug, place, reloadToken, pageVisible, se
   );
   const fresh = useMemo(() => (idx ? idx.entries.filter(isNew).length : 0), [idx, isNew]);
 
-  const open = (e: DocEntry) => { setSel(e.path); onOpen(e.path); };
+  const open = (e: DocEntry) => onOpen(e.path);
 
   // ── the browser viewer (phase 3) ───────────────────────────────────────────
   //

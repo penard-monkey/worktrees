@@ -46,6 +46,25 @@
 }
 button.dk-r { cursor: pointer; }
 button.dk-r:hover b { color: var(--accent, var(--txt-hi)); }
+/* A place removed after the scan: still counted, never opened. Hue in the dot,
+   words in text tokens (AGENTS.md's contrast rule). */
+button.dk-r.dk-gone { cursor: default; opacity: 1; }
+button.dk-r.dk-gone:hover b { color: var(--txt-hi); }
+.dk-gone .num { color: var(--txt-dim); }
+.dk-stale-dot {
+  display: inline-block; flex: none; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--warn); margin-right: 6px; vertical-align: 1px;
+}
+/* One line under the header: what the kept scan no longer matches. A tint of
+   the attention hue over the panel surface, never over transparent. */
+.dk-stale {
+  display: flex; align-items: center; gap: var(--s2); padding: 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--line));
+  border-radius: var(--r-md); background: color-mix(in srgb, var(--warn) 10%, var(--bg-panel));
+  color: var(--txt-hi); font-size: var(--fs-label); line-height: 1.4;
+}
+.dk-stale > span { flex: 1; min-width: 0; }
+.dk-stale .dk-stale-dot { margin-right: 0; }
 .dk-r b { color: var(--txt-hi); font-weight: 520; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dk-r b.mono { font-family: var(--font-mono); font-size: var(--fs-meta); }
 .dk-r .num { font-variant-numeric: tabular-nums; color: var(--txt-hi); justify-self: end; }
