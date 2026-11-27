@@ -104,9 +104,17 @@ fn state_of(live: bool, a: &activity::Activity) -> &'static str {
     }
 }
 
+/// Whether chat `c` is up, by the sessions `live` and its record. A fold
+/// that landed writes its receipt and then ends the session
+/// (`workspacefolds::land`): until the end is done its row is closed, as the
+/// receipt says, and the app draws it so (`wschats.ts` `rowOf`).
+fn up_in(live: &std::collections::HashSet<String>, c: &Chat) -> bool {
+    live.contains(&chats::session_name(&c.id)) && !c.fold.as_ref().is_some_and(|f| f.closing)
+}
+
 fn listed(ctx: &Ctx, id: &str, mut c: Chat, live: &std::collections::HashSet<String>, given: Option<&chats::Access>) -> Result<Listed, String> {
     let session = chats::session_name(&c.id);
-    let up = live.contains(&session);
+    let up = up_in(live, &c);
     let a = if up { ctx.agents.io().activity(&locus_of(ctx, id, &c)?) } else { activity::Activity::none() };
     // The snapshot is the record's; a client is told what it comes to.
     let was = c.access.take();
@@ -134,9 +142,13 @@ pub fn workspace_chats(ctx: &Ctx, id: String) -> Result<Chats, String> {
     let src = chats::Sources { root, ideas: ctx.ideas_dir(), reg: reg.as_ref().unwrap_or(&none) };
     // What a launch would get now: what each live chat is compared with.
     let given = reg.as_ref().ok().and_then(|_| chats::access(&w, &src).ok());
+    // The record first, then tmux. A landing writes its receipt and then ends
+    // the session; read the other way round, a landing between the two reads
+    // answered `done` beside a session listed before it ended.
+    let record = chats::list_at(root, &id)?;
     let live: std::collections::HashSet<String> = tmux::session_names().into_iter().collect();
     Ok(Chats {
-        chats: chats::list_at(root, &id)?.into_iter().map(|c| listed(ctx, &id, c, &live, given.as_ref())).collect::<Result<_, _>>()?,
+        chats: record.into_iter().map(|c| listed(ctx, &id, c, &live, given.as_ref())).collect::<Result<_, _>>()?,
         projects: if reg.is_ok() { chats::project_reads(&w, src.reg) } else { chats::project_reads_unknown(&w) },
         documents: chats::doc_reads(&w, &src),
         limits: chats::LIMITS,
@@ -411,6 +423,22 @@ pub fn workspace_term_open(ctx: &Ctx, id: String, conv: String, cols: u16, rows:
 mod tests {
     use super::*;
     use worktrees_core::harness;
+
+    /// A fold that landed writes its receipt and then ends its session
+    /// (`workspacefolds::land`). In between, and while that end is tried
+    /// again, the row reads ended, as its receipt says: never `done` and
+    /// `running` at once (the macOS CI flake of 2026-11-27).
+    #[test]
+    fn a_landed_fold_whose_session_is_still_up_reads_ended() {
+        let mut c: Chat = serde_json::from_value(serde_json::json!({ "id": worktrees_core::ulid::new(), "harness": "claude", "session_id": "s", "title": "t", "started": "" })).unwrap();
+        let live: std::collections::HashSet<String> = [chats::session_name(&c.id)].into();
+        assert!(up_in(&live, &c), "a chat with no fold is up while its session is");
+        c.fold = Some(chats::Fold { state: chats::FOLDED.into(), closing: true, ..chats::Fold::default() });
+        assert!(!up_in(&live, &c), "its receipt is written: it is closed");
+        c.fold.as_mut().unwrap().closing = false;
+        assert!(up_in(&live, &c), "a resumed chat after its fold is up again");
+        assert!(!up_in(&Default::default(), &c));
+    }
 
     /// The snapshot's agent rows never list a workspace chat as a place's
     /// agent, even with its pane inside the place.
