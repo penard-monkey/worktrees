@@ -604,6 +604,21 @@ html[data-places-side="right"] .rail-group .rail-icon.active::before { left: aut
 .project-notice > summary:hover,
 .project-notice[open] > summary { background: color-mix(in srgb, var(--warn) 22%, transparent); }
 .project-notice > .init-banner { margin-inline: 0; }
+
+/* Keep each tool in the tab order and reserve its slot. Focus reveals before
+   activation, while the parent remains the pointer target between reveals. */
+@media (hover: hover) and (pointer: fine) {
+  [data-quiet-chrome] :is(.nav-head, .project-h):not(:is(:hover, :focus-within))
+  .quiet-tool:not(:is(.armed, [aria-expanded="true"])) {
+    opacity: 0; pointer-events: none;
+  }
+  [data-quiet-chrome] .project-h:not(:is(:hover, :focus-within)) .quiet-tool.ptodo {
+    opacity: 1; color: transparent;
+  }
+}
+@media (hover: none), (pointer: coarse) {
+  [data-quiet-chrome] .project-h .quiet-tool { opacity: 1; }
+}
 /* The menu's count tag: the tint and dot carry the hue, the digits do not. */
 .todo-count {
   margin-left: auto; display: inline-flex; align-items: center; gap: 4px;

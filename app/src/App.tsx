@@ -4612,6 +4612,7 @@ function App() {
   }, []);
   const [upd, setUpd] = useState<UpdateInfo | null>(null);
   const [sortOpen, setSortOpen] = useState(false);
+  useEscape(() => setSortOpen(false), sortOpen);
   // ── nav drag & drop (see navdrag.ts for the gesture, dnd.ts for the rules) ──
   const navScrollRef = useRef<HTMLDivElement | null>(null);
   /** A row that has just been moved by a drag, lit for a moment. It is the only
@@ -10302,17 +10303,13 @@ function App() {
           ) : null}
           {/* The project's things to do — doctor findings plus what the agent
               setup Fix PR would carry (`projectTodos`, the same model as the
-              menu's "Repair / upgrade…" and the sheet's To do list). Always
-              visible, like ⚑ and ⊟: it is the only sign a COLLAPSED project
-              gives, and it replaced the per-project "Agent setup" banner,
-              which lived inside `.kids` and so vanished on collapse. Hue in
-              the dot, the number in a text token (accent-as-text fails
-              contrast in the light themes). */}
+              menu's "Repair / upgrade…" and the sheet's To do list). Its
+              dot remains visible in quiet mode, even on a collapsed project. */}
           {pv.ok && (() => {
             const n = todoCount(projectTodos(health[pv.root], agentSetup[pv.root]));
             return n > 0 ? (
               <button
-                className="mini ptodo"
+                className="mini ptodo quiet-tool"
                 data-testid={`todo-mini|${pv.root}`}
                 data-track="nav.project.todo"
                 title={`${n} thing${n === 1 ? "" : "s"} to repair or upgrade — open the list`}
@@ -10327,7 +10324,7 @@ function App() {
               loads, without a doctor run. */}
           {pv.ok && (pv.snapshot?.strays?.length ?? 0) > 0 ? (
             <button
-              className="mini pstray"
+              className="mini pstray quiet-tool"
               data-testid={`stray-mini|${pv.root}`}
               data-track="nav.project.strays"
               title={`${pv.snapshot!.strays!.length} worktree${pv.snapshot!.strays!.length === 1 ? "" : "s"} registered outside .worktrees/ — this app can't see ${pv.snapshot!.strays!.length === 1 ? "it" : "them"}. Open the project sheet for the adopt command.`}
@@ -10339,13 +10336,14 @@ function App() {
               `.mini` is a <button>, which navdrag's `arm` already declines to
               start a drag from — no stopPropagation needed, same as +. */}
           {pv.ok && (
-            <button className="mini" title="Sync" data-testid={`sync-mini|${pv.root}`} data-track="nav.project.sync"
+            <button className="mini quiet-tool" title="Sync" data-testid={`sync-mini|${pv.root}`} data-track="nav.project.sync"
+              aria-expanded={ctx?.kind === "sync" && ctx.root === pv.root}
               onClick={(e) => openSyncPop(e, pv.root)}>⇄</button>
           )}
           <button className="mini pnew" title="new worktree (⌘N)" data-track="nav.project.new" onClick={() => { setNewFor(newFor === pv.root ? null : pv.root); setNewBase(""); setNewDraft(null); }}><Icons.Plus size={13} /></button>
           {inNamed ? (
             <button
-              className="mini"
+              className="mini quiet-tool"
               data-testid="ws-project-remove"
               data-track="nav.workspace.project.remove"
               title="take it out of this workspace (it stays in All projects)"
@@ -10353,7 +10351,7 @@ function App() {
             ><Icons.X size={13} /></button>
           ) : (
             <button
-              className={"mini" + (confirmRm === `hdr|${pv.root}` ? " armed" : "")}
+              className={"mini quiet-tool" + (confirmRm === `hdr|${pv.root}` ? " armed" : "")}
               data-track="nav.project.remove"
               title={confirmRm === `hdr|${pv.root}` ? "click again to remove from All projects" : "remove project"}
               onClick={() => removeProjectHdr(pv.root)}
@@ -10826,7 +10824,7 @@ function App() {
           <HomeIcon /> Home
         </button>
         <div className="nav-head">
-          <button {...gripProps("places")}><Icons.GripVertical size={13} /></button>
+          <button {...gripProps("places")} className="grip quiet-tool"><Icons.GripVertical size={13} /></button>
           <span className="nav-title">PLACES</span>
           <button type="button" className="icon-btn nav-show-all" aria-pressed={!settings.quiet_chrome}
             data-track="nav.show_all" onClick={() => updateSettings({ quiet_chrome: !settings.quiet_chrome })}>
@@ -10844,7 +10842,8 @@ function App() {
             <Icons.TriangleAlert size={13} />{attentionCount}
           </button>
           <div className="menu-wrap">
-            <button className={"icon-btn" + (settings.sort_mode !== "recent" ? " on" : "")} title="sort places" onClick={() => setSortOpen(!sortOpen)}><Icons.ArrowUpDown /></button>
+            <button className={"icon-btn quiet-tool" + (settings.sort_mode !== "recent" ? " on" : "")} title="sort places"
+              aria-expanded={sortOpen} onClick={() => setSortOpen(!sortOpen)}><Icons.ArrowUpDown /></button>
             {sortOpen && (
               <div className="popover sortpop">
                 <div className="pop-hint">sort places</div>
@@ -10862,7 +10861,7 @@ function App() {
               </div>
             )}
           </div>
-          <button className="icon-btn" title="focus search" onClick={() => searchRef.current?.focus()}><Icons.Search /></button>
+          <button className="icon-btn quiet-tool" title="focus search" onClick={() => searchRef.current?.focus()}><Icons.Search /></button>
         </div>
         <input
           ref={searchRef} className="search" placeholder="filter places…" value={filter}

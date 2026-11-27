@@ -73,6 +73,24 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     await waiting.scrollIntoViewIfNeeded();
     assert.equal(await hittable(waiting), true, "an unselected waiting row keeps its dot");
     console.log(`ok   ${name} row details reveal without movement on hover, focus, and selection`);
+
+    const head = page.locator(".nav-head");
+    const sort = head.getByTitle("sort places", { exact: true });
+    const grip = head.locator('.grip[data-grip="places"]');
+    const project = row.locator("xpath=ancestor::div[contains(@class,'project')][1]").locator(".project-h");
+    const sync = project.getByTitle("Sync", { exact: true });
+    for (const [parent, control] of [[head, sort], [head, grip], [project, sync]]) {
+      await page.mouse.move(700, 50);
+      await page.evaluate(() => document.activeElement?.blur());
+      assert.equal(await hittable(control), false);
+      await parent.hover();
+      await control.evaluate((el) => el.getAnimations().forEach((a) => a.finish()));
+      assert.equal(await hittable(control), true);
+      await page.mouse.move(700, 50);
+      await control.focus();
+      assert.equal(await hittable(control), true);
+    }
+    console.log(`ok   ${name} nav and project controls reveal and are hit-testable on hover and focus`);
   } catch (error) {
     failed = true;
     console.error(`FAIL ${name}`, error);
