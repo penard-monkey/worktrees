@@ -10197,6 +10197,12 @@ function App() {
     const inNamed = inWs && inWs !== EVERYTHING_ELSE_ID ? inWs : undefined;
     const open = inWs ? !settings.ws_collapsed?.[wsProjectKey(inWs, pv.root)] : !collapsed[pv.root];
     const toggle = () => (inWs ? toggleWs(wsProjectKey(inWs, pv.root)) : toggleProject(pv.root));
+    const sug = suggest[pv.root];
+    const initNotice = pv.ok && sug?.qualifies && !sug.exists && settings.init_dismissed?.[pv.root] !== sug.hash ? (
+      <InitBanner suggestion={sug} onOpen={() => setProjSheet(pv.root)} onDismiss={() => dismissInit(pv.root, sug.hash)} />
+    ) : null;
+    const strayCount = pv.ok ? pv.snapshot?.strays?.length ?? 0 : 0;
+    const strayNotice = strayCount > 0 ? <StrayBanner count={strayCount} onOpen={() => setProjSheet(pv.root)} /> : null;
     const places = (pv.snapshot?.places ?? []).filter(visiblePlace);
     const main = places.find((p) => p.is_main) ?? null;
     // In-flight creates for this project. Checked against the UNFILTERED
@@ -10338,29 +10344,22 @@ function App() {
           )}
         </div>
 
+        {settings.quiet_chrome && initNotice && (
+          <details key={sug.hash} className="project-notice">
+            <summary data-track="nav.project.init.chip"><span className="todo-dot warn" />Not configured</summary>
+            {initNotice}
+          </details>
+        )}
+        {settings.quiet_chrome && strayNotice && (
+          <details className="project-notice">
+            <summary data-track="nav.project.strays.chip"><span className="todo-dot warn" />{strayCount} outside .worktrees/</summary>
+            {strayNotice}
+          </details>
+        )}
         {open && pv.ok && (
           <div className="kids">
-            {(() => {
-              // §9's passive nudge. Shown only for a QUALIFYING project with no
-              // config, and only until its exact suggestion is dismissed.
-              const sug = suggest[pv.root];
-              if (!sug?.qualifies || sug.exists) return null;
-              if (settings.init_dismissed?.[pv.root] === sug.hash) return null;
-              return (
-                <InitBanner
-                  suggestion={sug}
-                  onOpen={() => setProjSheet(pv.root)}
-                  onDismiss={() => dismissInit(pv.root, sug.hash)}
-                />
-              );
-            })()}
-            {/* Above the places, like the init nudge: a stray has no row by
-                construction — that IS the condition — so the only honest place
-                for it is beside the list it is missing from. Not dismissible
-                (see `StrayBanner`), and it disappears when the strays do. */}
-            {(pv.snapshot?.strays?.length ?? 0) > 0 && (
-              <StrayBanner count={pv.snapshot!.strays!.length} onOpen={() => setProjSheet(pv.root)} />
-            )}
+            {!settings.quiet_chrome && initNotice}
+            {!settings.quiet_chrome && strayNotice}
             {main && <ul className="places">{placeRow(pv.root, main)}</ul>}
             {/* above the tier groups, not inside one: which tier it lands in is
                 not known until it exists */}

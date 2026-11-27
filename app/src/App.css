@@ -593,6 +593,17 @@ html[data-places-side="right"] .rail-group .rail-icon.active::before { left: aut
 .todo-dot.warn { background: var(--warn); }
 .todo-dot.error { background: var(--danger); }
 .todo-dot.info { background: var(--txt-mute); }
+.project-notice { margin: var(--s1) var(--s3); }
+.project-notice > summary {
+  display: flex; align-items: center; gap: var(--s2); list-style: none;
+  padding: 2px var(--s2); border-radius: var(--r-sm); cursor: pointer;
+  font-size: var(--fs-meta); color: var(--txt-hi);
+  background: color-mix(in srgb, var(--warn) 13%, transparent);
+}
+.project-notice > summary::-webkit-details-marker { display: none; }
+.project-notice > summary:hover,
+.project-notice[open] > summary { background: color-mix(in srgb, var(--warn) 22%, transparent); }
+.project-notice > .init-banner { margin-inline: 0; }
 /* The menu's count tag: the tint and dot carry the hue, the digits do not. */
 .todo-count {
   margin-left: auto; display: inline-flex; align-items: center; gap: 4px;

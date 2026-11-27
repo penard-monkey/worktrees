@@ -16,7 +16,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
         sessionStorage.setItem(key, JSON.stringify({ nav_pinned: true, nav_view: "projects", settings_rev: 5 }));
       }
     }, stateKey);
-    await page.goto(base);
+    await page.goto(`${base}/?strays=2`);
     const toggle = page.getByRole("button", { name: "Show all", exact: true });
     await toggle.waitFor();
     assert.equal(await toggle.getAttribute("aria-pressed"), "false", "existing settings default to quiet");
@@ -31,6 +31,19 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     assert.equal(await toggle.getAttribute("aria-pressed"), "false");
     await page.waitForFunction((key) => JSON.parse(sessionStorage.getItem(key)).quiet_chrome === true, stateKey);
     console.log(`ok   ${name} Show all starts off, works by pointer and keyboard, and persists`);
+
+    for (const [label, action] of [["2 outside .worktrees/", "Adopt…"], ["Not configured", "Review…"]]) {
+      const chip = page.locator(".project-notice").filter({ hasText: label });
+      const summary = chip.locator("summary");
+      const button = chip.getByRole("button", { name: action });
+      await summary.waitFor();
+      assert.equal(await button.isVisible(), false, `${label} starts folded`);
+      await summary.click();
+      await button.waitFor();
+      await summary.click();
+      assert.equal(await button.isVisible(), false, `${label} folds again`);
+    }
+    console.log(`ok   ${name} both warning chips disclose their full cards`);
   } catch (error) {
     failed = true;
     console.error(`FAIL ${name}`, error);
