@@ -5274,6 +5274,9 @@ function App() {
   // The Disk view (DiskView.tsx): which scope is open over the main area, and the
   // engine's scans, held here so the nav's size badges read them too.
   const [diskOpen, setDiskOpen] = useState<DiskScope | null>(null);
+  /** The file or folder picked in a place's treemap: part of the history
+   *  location, so Back unpicks it. */
+  const [diskPath, setDiskPath] = useState<string | null>(null);
   const disk = useDisk(fail, busyPaths);
   // The same waiting set, per harness (`waiting_by`): the nav drag refuses a
   // drop only when the agent it would paste INTO is the one stopped on a
@@ -6979,6 +6982,9 @@ function App() {
     setSel(null);
     setWsOpen(id);
     setWsTab(to);
+    // The workspace already behind Disk, picked again: Disk gives way, as it
+    // does to any other pick (the `[wsOpen]` effect sees no change here).
+    if (!navApplying.current) closeDisk();
     // `chat` left out: the one that is there stays, beside another document.
     if (o.chat !== undefined) { setWsChat((c) => ({ ...c, [id]: o.chat ?? null })); setWsStart(null); }
     setWsSide(o.chat ? "chat" : "docs");
@@ -7030,19 +7036,23 @@ function App() {
     setWsChat((c) => ({ ...c, [id]: got.conv }));
   };
   useEffect(() => { if (sel) setWsOpen(null); }, [sel]);
-  // A place's Disk view follows the nav to another place; any other scope
-  // gives way to a place the nav selects.
-  useEffect(() => {
-    setDiskOpen((d) => !d ? d : d.kind === "place" ? (sel ? { kind: "place", repo: sel.repo, slug: sel.slug } : null) : sel ? null : d);
-  }, [sel?.repo, sel?.slug]);
-  useEffect(() => { if (wsOpen) setDiskOpen(null); }, [wsOpen]);
+  // Disk is drawn OVER what is selected and never changes it, so closing it
+  // (✕, Escape) is back where you were. A place or a workspace view picked
+  // while it is up takes the panes instead — unless history is putting an
+  // entry back, which says itself whether Disk is part of it (`navApply`).
+  // Keyed on `sel` itself, not its place: a click on the place already
+  // selected is a pick too (`selectPlace` hands a new object).
+  useEffect(() => { if (!navApplying.current) setDiskOpen(null); }, [sel]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (wsOpen && !navApplying.current) setDiskOpen(null); }, [wsOpen]); // eslint-disable-line react-hooks/exhaustive-deps
+  /** Every step inside Disk comes through here, and each is a history entry
+   *  (the observer below sees `diskOpen` change). */
   const openDisk = (s: DiskScope) => {
     closeShare();
     closeCtx();
-    if (s.kind === "place") setSel({ repo: s.repo, slug: s.slug });
-    else { setSel(null); setWsOpen(null); }
     setDiskOpen(s);
+    setDiskPath(null);
   };
+  const closeDisk = () => { setDiskOpen(null); setDiskPath(null); };
   useEffect(() => { if (!viewOn) setWsOpen(null); }, [viewOn]);
   // A workspace's plan, or its first idea, arrives or goes while its tab is up.
   const planHere = wsShown?.plan ?? null;
@@ -9154,7 +9164,10 @@ function App() {
     : sel ? navSeenFront.current[placeKey(sel.repo, sel.slug)] ?? settings.term_tab_active?.[placeKey(sel.repo, sel.slug)] : undefined;
   // The workspace view is a location too: its tab, and the idea it shows.
   const wsLoc: Loc["ws"] = !sel && wsShown ? { id: wsShown.id, tab: wsTabNow, ...(wsTabNow === "ideas" ? { doc: tabDoc(wsShown.id, "ideas")?.name } : wsTabNow === "memory" ? { doc: memPath(wsShown.id) } : {}), ...(wsChat[wsShown.id] ? { chat: wsChat[wsShown.id]! } : {}) } : undefined;
-  const navLoc: Loc | null = !sel ? { place: null, ...(wsLoc ? { ws: wsLoc } : {}) } : !selected ? null : stripUp && frontHere === undefined ? null : {
+  // Disk over all of it: its scope, and what is picked in a place's treemap.
+  const diskLoc: Loc["disk"] = diskOpen ? { scope: diskOpen, ...(diskPath ? { path: diskPath } : {}) } : undefined;
+  const navLoc: Loc | null = !sel ? { place: null, ...(wsLoc ? { ws: wsLoc } : {}), ...(diskLoc ? { disk: diskLoc } : {}) } : !selected ? null : stripUp && frontHere === undefined ? null : {
+    ...(diskLoc ? { disk: diskLoc } : {}),
     place: { repo: sel.repo, slug: sel.slug },
     dock: {
       tab: shownTab,
@@ -9178,11 +9191,18 @@ function App() {
   const wsNavRef = useRef(ws);
   wsNavRef.current = ws;
   const wsAliveRef = useRef((_ws: NonNullable<Loc["ws"]>): boolean => false);
+  /** A Disk entry whose place, project or workspace is gone is skipped too. */
+  const diskAliveRef = useRef((_s: DiskScope): boolean => true);
+  diskAliveRef.current = (d) => d.kind === "all" ? true
+    : d.kind === "workspace" ? !!wsById(d.id)
+    : d.kind === "project" ? !!ws?.projects.some((p) => p.ok && p.root === d.root)
+    : !!ws?.projects.find((p) => p.root === d.repo)?.snapshot?.places.some((pl) => pl.slug === d.slug);
   wsAliveRef.current = (w) => tabsOn.includes(w.tab) && frameOn && !!wsById(w.id)
     && (!w.chat || (wsChatsOn && (wsChats.of(w.id)?.chats.some((c) => c.id === w.chat) ?? true)));
-  const navAlive = useCallback((l: Loc) => !l.place
+  const navAlive = useCallback((l: Loc) => (!l.place
     ? !l.ws || wsAliveRef.current(l.ws)
-    : !!wsNavRef.current?.projects.find((p) => p.root === l.place!.repo)?.snapshot?.places.some((pl) => pl.slug === l.place!.slug), []);
+    : !!wsNavRef.current?.projects.find((p) => p.root === l.place!.repo)?.snapshot?.places.some((pl) => pl.slug === l.place!.slug))
+    && (!l.disk || diskAliveRef.current(l.disk.scope)), []);
   /** History is putting a location back. Observations are ignored until the
    *  panes show it (or 1.5 s pass — then whatever DID land amends the entry,
    *  so a target that could only be reached partly is recorded as it was). A
@@ -9263,6 +9283,9 @@ function App() {
       if (!samePlace) setSel(loc.place ? { repo: loc.place.repo, slug: loc.place.slug } : null);
       if (!loc.place) setWsOpen(null);
     }
+    // Disk is in the entry or it is not: put back as it was, picked path and all.
+    setDiskOpen(loc.disk?.scope ?? null);
+    setDiskPath(loc.disk?.path ?? null);
     setNavPending(loc.place ? loc : null);
     setMenu(null);
     setCtx(null);
@@ -10747,10 +10770,14 @@ function App() {
             dock for free, instead of needing a negative inline offset. */}
         <div className="space-body" ref={spaceRef}>
           <main className="main">
-            {diskOpen && (diskOpen.kind !== "place" || (sel && selected)) ? (
+            {diskOpen ? (
               <DiskView
                 key={JSON.stringify(diskOpen)}
                 scope={diskOpen}
+                path={diskPath}
+                pick={setDiskPath}
+                // No topbar over Home or a workspace view: Disk carries ‹ › itself.
+                navButtons={selected && sel ? null : navButtons}
                 projects={(ws?.projects ?? []).filter((p) => p.ok && p.snapshot).map((p) => ({
                   root: p.root, name: p.name ?? basename(p.root),
                   places: p.snapshot!.places.map((x) => ({ slug: x.slug, path: x.path, last_commit_epoch: x.last_commit_epoch })),
@@ -10760,7 +10787,7 @@ function App() {
                 busy={busyPaths}
                 disk={disk}
                 open={openDisk}
-                close={() => setDiskOpen(null)}
+                close={closeDisk}
                 onError={fail}
               />
             ) : selected && sel ? (
@@ -11022,7 +11049,7 @@ function App() {
                 for its life, so its text survives a nav click. */}
             {(wsShown || mainDoc) && (
               <WorkspaceFrame
-                shown={wsShown !== null}
+                shown={wsShown !== null && !diskOpen}
                 ws={wsShown && { id: wsShown.id, name: wsShown.name, color: wsColorOf(wsShown), counts: wsCounts(wsShown.projects.length, wsChatsOn ? wsChats.rows(wsShown.id).filter((x) => x.live).length : 0) }}
                 tabs={tabsOf(wsShown?.id ?? null)}
                 tab={wsTabNow}
