@@ -13,7 +13,7 @@ const ok = (c, m) => { if (!c) failed++; console.log((c ? "ok   " : "FAIL ") + m
 const until = (page, fn, arg, ms = 5000) => page.waitForFunction(fn, arg, { timeout: ms }).then(() => true, () => false);
 const call = (page, cmd, args) => page.evaluate(([c, a]) => window.__TAURI_INTERNALS__.invoke(c, a), [cmd, args]);
 const isDoc = (page, id) => until(page, (id) => { const d = document.querySelector("[data-testid=main-doc]"); return !!d && !d.hidden && d.checkVisibility() && d.dataset.doc === id; }, id);
-const isTab = (page, t) => until(page, (t) => document.querySelector("[data-testid=ws-tab].on")?.dataset.tab === t, t, 3000);
+const isTab = (page, t) => until(page, (t) => document.querySelector("[data-testid=ws-frame]:not([hidden])")?.dataset.panel === t, t, 3000);
 const open = (page) => page.locator("[data-testid=ws-name]", { hasText: "Everything" }).first().click();
 
 async function boot(page) {
@@ -51,7 +51,7 @@ const KINDS = {
 for (const k of Object.keys(KINDS)) KINDS[k].name = k;
 
 async function stuck(page, k) {
-  await page.click(`[data-testid=ws-tab][data-tab=${k.tab}]`);
+  await page.click(`[data-workspace-panel=${k.tab}]`);
   if (k.tab === "ideas") await page.locator(`.wsf-ideas [data-idea='${JELLY}'] .wsf-idea-open`).first().click();
   await isDoc(page, k.doc);
   await page.click("[data-testid=main-doc] [data-testid=ideas-mode-edit]");
@@ -69,7 +69,7 @@ async function rescue(page, tag, k, both) {
   const words = `${tag} ${k.name}${both ? ", both off" : ""}:`;
   ok(await isDoc(page, k.doc) && await isTab(page, k.tab) && /STRANDED/.test(await page.locator("[data-testid=main-doc] .cm-content").innerText()) && !!(await page.$("[data-testid=ideas-error]")), `${words} its beta off, the text is on screen, with why`);
   // Its own tabs are refused while it is not saved; another workspace's Overview says so.
-  await page.click("[data-testid=ws-tab][data-tab=overview]");
+  await page.click("[data-workspace-panel=overview]");
   ok(await isDoc(page, k.doc), `${words} another tab does not hide it`);
   if (!both) {
     await page.locator("[data-testid=ws-name]", { hasText: "Tools" }).first().click();
@@ -86,7 +86,7 @@ async function rescue(page, tag, k, both) {
   // Saved: its part of the view goes with its beta.
   await page.evaluate(() => { window.__fail = false; });
   await page.locator("[data-testid=ideas-error] button").first().click();
-  ok(await until(page, ([tab]) => !document.querySelector("[data-testid=main-doc]") && !document.querySelector(`[data-testid=ws-tab][data-tab=${tab}]`), [k.tab]), `${words} saved, it closes and its tab goes`);
+  ok(await until(page, ([tab]) => !document.querySelector("[data-testid=main-doc]") && !document.querySelector(`[data-workspace-panel=${tab}]`), [k.tab]), `${words} saved, it closes and its tab goes`);
   const text = k.tab === "ideas" ? (await page.evaluate((id) => window.__mock.ideaFile(id).content, JELLY)) : (await call(page, "workspace_memory_file", { id: (await call(page, "workspaces_list", {})).workspaces.find((w) => w.name === "Everything").id, path: "MEMORY.md" })).content;
   ok(/STRANDED/.test(text), `${words} …with its text on disk`);
   ok(!both || !(await page.locator("[data-testid=ws-frame]").isVisible().catch(() => false)), `${words} and with both off there is no view of a workspace again`);

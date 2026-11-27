@@ -3,7 +3,7 @@ import { HARNESSES, HARNESS_LABEL, NEEDS_MODEL, liveHarness, type Harness } from
 import { ModelPicker, defaultModel, modelOk, useAgentModels, type PiStatus } from "./ModelPicker";
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ComponentType } from "react";
 import { Channel, engineState, grantHas, invoke, listen, remoteHost } from "./ipc";
-import { WORKSPACE_SCOPE, dockEligibleAt, dockTabAt, dockWhyFor, wsDockKey, wsOfDockKey } from "./wsdock";
+import { WORKSPACE_SCOPE, workspaceTerminalSelected, wsDockKey, wsOfDockKey } from "./wsdock";
 import { hostOnly, pickDirForHost, revealOnHost } from "./onhost";
 import { RemoteNotice, useEngine, useRemoteNotice } from "./EngineGate";
 import { copyToClipboard } from "./clipboard";
@@ -82,7 +82,7 @@ import { privacyArea, privacyWords } from "./privacypaths";
 import { PickPlace, StartReview } from "./StartWork";
 import { useGone } from "./useGone";
 import { NoMemory, WorkspaceOverview, type DocLite, type WsParts } from "./WorkspaceOverview";
-import { WorkspaceFrame } from "./WorkspaceFrame";
+import { WorkspaceFrame, WorkspaceTopBar } from "./WorkspaceFrame";
 import { ChatDot, ChatLines, ChatsTab, NavChats, NewChatMore, RefusedStart, StartingChat, WorkspaceChatColumn, type ChatActsHost } from "./WorkspaceChat";
 import { PickPlaceWs, WorkspaceDock, type DockDoc } from "./WorkspaceDock";
 import { useWsChats } from "./useWsChats";
@@ -477,7 +477,7 @@ const onlySettingsOpen = () =>
  *  is NOT a target — that viewer renders a hint, not a file. */
 function findTarget(s: {
   reading: boolean; dockFile: string | null; dockShown: boolean;
-  dockTab: Settings["dock_tab"]; mainTermUp: boolean; last: Surface;
+  dockTab: Settings["dock_tab"] | null; mainTermUp: boolean; last: Surface;
   /** The Terminal is in the dock's LOWER slot (Settings → Layout), on screen. */
   lowerUp: boolean;
   /** The dock's Terminal tab has shells: the place's session is up, or the
@@ -499,7 +499,7 @@ function findTarget(s: {
     s.dockShown &&
     (s.dockTab === "terminal" ? s.dockTermUp ?? s.mainTermUp
       : s.dockTab === "docs" ? true
-      : s.dockTab === "plan" ? false
+      : s.dockTab === "plan" || s.dockTab === null ? false
       : !!s.dockFile);
   // The lower slot's shells live and die with the session, like the tab's.
   const lowerOk = s.lowerUp && s.mainTermUp;
@@ -583,7 +583,7 @@ function NavButtons({ canBack, canForward, backTitle, forwardTitle, onStep, onLi
 }
 /** What `updatePanels` may write: a place's panels less `agent_view`, which
  *  has no global and is written by `withAgentView` alone (see PlacePanels). */
-type DockPatch = Partial<Omit<PlacePanels, "agent_view">>;
+type DockPatch = Partial<Omit<PlacePanels, "agent_view" | "workspace_terminal">>;
 /** Why a link in the memory file `from` goes nowhere, when it does. */
 const memNote = (v: MemoryView | undefined, from: string, href: string): string | null => {
   if (/^#?idea:/.test(href)) return null;
@@ -595,31 +595,33 @@ const EMPTY_WS: WsDef[] = [];
 /** The document the main window has open, and where (a workspace's tab). */
 type MainDoc = DocTarget & { ws: string; tab: "plan" | "ideas" | "memory"; startIn?: "edit" | "title" };
 /** One entry of `DOCK_RAIL` (declared inside App, which owns the icons). */
-type DockRailItem = { key: Settings["dock_tab"]; track: string; icon: React.ReactNode; title: string };
+type RailTab = Settings["dock_tab"] | WsTab;
+type DockRailItem = { key: RailTab; track: string; icon: React.ReactNode; title: string };
 
 /** The dock's tab buttons. Module scope because it renders in ONE of two hosts
  *  — its own `.rail-right`, or the Places rail when both halves share an edge
  *  (`railsMerged`) — and a component defined inside App would remount on every
  *  render. `layout-check.mjs` pins that App renders it exactly twice, under
  *  complementary `merged` conditions. */
-function DockRailGroup({ items, shown, tab, lower, why, prsView, onPick }: {
+function DockRailGroup({ items, shown, tab, lower, why, prsView, marks, onPick }: {
   items: DockRailItem[];
   /** The dock is on screen (`fit.dockShown`), so the current tab's icon is lit. */
   shown: boolean;
-  tab: Settings["dock_tab"];
+  tab: RailTab;
   /** The section in the lower slot, ON SCREEN — lit with the column, and its
    *  click focuses it rather than collapsing anything. */
   lower: Settings["dock_lower"];
-  /** Why this button is disabled, or null when it is live (`dockWhyFor`). */
-  why: (key: Settings["dock_tab"]) => string | null;
+  /** Why the rail is disabled, or null when its buttons are live. */
+  why: string | null;
+  marks?: Partial<Record<RailTab, "fresh" | "waits">>;
   prsView: { attention_count: number; open_count: number } | null | undefined;
   /** `on`: the button was lit when pressed, i.e. the press collapses the dock. */
-  onPick: (key: Settings["dock_tab"], on: boolean) => void;
+  onPick: (key: RailTab, on: boolean) => void;
 }) {
   return (
     <>
       {items.map((d) => {
-        const off = why(d.key);
+        const off = why;
         const below = shown && lower === d.key;
         const on = shown && (tab === d.key || below);
         return (
@@ -631,10 +633,29 @@ function DockRailGroup({ items, shown, tab, lower, why, prsView, onPick }: {
             // ternary here files any tab it does not name under another
             // tab's key, silently. See `DOCK_RAIL`.
             data-track={d.track}
+            data-dock-tab={d.key}
+            data-workspace-panel={marks ? d.key : undefined}
+            aria-pressed={on}
+            aria-controls={marks ? "workspace-dock" : undefined}
+            aria-label={d.title}
             title={off ? `${d.title} — ${off}` : below ? `${d.title} — below the panel; click to focus it` : on ? `hide ${d.title.toLowerCase()} (⌘J)` : `${d.title} (⌘J)`}
             onClick={() => onPick(d.key, on)}
+            onKeyDown={marks ? (e) => {
+              if (e.altKey || e.ctrlKey || e.metaKey) return;
+              const buttons = [...(e.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("[data-workspace-panel]") ?? [])];
+              const at = buttons.indexOf(e.currentTarget);
+              const last = buttons.length - 1;
+              const next = e.key === "ArrowDown" ? (at + 1) % buttons.length
+                : e.key === "ArrowUp" ? (at + last) % buttons.length
+                : e.key === "Home" ? 0 : e.key === "End" ? last : null;
+              if (next === null) return;
+              e.preventDefault();
+              buttons[next]?.focus();
+            } : undefined}
           >
             {d.icon}
+            {marks?.[d.key] === "waits" && <span className="wsf-rail-dot" title="Text that is not saved" aria-label="Text that is not saved" />}
+            {marks?.[d.key] === "fresh" && <span className="wsf-rail-dot new" data-testid="memory-fresh" title="Changed since you looked" aria-label="Changed since you looked" />}
             {/* Open PRs, dim; red and counting only the ones that NEED you
                 (failing, changes requested, conflicting, merged while its
                 place exists) once any do. On the icon, not the nav rows:
@@ -653,6 +674,12 @@ function DockRailGroup({ items, shown, tab, lower, why, prsView, onPick }: {
       })}
     </>
   );
+}
+
+function WorkspaceDockTerminal({ shown, children }: { shown: boolean; children: React.ReactNode }) {
+  const [opened, setOpened] = useState(shown);
+  if (shown && !opened) setOpened(true);
+  return opened || shown ? <div className="dock-body" hidden={!shown}>{children}</div> : null;
 }
 
 /** Pending setup offers — the way BACK to the release notes' band, and the
@@ -4539,7 +4566,6 @@ function App() {
   /** A chat being started in a workspace, and why it was refused. */
   const [wsStart, setWsStart] = useState<{ ws: string; why: string | null; tidy?: boolean } | null>(null);
   /** With room for one side alone, which one. */
-  const [wsSide, setWsSide] = useState<"chat" | "docs">("docs");
   const [ideasTick, setIdeasTick] = useState(0);
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
   // A persisted Off must suppress even the first usage request at startup.
@@ -5797,21 +5823,28 @@ function App() {
    *
    *  Stable (refs only, functional setState) so `toggleDock` can stay
    *  dependency-free for the keydown effect. */
-  const updatePanels = useCallback((patch: DockPatch | ((cur: PlacePanels) => DockPatch)) => {
+  const updatePanels = useCallback((patch: DockPatch | ((cur: PlacePanels) => DockPatch), workspace?: { id: string; terminal?: boolean }) => {
     setSettings((prev) => {
-      const s = selRef.current;
-      const wsId = s ? null : wsDockRef.current;
+      const s = workspace ? null : selRef.current;
+      const wsId = workspace?.id ?? (s ? null : wsDockRef.current);
       const key = s ? placeKey(s.repo, s.slug) : wsId ? placeKey(WORKSPACE_SCOPE, wsId) : null;
       const cur = panelsFor(prev, key);
       const p = typeof patch === "function" ? patch(cur) : patch;
-      // A workspace's dock (wsdock.ts) is its own and nobody's seed: only its
-      // record is written, never a global, so opening, closing or widening it
-      // there moves no place's dock — and never `dock_tab`, which it does not
-      // have (it shows its Terminal whatever the tab says). Pre-hydration it
-      // stashes nothing: the stash is merged over the globals.
       if (wsId && key) {
-        const own: PlacePanels = { dock_open: p.dock_open ?? cur.dock_open, dock_tab: "terminal", dock_width: p.dock_width ?? cur.dock_width };
-        const next: Settings = { ...prev, place_panels: { ...(prev.place_panels ?? {}), [key]: own } };
+        const stored = prev.place_panels?.[key];
+        const terminal = workspace?.terminal ?? (p.dock_tab === "terminal" || workspaceTerminalSelected(stored));
+        const own: PlacePanels = {
+          ...stored,
+          dock_open: p.dock_open ?? cur.dock_open,
+          dock_tab: "terminal", // Read by builds that only have the workspace shell.
+          ...(p.dock_width === undefined ? {} : { dock_width: p.dock_width }),
+          workspace_terminal: terminal,
+        };
+        const next: Settings = {
+          ...prev,
+          ...(p.dock_width === undefined ? {} : { dock_width: p.dock_width }),
+          place_panels: { ...(prev.place_panels ?? {}), [key]: own },
+        };
         applySettings(next);
         if (hydrated.current) saveSettings(next);
         return next;
@@ -5864,22 +5897,16 @@ function App() {
       return next;
     });
   }, []);
-  // The workspace whose view owns the dock: shells in the home directory, a
-  // Terminal alone (wsdock.ts). The one the main area shows (the frame's
-  // `wsShown`, further down, which this cannot read yet), with no place
-  // selected at all, on this machine's own engine: the shells are the
-  // console's, and a remote window is no console.
-  const wsDock = !sel && !diskOpen && !guestOpen && remoteHost() === null && wsOpen !== null
+  // The same dock serves a workspace's reading panes and its optional local shell.
+  const wsDock = !sel && !diskOpen && !guestOpen && wsOpen !== null
     && (frameOn || (docStuck !== null && mainDoc !== null))
     && !!wsList?.workspaces.some((w) => w.id === wsOpen) ? wsOpen : null;
   wsDockRef.current = wsDock;
-  // A space owns its dock: what is open, which tab, how wide. `settings` holds
-  // the LAST-USED values (the seed a never-visited place inherits), and
-  // `place_panels[key]` overrides them for a place you have set up before.
-  // `eff` is what the UI must READ everywhere the dock is concerned — reading
-  // `settings.dock_*` directly is the bug this indirection exists to prevent.
-  // A workspace's record is `~|<id>`, and its tab is always the Terminal.
-  const eff = wsDock ? { ...panelsFor(settings, wsDockKey(wsDock)), dock_tab: dockTabAt({ place: false, workspace: true }, settings.dock_tab) } : panelsFor(settings, selKey);
+  const wsDockStored = wsOpen ? settings.place_panels?.[wsDockKey(wsOpen)] : undefined;
+  const wsTerminalAvailable = remoteHost() === null;
+  const wsTerminal = wsTerminalAvailable && workspaceTerminalSelected(wsDockStored);
+  const eff = panelsFor(settings, wsDock ? wsDockKey(wsDock) : selKey);
+  const [workspaceDockBody, setWorkspaceDockBody] = useState<HTMLDivElement | null>(null);
   // A place left on the Pull requests tab, reopened where there is no such tab
   // (a project not on GitHub, or the feature switched off): fall back to Files,
   // once, rather than a tab whose icon does not exist. Waits for THIS project's
@@ -6254,11 +6281,8 @@ function App() {
   const dockLeft = settings.dock_side === "left";
   const merged = railsMerged(settings);
 
-  // Dock only makes sense with a place selected (Files/Terminal need a
-  // worktree) — or in a workspace's view, whose dock is a Terminal alone
-  // (`wsDock`, above `updatePanels`).
-  const dockWhere = { place: !!selected && !!sel, workspace: wsDock !== null };
-  const dockEligible = dockEligibleAt({ ...dockWhere, fits: true });
+  const placeDock = !!selected && !!sel;
+  const dockEligible = placeDock || wsDock !== null;
   const fit = fitLayout(eff, dockEligible, vw);
   const dockShown = fit.dockShown;
   // Would the dock fit if it were open? Drives the toggle's disabled state, so a
@@ -6271,8 +6295,6 @@ function App() {
   const placeWs = sel ? placeWorkspace(placeWsAll, placeWsFrom[placeKey(sel.repo, sel.slug)]) : null;
   // Files, for the workspace's tab in a place that has none. Nothing is written:
   // the tab is there again in one that has.
-  // (A workspace's effective tab is already its Terminal, and it has no lower
-  // slot: `lowerOn` needs a place's session. So nothing below knows of it.)
   const dockTabHere = eff.dock_tab === "workspace" && placeWsAll.length === 0 ? "files" : eff.dock_tab;
   // ── the dock's lower slot (Settings → Navigation → Terminal) ──
   // `lowerSet` is the preference; `lowerOn` is whether it is ON SCREEN — the
@@ -6305,7 +6327,8 @@ function App() {
   // ⌘J / the rail says "hide files" — leaving a full-pane reader behind would
   // make that a lie. Same for flipping the dock to the Terminal tab. Keyed on
   // `shownTab` (what is ON SCREEN), like every other reader of the tab.
-  const filesDockShown = eff.dock_open && shownTab === "files";
+  const filesDockShown = placeDock && eff.dock_open && shownTab === "files";
+  const findDockTab = wsDock ? (wsTerminal ? "terminal" : null) : shownTab;
   useEffect(() => { if (!filesDockShown) setReading(false); }, [filesDockShown]);
 
   // A find bar cannot outlive the thing it is searching. Closing the dock,
@@ -6313,7 +6336,7 @@ function App() {
   // surface — without this the state would say "open" against nothing, and the
   // next ⌘F on that surface would look like a no-op (same value, no re-render).
   useEffect(() => { if (!dockShown) setFindOn((f) => (f === "dock" || f === "lower" ? null : f)); }, [dockShown]);
-  useEffect(() => { setFindOn((f) => (f === "dock" ? null : f)); }, [shownTab]);
+  useEffect(() => { setFindOn((f) => (f === "dock" ? null : f)); }, [findDockTab]);
   useEffect(() => { if (!lowerOn) setFindOn((f) => (f === "lower" ? null : f)); }, [lowerOn]);
   useEffect(() => { if (!reading) setFindOn((f) => (f === "read" ? null : f)); }, [reading]);
   // The reader covers the dock, so a dock bar opened behind it is invisible —
@@ -7028,7 +7051,7 @@ function App() {
   const wsGoSeq = useRef(0);
   const wsOpenRef = useRef(wsOpen);
   wsOpenRef.current = wsOpen;
-  const showWs = async (id: string, tab: WsTab, o: { doc?: string; startIn?: "edit" | "title"; here?: boolean; chat?: string | null } = {}): Promise<boolean> => {
+  const showWs = async (id: string, tab: WsTab, o: { doc?: string; startIn?: "edit" | "title"; here?: boolean; chat?: string | null; dock?: "keep" | "panel" | "terminal" } = {}): Promise<boolean> => {
     if (!viewOn || id === EVERYTHING_ELSE_ID) return false;
     const n = ++wsGoSeq.current;
     const to = tabOr(tab, tabsOf(id));
@@ -7062,12 +7085,17 @@ function App() {
     setSel(null);
     setWsOpen(id);
     setWsTab(to);
+    const dock = o.dock ?? (o.chat === undefined ? "panel" : "keep");
+    if (dock !== "keep") {
+      updatePanels({ dock_open: true }, { id, terminal: dock === "terminal" });
+    } else if (o.chat && !settings.place_panels?.[wsDockKey(id)]) {
+      updatePanels({ dock_open: true }, { id, terminal: false });
+    }
     // The workspace already behind Disk, picked again: Disk gives way, as it
     // does to any other pick (the `[wsOpen]` effect sees no change here).
     if (!navApplying.current) closeDisk();
     // `chat` left out: the one that is there stays, beside another document.
     if (o.chat !== undefined) { setWsChat((c) => ({ ...c, [id]: o.chat ?? null })); setWsStart(null); }
-    setWsSide(o.chat ? "chat" : "docs");
     if (to === "ideas" && o.doc) setWsPick((p) => ({ ...p, [id]: o.doc! }));
     if (to === "memory") setWsTrail((t) => (o.doc || !t[id] ? { ...t, [id]: trailTo(t[id] ?? trailStart(), o.doc ?? "MEMORY.md") } : t));
     if (!want || (to !== "plan" && to !== "ideas" && to !== "memory")) return true;
@@ -7092,7 +7120,6 @@ function App() {
     if (!cur || cur.ws !== id || !mainDocApi.current || await mainDocApi.current.leave()) return true;
     const now = mainDocRef.current;
     if (now) void showWsRef.current(now.ws, now.tab);
-    setWsSide("docs");
     setNotice("Not done: a document of this workspace has text that is not saved. Keep yours or reload it first.");
     return false;
   };
@@ -7110,9 +7137,9 @@ function App() {
     startingChat.current = true;
     try {
       if (!(await docSaved(id))) return;
-      if (!(await showWs(id, wsShown?.id === id ? wsTabNow : "memory", { chat: null }))) return;
+      const dock = settings.place_panels?.[wsDockKey(id)] ? "keep" : "panel";
+      if (!(await showWs(id, wsShown?.id === id ? wsTabNow : "memory", { chat: null, dock }))) return;
     } finally { startingChat.current = false; }
-    setWsSide("chat");
     setWsStart({ ws: id, why: null, tidy });
     const got = await wsChats.start(id, tidy, tidy ? undefined : pick ?? chatPick(id));
     // A workspace's first chat makes its memory.
@@ -7147,16 +7174,18 @@ function App() {
   useEffect(() => {
     if (!wsShown || (wsTabNow !== "plan" && wsTabNow !== "ideas" && wsTabNow !== "memory")) return;
     const cur = mainDocRef.current;
-    if (wsTabNow === "memory") { if (madeHere && !(cur?.ws === wsShown.id && cur.tab === "memory")) void showWsRef.current(wsShown.id, "memory"); return; }
+    if (wsTabNow === "memory") { if (madeHere && !(cur?.ws === wsShown.id && cur.tab === "memory")) void showWsRef.current(wsShown.id, "memory", { dock: "keep" }); return; }
     if (wsTabNow === "plan" && !planHere) {
       if (cur?.ws === wsShown.id && cur.tab === "plan") void leaveMainDoc();
-    } else if (wsTabNow === "plan" || (anyIdea && !(cur?.ws === wsShown.id && cur.tab === "ideas"))) void showWsRef.current(wsShown.id, wsTabNow);
+    } else if (wsTabNow === "plan" || (anyIdea && !(cur?.ws === wsShown.id && cur.tab === "ideas"))) void showWsRef.current(wsShown.id, wsTabNow, { dock: "keep" });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- what is behind the tab is the trigger
   }, [wsShown?.id, wsTabNow, planHere, anyIdea, madeHere]);
   // Looking at a workspace's memory is seeing what changed in it.
   const lastHere = wsShown ? wsMem.of(wsShown.id)?.last?.commit : undefined;
+  const chatInCenter = wsShown && wsChatsOn && (wsStart?.ws === wsShown.id || !!wsChat[wsShown.id]);
+  const memoryVisible = !diskOpen && !guestOpen && wsTabNow === "memory" && (!chatInCenter || (dockShown && !wsTerminal));
   const lookAt = wsMem.look;
-  useEffect(() => { if (wsShown && wsTabNow === "memory" && lastHere) lookAt(wsShown.id); }, [wsShown?.id, wsTabNow, lastHere, lookAt]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (wsShown && memoryVisible && lastHere) lookAt(wsShown.id); }, [wsShown?.id, memoryVisible, lastHere, lookAt]); // eslint-disable-line react-hooks/exhaustive-deps
   /** Close the document open in the main area, if it can be left: `false` while
    *  its text is saved nowhere else. */
   const leaveMainDoc = async (): Promise<boolean> => {
@@ -8851,7 +8880,7 @@ function App() {
   // the keydown listener stays stable (registered once, no per-render churn).
   // The history step, for the chord handler below (stable effect, live function).
   const navStepRef = useRef<(dir: -1 | 1) => void>(() => {});
-  const keyRef = useRef({ selectedPath: null as string | null, editorCmd: settings.editor_cmd, switchOpen, dockFile: null as string | null, reading: false, settingsOpen: false, filesTabOpen: false, mdPreview: false, mdZoom: DEFAULTS.files_md_zoom, appZoom: DEFAULTS.app_zoom, dockShown: false, dockTab: "files" as Settings["dock_tab"], mainTermUp: false, dockTermUp: false, findOn: null as null | Surface, lowerUp: false, lowerSet: false, dockOpen: false, dockEligible: false, dockFits: true, navPinned: false, ideasOn: false });
+  const keyRef = useRef({ selectedPath: null as string | null, editorCmd: settings.editor_cmd, switchOpen, dockFile: null as string | null, reading: false, settingsOpen: false, filesTabOpen: false, mdPreview: false, mdZoom: DEFAULTS.files_md_zoom, appZoom: DEFAULTS.app_zoom, dockShown: false, dockTab: "files" as Settings["dock_tab"] | null, mainTermUp: false, dockTermUp: false, findOn: null as null | Surface, lowerUp: false, lowerSet: false, dockOpen: false, dockEligible: false, dockFits: true, navPinned: false, ideasOn: false });
   const filesTabOpen = eff.dock_open && shownTab === "files";
   keyRef.current = {
     selectedPath: selected?.path ?? null, editorCmd: settings.editor_cmd, switchOpen, dockFile, reading, settingsOpen,
@@ -8866,8 +8895,8 @@ function App() {
     // App zoom is global by nature — one window, one page zoom.
     appZoom: settings.app_zoom,
     // ⌘F: which surfaces can take the bar, and which one already has it.
-    dockShown, dockTab: shownTab, mainTermUp: !!selected?.tmux_session.up, dockTermUp: !!selected?.tmux_session.up || wsDock !== null, findOn,
-    lowerUp: lowerOn, lowerSet,
+    dockShown, dockTab: findDockTab, mainTermUp: !!selected?.tmux_session.up, dockTermUp: !!selected?.tmux_session.up || (wsDock !== null && wsTerminalAvailable), findOn,
+    lowerUp: lowerOn, lowerSet: !wsDock && lowerSet,
     // ⌘J's "no room" notice.
     dockOpen: eff.dock_open, dockEligible, dockFits, navPinned: settings.nav_pinned,
   };
@@ -9112,6 +9141,7 @@ function App() {
         // does nothing; this branch doesn't fight that, it relies on it.
         e.preventDefault();
         const kr = keyRef.current;
+        if (wsDockRef.current && remoteHost() !== null) return;
         if (kr.dockShown && (kr.dockTab === "terminal" || kr.lowerUp)) setNewTermToken((v) => v + 1);
         else if (kr.lowerSet && !kr.dockShown) {
           // The Terminal lives in the lower slot: bring the column back
@@ -9358,8 +9388,8 @@ function App() {
     : sel ? navSeenFront.current[placeKey(sel.repo, sel.slug)] ?? settings.term_tab_active?.[placeKey(sel.repo, sel.slug)] : undefined;
   // The workspace view is a location too: its tab, and the idea it shows.
   // On Memory, its History too when open, and the change shown in it.
-  const memHist = wsShown && wsTabNow === "memory" && docShown && mainDoc?.tab === "memory" && memHistOpen ? { ...(memHistAt ? { at: memHistAt } : {}) } : null;
-  const wsLoc: Loc["ws"] = !sel && wsShown ? { id: wsShown.id, tab: wsTabNow, ...(wsTabNow === "ideas" ? { doc: tabDoc(wsShown.id, "ideas")?.name } : wsTabNow === "memory" ? { doc: memPath(wsShown.id) } : {}), ...(wsChat[wsShown.id] ? { chat: wsChat[wsShown.id]! } : {}), ...(memHist ? { hist: memHist } : {}) } : undefined;
+  const memHist = wsShown && !wsTerminal && wsTabNow === "memory" && docShown && mainDoc?.tab === "memory" && memHistOpen ? { ...(memHistAt ? { at: memHistAt } : {}) } : null;
+  const wsLoc: Loc["ws"] = !sel && wsShown ? { id: wsShown.id, tab: wsTabNow, ...(wsTerminal ? { terminal: true as const } : {}), ...(wsTabNow === "ideas" ? { doc: tabDoc(wsShown.id, "ideas")?.name } : wsTabNow === "memory" ? { doc: memPath(wsShown.id) } : {}), ...(wsChat[wsShown.id] ? { chat: wsChat[wsShown.id]! } : {}), ...(memHist ? { hist: memHist } : {}) } : undefined;
   // Disk over all of it: its scope, and what is picked in a place's treemap.
   const diskLoc: Loc["disk"] = diskOpen ? { scope: diskOpen, ...(diskPath ? { path: diskPath } : {}) } : undefined;
   const navLoc: Loc | null = !sel ? { place: null, ...(wsLoc ? { ws: wsLoc } : {}), ...(diskLoc ? { disk: diskLoc } : {}) } : !selected ? null : stripUp && frontHere === undefined ? null : {
@@ -9487,7 +9517,11 @@ function App() {
     // A new object for the SAME place would re-run every effect keyed on `sel`.
     if (loc.ws) {
       const w = loc.ws;
-      void showWsRef.current(w.id, w.tab, { doc: w.doc, chat: w.chat ?? null }).then((ok) => {
+      const from = navLocRef.current?.ws;
+      const samePanel = from?.id === w.id && from.tab === w.tab && from.terminal === w.terminal;
+      void showWsRef.current(w.id, w.tab, {
+        doc: w.doc, chat: w.chat ?? null, dock: samePanel ? "keep" : w.terminal ? "terminal" : "panel",
+      }).then((ok) => {
         // A memory file's History, put back as the entry has it, once the
         // file is the one shown and while this apply is still the one running.
         if (!ok || w.tab !== "memory" || navApplying.current?.key !== key) return;
@@ -9641,7 +9675,7 @@ function App() {
   const chatActsHost = (id: string): ChatActsHost => ({
     ws: id, live: wsChats, ready: () => docSaved(id), onError: fail,
     // A close's changes are shown where its workspace is shown, as the header does.
-    landed: (commit) => { if (wsShown?.id === id && !mainDocApi.current?.editing()) void showChange(id, commit).then(() => setWsSide("chat")); },
+    landed: (commit) => { if (wsShown?.id === id && !mainDocApi.current?.editing()) void showChange(id, commit); },
     gone: (conv) => { if (wsShown?.id === id && wsChat[id] === conv) void showWs(id, wsTabNow, { chat: null }); },
   });
   /** The chat in the middle of the workspace view, or the start of one. */
@@ -9684,7 +9718,7 @@ function App() {
   const wsMiddle = !wsShown || !wsChatsOn ? null
     : wsStart?.ws === wsShown.id
       ? (wsStart.why === null ? <StartingChat name={wsShown.name} />
-        : <RefusedStart why={wsStart.why} busy={wsChats.starting !== null} again={() => { const tidy = wsStart.tidy; setWsStart(null); void startChat(wsShown.id, tidy); }} away={() => { setWsStart(null); setWsSide("docs"); }} />)
+        : <RefusedStart why={wsStart.why} busy={wsChats.starting !== null} again={() => { const tidy = wsStart.tidy; setWsStart(null); void startChat(wsShown.id, tidy); }} away={() => setWsStart(null)} />)
     : wsConv && wsChats.of(wsShown.id)
       ? (
         <WorkspaceChatColumn ws={{ id: wsShown.id, name: wsShown.name }} info={wsChats.of(wsShown.id)!} rows={wsChats.rows(wsShown.id)} conv={wsConv} live={wsChats} ago={ago}
@@ -9693,7 +9727,7 @@ function App() {
           away={() => void showWs(wsShown.id, wsTabNow, { chat: null })}
           // Its diff beside it, unless the person is editing there: then the chip's
           // dot says it.
-          landed={(commit) => { if (!mainDocApi.current?.editing()) void showChange(wsShown.id, commit).then(() => setWsSide("chat")); }}
+          landed={(commit) => { if (!mainDocApi.current?.editing()) void showChange(wsShown.id, commit); }}
           showChange={(commit) => void showChange(wsShown.id, commit)}
           openMemory={(path) => openMemory(wsShown.id, path)} nameOf={(p) => nameAt(memView, p)} ready={() => docSaved(wsShown.id)}
           memoryTick={wsMem.tick(wsShown.id)}
@@ -10578,12 +10612,38 @@ function App() {
     // Only for a place whose project a workspace holds.
     { key: "workspace" as Settings["dock_tab"], track: "dock.workspace", icon: <Icons.Layers size={17} />, title: "Workspace" },
   ];
-  // What `DockRailGroup` renders, wherever it is hosted (see there).
-  const dockRailItems: DockRailItem[] = DOCK_RAIL.filter((d) => (d.key !== "prs" || prsOn) && (d.key !== "workspace" || placeWsAll.length > 0));
-  const dockWhy = (key: Settings["dock_tab"]) => dockWhyFor(key, { ...dockWhere, fits: dockFits });
-  const onDockRailPick = (key: Settings["dock_tab"], on: boolean) => {
+  const workspaceLabel = wsShown && {
+    id: wsShown.id, name: wsShown.name, color: wsColorOf(wsShown),
+    counts: wsCounts(wsShown.projects.length, wsChatsOn ? wsChats.rows(wsShown.id).filter((x) => x.live).length : 0),
+  };
+  const WS_RAIL: DockRailItem[] = [
+    { key: "overview", track: "workspace.dock.overview", icon: <Icons.WorkspaceOverview size={17} />, title: "Overview" },
+    { key: "memory", track: "workspace.dock.memory", icon: <Icons.WorkspaceMemory size={17} />, title: "Memory" },
+    { key: "plan", track: "workspace.dock.plan", icon: <Icons.ListChecks size={17} />, title: "Plan" },
+    { key: "ideas", track: "workspace.dock.ideas", icon: <Icons.WorkspaceIdeas size={17} />, title: "Ideas" },
+    { key: "chats", track: "workspace.dock.chats", icon: <Icons.WorkspaceChats size={17} />, title: "Chats" },
+    { key: "terminal", track: "workspace.dock.terminal", icon: <Icons.SquareTerminal size={17} />, title: "Terminal" },
+  ];
+  const dockRailItems: DockRailItem[] = wsDock
+    ? WS_RAIL.filter((d) => d.key === "terminal" ? wsTerminalAvailable : tabsOf(wsDock).includes(d.key as WsTab))
+    : DOCK_RAIL.filter((d) => (d.key !== "prs" || prsOn) && (d.key !== "workspace" || placeWsAll.length > 0));
+  const railTab = wsDock ? (wsTerminal ? "terminal" : wsTabNow) : shownTab;
+  const workspacePanelTitle = dockRailItems.find((item) => item.key === railTab)?.title;
+  const railMarks: Partial<Record<RailTab, "fresh" | "waits">> | undefined = wsDock ? {
+    ...(wsMem.unseen(wsDock) && !memoryVisible ? { memory: "fresh" as const } : {}),
+    ...(docStuck !== null && mainDoc?.ws === wsDock ? { [mainDoc.tab]: "waits" as const } : {}),
+  } : undefined;
+  const dockWhy = wsDock ? null : !placeDock ? "select a place first" : dockFits ? null : "window too narrow";
+  const onDockRailPick = (key: RailTab, on: boolean) => {
+    if (wsDock) {
+      if (!dockFits) setNotice("Widen the window to show the panel.");
+      if (on) updatePanels({ dock_open: false });
+      else if (key === "terminal") updatePanels({ dock_tab: "terminal", dock_open: true });
+      else void showWs(wsDock, key as WsTab, { dock: "panel" });
+      return;
+    }
     if (key === "prs" && !on) prs.refresh(TAB_MAX_AGE_S);
-    pickDockTab(key);
+    pickDockTab(key as Settings["dock_tab"]);
   };
 
   // `minmax(0, 1fr)` — a bare `1fr` is `minmax(auto, 1fr)`, which refuses to
@@ -10693,7 +10753,7 @@ function App() {
             <div className="rail-group">
               {/* Inside the group, so the hairline is not a hover edge either. */}
               <div className="rail-sep" />
-              <DockRailGroup items={dockRailItems} shown={dockShown} tab={shownTab} lower={dockLower} why={dockWhy}
+              <DockRailGroup items={dockRailItems} shown={dockShown} tab={railTab} lower={dockLower} why={dockWhy} marks={railMarks}
                 prsView={prs.reply?.view} onPick={onDockRailPick} />
             </div>
           </>
@@ -11153,6 +11213,13 @@ function App() {
             `position: relative` lives here now (it used to be on `.main`) so it
             anchors the reading overlay — which therefore reaches across the
             dock for free, instead of needing a negative inline offset. */}
+        {workspaceLabel && wsShown && !diskOpen && (
+          <WorkspaceTopBar ws={workspaceLabel} navButtons={navButtons} onMenu={(e) => wsMenuAt(e, wsShown.id)}
+            newChat={wsChatsOn && (wsChats.of(wsShown.id)?.chats.length ?? 0) > 0 ? {
+              busy: wsStart?.ws === wsShown.id && wsStart.why === null,
+              run: () => void startChat(wsShown.id), more: chatMore(wsShown.id, "ws-frame-new-chat-more"),
+            } : null} />
+        )}
         <div className="space-body" ref={spaceRef}>
           <main className="main">
             {diskOpen ? (
@@ -11429,36 +11496,23 @@ function App() {
                 </div>
               </div>
             )}
-            {/* The workspace view. Last, and mounted whatever is shown while a
-                document is open in it: the document's section keeps one parent
-                for its life, so its text survives a nav click. */}
             {(wsShown || mainDoc) && (
               <WorkspaceFrame
                 shown={wsShown !== null && !diskOpen}
-                ws={wsShown && { id: wsShown.id, name: wsShown.name, color: wsColorOf(wsShown), counts: wsCounts(wsShown.projects.length, wsChatsOn ? wsChats.rows(wsShown.id).filter((x) => x.live).length : 0) }}
-                tabs={tabsOf(wsShown?.id ?? null)}
+                ws={workspaceLabel}
                 tab={wsTabNow}
-                counts={{ ideas: wsShown?.ideas?.length ?? 0, chats: wsShown && wsChatsOn ? wsChats.of(wsShown.id)?.chats.length ?? 0 : 0 }}
-                marks={wsShown ? {
-                  ...(wsMem.unseen(wsShown.id) && wsTabNow !== "memory" ? { memory: "fresh" as const } : {}),
-                  ...(docStuck !== null && mainDoc?.ws === wsShown.id ? { [mainDoc.tab]: "waits" as const } : {}),
-                } : undefined}
-                newChat={wsShown && wsChatsOn && (wsChats.of(wsShown.id)?.chats.length ?? 0) > 0 ? { busy: wsStart?.ws === wsShown.id && wsStart.why === null, run: () => void startChat(wsShown.id), more: chatMore(wsShown.id, "ws-frame-new-chat-more") } : null}
+                dock={wsDock && dockShown && !wsTerminal ? workspaceDockBody : null}
                 middle={wsMiddle}
-                side={wsSide}
-                setSide={setWsSide}
                 firstChat={() => { if (wsShown) void startChat(wsShown.id); }}
-                chatsTab={wsShown && wsChatsOn && (
+                chatsTab={wsShown && wsChatsOn && (wsChats.of(wsShown.id)?.chats.length ?? 0) > 0 && (
                   <ChatsTab note={(path) => openMemory(wsShown.id, path)} rows={wsChats.rows(wsShown.id)} on={wsChat[wsShown.id] ?? null} starting={wsStart?.why === null} ago={ago}
                     open={(conv) => openChat(wsShown.id, conv)} start={() => void startChat(wsShown.id)} acts={chatActsHost(wsShown.id)} more={chatMore(wsShown.id, "ws-chats-new-more")} />
                 )}
-                showTab={(t) => { if (wsShown) void showWs(wsShown.id, t); }}
-                navButtons={navButtons}
-                onMenu={(e) => { if (wsShown) wsMenuAt(e, wsShown.id); }}
                 parts={wsParts}
                 overview={wsShown && (
                   <WorkspaceOverview
                     key={wsShown.id}
+                    dock={!wsMiddle && wsTabNow === "overview" && dockShown && !wsTerminal ? workspaceDockBody : null}
                     {...wsParts}
                     ideasOn={ideasOn}
                     chatsOn={wsChatsOn}
@@ -11493,7 +11547,6 @@ function App() {
                 )}
                 has={wsShown ? (wsTabNow === "plan" ? !!wsShown.plan : wsTabNow === "memory" ? madeHere : anyIdea) : false}
                 memory={{
-                  count: memView?.count ?? 0,
                   files: wsShown && memView?.made && !wsMem.error(wsShown.id) ? <MemoryFiles ws={wsShown.id} made={(path) => void (async () => { await wsMem.refresh(wsShown.id); void showWsRef.current(wsShown.id, "memory", { doc: path, startIn: "edit" }); })()} view={memView} on={memPath(wsShown.id)} ago={ago} open={(path) => openMemory(wsShown.id, path)} /> : null,
                   instead: !wsShown ? null
                     : wsMem.error(wsShown.id) ? <MemoryUnread why={wsMem.error(wsShown.id)!} retry={() => void wsMem.refresh(wsShown.id)} />
@@ -11509,7 +11562,6 @@ function App() {
                 openTitle={ideaDocs.find((d) => d.id === wsPick[wsShown?.id ?? ""])?.title ?? null}
                 docShown={docShown}
                 openTab={() => { if (wsShown) void showWs(wsShown.id, wsTabNow, wsTabNow === "memory" ? { doc: "MEMORY.md" } : { here: true }); }}
-                dockLeft={dockLeft}
                 doc={mainDoc && (
                   <MainDocument
                     target={mainDoc}
@@ -11585,11 +11637,13 @@ function App() {
               children, and the dock is not one of them. `.reading` is
               `position: absolute; inset: 0` against `.space-body`, so it keeps
               covering terminal and dock together either way round. */}
-          {dockShown && selected && sel && (
-            <aside className="dock" style={{ order: dockLeft ? -1 : 0, flex: `0 0 ${fit.dockW}px` }}>
+          {(wsDock || (dockShown && selected && sel)) && (
+            <aside className={wsDock ? "dock ws-dock wsf" : "dock"} id={wsDock ? "workspace-dock" : undefined}
+              aria-label={wsDock ? workspacePanelTitle : undefined} data-ws-color={wsDock ? workspaceLabel?.color ?? undefined : undefined}
+              data-testid={wsDock ? "ws-dock" : undefined} data-panel={wsDock ? railTab : undefined}
+              hidden={!dockShown} style={{ order: dockLeft ? -1 : 0, flex: `0 0 ${fit.dockW}px` }}>
               <div className="dock-resizer" onMouseDown={onDockResize} />
-              {/* the rail owns tab selection AND collapse, so this is a title, not
-                  a control strip */}
+              {selected && sel && <>
               <div className="dock-tabs">
                 <button {...gripProps("reference")}><Icons.GripVertical size={13} /></button>
                 <span className="dock-title">{DOCK_RAIL.find((d) => d.key === shownTab)?.title ?? "Files"}</span>
@@ -11896,22 +11950,19 @@ function App() {
                   </div>
                 </>
               )}
-            </aside>
-          )}
-
-          {/* ── a workspace's dock: its Terminal and nothing else (wsdock.ts).
-              The same strip, panes and records as a place's, under the
-              workspace's own key, `~|<id>`; its shells start in the home
-              directory. No links (no Files tab to open them in), no lower
-              slot and no grip: those are a place's. */}
-          {dockShown && wsDock && (
-            <aside className="dock" data-testid="ws-dock" style={{ order: dockLeft ? -1 : 0, flex: `0 0 ${fit.dockW}px` }}>
-              <div className="dock-resizer" onMouseDown={onDockResize} />
+              </>}
+              {wsDock && <>
               <div className="dock-tabs">
-                <span className="dock-title" title="Shells in your home directory">Terminal</span>
+                <span className="dock-title">{workspacePanelTitle}</span>
                 <span className="dock-spacer" />
+                <button className="icon-btn" data-testid="ws-dock-close" data-track="workspace.dock.close"
+                  title="Close panel (⌘J)" aria-label="Close panel" onClick={() => {
+                    updatePanels({ dock_open: false });
+                    document.querySelector<HTMLButtonElement>(`[data-workspace-panel="${railTab}"]`)?.focus();
+                  }}><Icons.X size={14} /></button>
               </div>
-              <div className="dock-body">
+              <div className="dock-body ws-dock-content" ref={setWorkspaceDockBody} hidden={wsTerminal} />
+              {wsTerminalAvailable && <WorkspaceDockTerminal key={wsDock} shown={dockShown && wsTerminal}>
                 <TerminalTabs key={wsDockKey(wsDock)}
                   repo={WORKSPACE_SCOPE} slug={wsDock} sessionUp
                   termVersion={termVersion} focusToken={termFocus} addToken={newTermToken}
@@ -11925,8 +11976,9 @@ function App() {
                   onFront={onTermFront}
                   onError={fail}
                   root=""
-                  findOpen={findOn === "dock"} findToken={findToken} onFindClose={closeFind} />
-              </div>
+                  findOpen={wsTerminal && findOn === "dock"} findToken={findToken} onFindClose={closeFind} />
+              </WorkspaceDockTerminal>}
+              </>}
             </aside>
           )}
 
@@ -11978,7 +12030,7 @@ function App() {
           edge it is not rendered: its buttons are in `.rail` above. */}
       {!merged && (
         <nav className="rail rail-right" style={{ order: ord.railRight }}>
-          <DockRailGroup items={dockRailItems} shown={dockShown} tab={shownTab} lower={dockLower} why={dockWhy}
+          <DockRailGroup items={dockRailItems} shown={dockShown} tab={railTab} lower={dockLower} why={dockWhy} marks={railMarks}
             prsView={prs.reply?.view} onPick={onDockRailPick} />
           {/* Offers at the foot of the dock rail, because that end is empty in
               every layout. Gated on the offers and nothing else. */}

@@ -93,7 +93,23 @@ export const PanelRightOpen = (p: IconProps) => (
   </Svg>
 );
 
-/** Ideas — the companion window (Lucide `lightbulb`). */
+export const WorkspaceOverview = (p: IconProps) => (
+  <Svg {...p}><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 9h18M9 9v11m4-7h4m-4 3h4" /></Svg>
+);
+
+export const WorkspaceMemory = (p: IconProps) => (
+  <Svg {...p}><path d="M6 3h11l3 3v15H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM8 3v18m3-13h5m-5 4h5m-5 4h3" /></Svg>
+);
+
+export const WorkspaceIdeas = (p: IconProps) => (
+  <Svg {...p}><path d="M9 18h6m-5 3h4M8 15a6 6 0 1 1 8 0l-1 1H9zM12 6v2m-2 1 2 2 2-2" /></Svg>
+);
+
+export const WorkspaceChats = (p: IconProps) => (
+  <Svg {...p}><path d="M17 11a2 2 0 0 1-2 2H8l-4 3V5a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2zM20 8a2 2 0 0 1 1 2v11l-4-3h-5a2 2 0 0 1-2-2" /></Svg>
+);
+
+/** Ideas window. */
 export const Lightbulb = (p: IconProps) => (
   <Svg {...p}>
     <path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5" />

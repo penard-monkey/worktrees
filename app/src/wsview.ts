@@ -111,18 +111,6 @@ export function placeWsSet(cur: Record<string, string>, key: string, ws: string 
   return Object.fromEntries([...Object.entries(rest), [key, ws] as const].slice(-PLACE_WS_MAX));
 }
 
-/** The documents' share of the room beside a chat, between both floors. */
-export const DOCS_FLOOR = 340, CHAT_FLOOR = 420;
-export function splitBounds(width: number): { min: number; max: number } {
-  if (!(width > 0)) return { min: 0.2, max: 0.8 };
-  const min = DOCS_FLOOR / width, max = 1 - CHAT_FLOOR / width;
-  return min <= max ? { min, max } : { min: 0.5, max: 0.5 };
-}
-export const splitClamp = (share: number, width: number): number => {
-  const b = splitBounds(width);
-  return Math.min(b.max, Math.max(b.min, share));
-};
-
 /** The counts beside a workspace's name. */
 export const wsCounts = (projects: number, liveChats = 0): string =>
   `${projects} project${projects === 1 ? "" : "s"}${liveChats ? ` · ${liveChats} chat${liveChats === 1 ? "" : "s"} live` : ""}`;
