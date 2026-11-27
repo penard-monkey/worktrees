@@ -8,8 +8,8 @@ import { invoke } from "./ipc";
 import { useEscape } from "./useEscape";
 import * as Icons from "./icons";
 import {
-  CATS, CAT_LABEL, ago, bulkDefault, bulkRows, findPath, gb, ownTotal, placeTM, squarify, tmValue, treeTM,
-  type BulkRow, type Cat, type Cleanable, type Deleted, type DiskScope, type PlaceTree, type ProjectUsage, type TM,
+  CATS, CAT_LABEL, ago, bulkDefault, bulkRows, findPath, gb, isGone, ownTotal, placeTM, scannedAgo, scansAgo, squarify, staleOf, staleWords, tmValue, treeTM,
+  type BulkRow, type Cat, type Cleanable, type Deleted, type DiskScope, type PlaceTree, type ProjectUsage, type Stale, type TM,
 } from "./diskmodel";
 import "./DiskView.css";
 
@@ -278,7 +278,7 @@ export function Treemap({ root, selected, onPick, onOpen, light }: {
       {tip && (
         <div className="dk-tip" style={{ left: Math.min(tip.x + 14, size.w - 230), top: Math.min(tip.y + 14, size.h - 60) }}>
           <b>{tip.t.ref?.path ?? (tip.t.label || (tip.t.cat ? CAT_LABEL[tip.t.cat] : ""))}</b>
-          <span>{gb(tmValue(tip.t))}{tip.t.shared ? " · shared with other places" : tip.t.cat && tip.t.kind === "leaf" && !tip.t.label ? ` · small ${CAT_LABEL[tip.t.cat].toLowerCase()}` : ""}</span>
+          <span>{gb(tmValue(tip.t))}{tip.t.gone ? " · removed after this scan" : tip.t.shared ? " · shared with other places" : tip.t.cat && tip.t.kind === "leaf" && !tip.t.label ? ` · small ${CAT_LABEL[tip.t.cat].toLowerCase()}` : ""}</span>
         </div>
       )}
     </div>
@@ -315,6 +315,29 @@ const Tile = ({ label, value, note }: { label: React.ReactNode; value: string; n
   <div className="dk-t"><div className="l">{label}</div><div className="v">{value}</div><div className="n">{note}</div></div>
 );
 
+/** What the kept scan no longer matches, in one line under the header, with
+ *  the one way to fix it. Never a scan of its own: Rescan is the user's. */
+function StaleNotice({ words, onRescan, scanning }: { words: string[]; onRescan: () => void; scanning: boolean }) {
+  if (!words.length) return null;
+  return (
+    <div className="dk-stale" role="status" data-testid="disk-stale">
+      <i className="dk-stale-dot" />
+      <span>{words.join(" ")}</span>
+      <button className="ctrl sm" onClick={onRescan} disabled={scanning} data-testid="disk-stale-rescan">{scanning ? "Scanning…" : "Rescan"}</button>
+    </div>
+  );
+}
+
+/** The age a minute-old screen should say: ticks once a minute, reads no file. */
+function useNow(): number {
+  const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(Math.floor(Date.now() / 1000)), 60_000);
+    return () => window.clearInterval(t);
+  }, []);
+  return now;
+}
+
 // ── the view ───────────────────────────────────────────────────────────────
 
 export function DiskView({ scope, path, pick, navButtons, projects, workspaces, byWorkspace, busy, disk, open, close, onError }: {
@@ -335,7 +358,7 @@ export function DiskView({ scope, path, pick, navButtons, projects, workspaces, 
   onError: (e: unknown) => void;
 }) {
   const light = useLight();
-  const now = Math.floor(Date.now() / 1000);
+  const now = useNow();
   // Escape closes Disk. Not `useEscape`: that stack is for modal surfaces and
   // takes the key from everything, a dock terminal included, and Disk is not
   // modal. A bubble listener hears Escape only where nothing else used it:
@@ -373,7 +396,14 @@ export function DiskView({ scope, path, pick, navButtons, projects, workspaces, 
     return projects.map((p) => p.root);
   }, [scope, workspaces, projects, names]);
 
-  // Scan what the engine has not yet: once per view.
+  // What the kept scans no longer match: compared with the places the app
+  // already knows, never by scanning (diskmodel's staleness rules).
+  const live = useCallback((r: string) => projects.find((p) => p.root === r)?.places ?? null, [projects]);
+  const stale = useMemo(() => staleOf(roots, disk.usage, live), [roots, disk.usage, live]);
+  const goneHere = useCallback((repo: string, slug: string) => isGone(stale, repo, slug), [stale]);
+
+  // Scan what the engine has not yet: once per view. A project with a kept
+  // scan is never scanned again here, however old: Rescan is the only way.
   const asked = useRef(false);
   useEffect(() => {
     if (asked.current || scope.kind === "place") return;
@@ -398,8 +428,11 @@ export function DiskView({ scope, path, pick, navButtons, projects, workspaces, 
   );
 
   if (scope.kind === "place") {
+    // A place the app knows was removed: nothing to walk, and nothing to delete.
+    const removed = !!live(scope.repo) && !placeOf(scope.repo, scope.slug);
     return <PlaceDisk scope={scope} name={names[scope.repo] ?? scope.repo} info={info(scope.repo, scope.slug)} placePath={placeOf(scope.repo, scope.slug)?.path ?? ""}
-      header={header} withShared={withShared} disk={disk} onError={onError} light={light} now={now} open={open} infoOf={info} path={path} pick={pick} />;
+      header={header} withShared={withShared} disk={disk} onError={onError} light={light} now={now} open={open} infoOf={info} path={path} pick={pick}
+      removed={removed} stale={stale} gone={goneHere} />;
   }
 
   const have = roots.filter((r) => disk.usage[r]);
@@ -413,19 +446,24 @@ export function DiskView({ scope, path, pick, navButtons, projects, workspaces, 
   const vol = have.length ? disk.usage[have[0]].volume : null;
   const snaps = vol?.snapshots ?? 0;
   const rescan = () => void disk.scan(roots, true);
+  // A project still in the queue is not "not scanned": it is being scanned.
+  const words = staleWords(scanning ? { ...stale, unscanned: [] } : stale, (r) => names[r] ?? r);
+  const notice = <StaleNotice words={words} onRescan={rescan} scanning={scanning} />;
+  const age = scansAgo(now, have.map((r) => disk.usage[r]));
   const projTM = (r: string): TM => ({
     key: r, label: names[r] ?? r, value: 0, kind: "group", ref: { root: r },
-    kids: disk.usage[r].places.map((p) => placeTM(r, p, withShared)).filter((t) => tmValue(t) > 0),
+    kids: disk.usage[r].places.map((p) => placeTM(r, p, withShared, goneHere(r, p.slug))).filter((t) => tmValue(t) > 0),
   });
   const pickPlace = (t: TM) => {
+    if (t.gone) return;
     if (t.ref?.slug && t.ref.repo) open({ kind: "place", repo: t.ref.repo, slug: t.ref.slug });
     else if (t.ref?.root) open({ kind: "project", root: t.ref.root });
   };
   const bulkBtn = <button className="ctrl sm" onClick={() => setBulk(true)} disabled={!have.length} data-testid="disk-bulk">Clean up…</button>;
   const snapNote = snaps > 0 ? <div className="dk-note">{snaps} Time Machine local snapshot{snaps > 1 ? "s" : ""} on this Mac: deleted files can keep their space until the snapshots expire, about a day.</div> : null;
   const bulkSheet = bulk && (
-    <BulkSheet rows={bulkRows(Object.fromEntries(have.map((r) => [r, disk.usage[r]])), names, info)} now={now} disk={disk}
-      onClose={() => setBulk(false)} onError={onError} />
+    <BulkSheet rows={bulkRows(Object.fromEntries(have.map((r) => [r, disk.usage[r]])), names, info, undefined, goneHere)} now={now} disk={disk}
+      left={stale.gone.length} onClose={() => setBulk(false)} onError={onError} />
   );
 
   if (scope.kind === "project") {
@@ -436,7 +474,8 @@ export function DiskView({ scope, path, pick, navButtons, projects, workspaces, 
     const main = u?.places.find((p) => p.is_main);
     return (
       <div className="dk" data-testid="disk-view">
-        {header(name, u ? `Project · ${u.places.length} places · scanned ${ago(now, u.scanned_epoch)} in ${(u.scan_ms / 1000).toFixed(1)} s` : scanNote ?? "not scanned yet", rescan, scanning, bulkBtn)}
+        {header(name, u ? `Project · ${u.places.length} places · scanned ${scannedAgo(now, u.scanned_epoch)} · took ${(u.scan_ms / 1000).toFixed(1)} s` : scanNote ?? "not scanned yet", rescan, scanning, bulkBtn)}
+        {notice}
         {u ? (
           <>
             <div className="dk-tiles">
@@ -452,11 +491,14 @@ export function DiskView({ scope, path, pick, navButtons, projects, workspaces, 
                 <div className="dk-list">
                   {rows.map((p) => {
                     const pi = info(scope.root, p.slug);
+                    const g = goneHere(scope.root, p.slug);
                     return (
-                      <button className="dk-r" key={p.slug} onClick={() => open({ kind: "place", repo: scope.root, slug: p.slug })}>
-                        <b>{p.slug}{pi.busy && <span className="dk-live"> ● agent</span>}</b>
+                      <button className={g ? "dk-r dk-gone" : "dk-r"} key={p.slug} disabled={g} data-gone={g || undefined} data-slug={p.slug} data-track="disk-place-row"
+                        title={g ? `${p.slug} was removed after this scan` : undefined}
+                        onClick={() => open({ kind: "place", repo: scope.root, slug: p.slug })}>
+                        <b>{g && <i className="dk-stale-dot" />}{p.slug}{pi.busy && <span className="dk-live"> ● agent</span>}</b>
                         <span className="num">{gb(ownTotal(p.own) + (withShared ? p.shared : 0))}</span>
-                        <small>last commit {ago(now, pi.last)}</small>
+                        <small>{g ? "removed after this scan" : `last commit ${ago(now, pi.last)}`}</small>
                         <small>{p.shared > 1e8 ? `shares ${gb(p.shared)}` : ""}</small>
                         <Bar own={p.own} max={mx} shared={withShared ? p.shared : 0} light={light} />
                       </button>
@@ -504,10 +546,11 @@ export function DiskView({ scope, path, pick, navButtons, projects, workspaces, 
   const largest = allPlaces.filter((x) => !x.p.is_main || scope.kind === "workspace").sort((a, b) => ownTotal(b.p.own) - ownTotal(a.p.own)).slice(0, 12);
   const mx = largest.length ? ownTotal(largest[0].p.own) : 0;
   const title = scope.kind === "workspace" ? ws?.name ?? "Workspace" : "Disk";
-  const sub = `${scope.kind === "workspace" ? "Workspace · " : groups.length ? "By workspace · " : "All projects · "}${have.length} of ${roots.length} projects scanned · ${allPlaces.length} places${scanNote ? " · " + scanNote : ""}`;
+  const sub = `${scope.kind === "workspace" ? "Workspace · " : groups.length ? "By workspace · " : "All projects · "}${have.length} of ${roots.length} projects scanned · ${allPlaces.length} places${age ? " · " + age : ""}${scanNote ? " · " + scanNote : ""}`;
   return (
     <div className="dk" data-testid="disk-view">
       {header(title, sub, rescan, scanning, bulkBtn)}
+      {notice}
       <div className="dk-tiles">
         {groups.length > 1
           ? groups.map((gr) => (
@@ -548,12 +591,15 @@ export function DiskView({ scope, path, pick, navButtons, projects, workspaces, 
               <div className="dk-list">
                 {largest.map(({ repo, p }) => {
                   const pi = info(repo, p.slug);
+                  const g = goneHere(repo, p.slug);
                   return (
-                    <button className="dk-r" key={repo + p.slug} onClick={() => open({ kind: "place", repo, slug: p.slug })}>
-                      <b>{p.slug}{pi.busy && <span className="dk-live"> ● agent</span>}</b>
+                    <button className={g ? "dk-r dk-gone" : "dk-r"} key={repo + p.slug} disabled={g} data-gone={g || undefined} data-slug={p.slug} data-track="disk-place-row"
+                      title={g ? `${p.slug} was removed after this scan` : undefined}
+                      onClick={() => open({ kind: "place", repo, slug: p.slug })}>
+                      <b>{g && <i className="dk-stale-dot" />}{p.slug}{pi.busy && <span className="dk-live"> ● agent</span>}</b>
                       <span className="num">{gb(ownTotal(p.own))}</span>
                       <small>{names[repo]}</small>
-                      <small>last commit {ago(now, pi.last)}</small>
+                      <small>{g ? "removed after this scan" : `last commit ${ago(now, pi.last)}`}</small>
                       <Bar own={p.own} max={mx} light={light} />
                     </button>
                   );
@@ -572,7 +618,11 @@ export function DiskView({ scope, path, pick, navButtons, projects, workspaces, 
 
 // ── one place ──────────────────────────────────────────────────────────────
 
-function PlaceDisk({ scope, name, info, placePath, header, withShared, disk, onError, light, now, open, infoOf, path, pick }: {
+function PlaceDisk({ scope, name, info, placePath, header, withShared, disk, onError, light, now, open, infoOf, path, pick, removed, stale, gone }: {
+  /** The app's snapshot no longer has this place: nothing is walked or deleted. */
+  removed: boolean;
+  stale: Stale;
+  gone: (repo: string, slug: string) => boolean;
   path: string | null;
   pick: (path: string | null) => void;
   scope: { kind: "place"; repo: string; slug: string };
@@ -593,13 +643,14 @@ function PlaceDisk({ scope, name, info, placePath, header, withShared, disk, onE
   const [err, setErr] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<{ path: string; id?: string; bytes: number; files: number; cat?: Cat } | null>(null);
   const load = useCallback(() => {
+    if (removed) return;
     setLoading(true);
     setErr(null);
     invoke<PlaceTree>("disk_place_tree", { repo: scope.repo, slug: scope.slug })
       .then((t) => setTree(t))
       .catch((e) => setErr(String(e)))
       .finally(() => setLoading(false));
-  }, [scope.repo, scope.slug]);
+  }, [scope.repo, scope.slug, removed]);
   useEffect(load, [load]);
   // (main)'s folder holds every other place: they are drawn beside its own
   // tree in a dashed box, each its own place, never part of (main)'s numbers.
@@ -607,14 +658,14 @@ function PlaceDisk({ scope, name, info, placePath, header, withShared, disk, onE
   const others = isMain ? (disk.usage[scope.repo]?.places ?? []).filter((p) => !p.is_main) : [];
   const askedMain = useRef(false);
   useEffect(() => {
-    if (!isMain || askedMain.current || disk.usage[scope.repo]) return;
+    if (!isMain || removed || askedMain.current || disk.usage[scope.repo]) return;
     askedMain.current = true;
     void disk.scan([scope.repo], false);
   }, [isMain, scope.repo, disk]);
   const tm = useMemo(() => {
     if (!tree) return null;
     const own = treeTM(tree.tree, withShared);
-    const kids = others.map((p) => placeTM(scope.repo, p, withShared)).filter((t) => tmValue(t) > 0);
+    const kids = others.map((p) => placeTM(scope.repo, p, withShared, gone(scope.repo, p.slug))).filter((t) => tmValue(t) > 0);
     if (!kids.length) return own;
     return {
       key: "/", label: "", value: 0, kind: "dir" as const,
@@ -623,7 +674,7 @@ function PlaceDisk({ scope, name, info, placePath, header, withShared, disk, onE
         { key: "/wt", label: ".worktrees/", value: 0, kind: "group" as const, box: true, kids },
       ],
     };
-  }, [tree, withShared, others, scope.repo]);
+  }, [tree, withShared, others, scope.repo, gone]);
   const u = tree?.usage;
   const snaps = tree?.volume.snapshots ?? 0;
   const sel = tm && path ? findPath(tm, path) : null;
@@ -631,11 +682,24 @@ function PlaceDisk({ scope, name, info, placePath, header, withShared, disk, onE
   const sizeOf = (t: TM) => tmValue(t);
   const askDelete = (path: string, id: string | undefined, bytes: number, files: number, cat?: Cat) => setConfirm({ path, id, bytes, files, cat });
   const waitingHere = disk.waiting.filter((j) => j.repo === scope.repo && j.slug === scope.slug);
+  // (main)'s box of other places comes from the project's kept scan: say what
+  // it no longer matches. Its own tree is walked fresh each time it opens.
+  const mainWords = isMain ? staleWords({ gone: stale.gone, added: stale.added, unscanned: [] }, (r) => r) : [];
+  const rescanMain = () => { load(); void disk.scan([scope.repo], true); };
+  if (removed) {
+    return (
+      <div className="dk" data-testid="disk-view">
+        {header("Disk", <span className="dk-crumb">{name} › <b>{scope.slug}</b></span>, () => {}, true)}
+        <div className="dk-empty" data-testid="disk-removed">{scope.slug} was removed. There is nothing left of it to count or delete.</div>
+      </div>
+    );
+  }
   return (
     <div className="dk" data-testid="disk-view">
       {header("Disk",
-        <span className="dk-crumb">{name} › <b>{scope.slug}</b> · last commit {ago(now, info.last)}{tree ? ` · scanned in ${(tree.scan_ms / 1000).toFixed(1)} s` : ""}</span>,
-        load, loading)}
+        <span className="dk-crumb">{name} › <b>{scope.slug}</b> · last commit {ago(now, info.last)}{tree ? ` · scanned ${scannedAgo(now, tree.scanned_epoch)} · took ${(tree.scan_ms / 1000).toFixed(1)} s` : ""}</span>,
+        isMain ? rescanMain : load, loading || (isMain && !!disk.scanning))}
+      <StaleNotice words={mainWords} onRescan={rescanMain} scanning={loading || !!disk.scanning} />
       {err && <div className="dk-err">{err}</div>}
       {u && tm ? (
         <>
@@ -647,7 +711,7 @@ function PlaceDisk({ scope, name, info, placePath, header, withShared, disk, onE
           </div>
           <div className="dk-body">
             <Treemap root={tm} selected={sel?.key ?? null} light={light}
-              onPick={(t) => { if (t.ref?.slug && t.ref.repo) open({ kind: "place", repo: t.ref.repo, slug: t.ref.slug }); else pick(t.ref?.path ?? null); }} />
+              onPick={(t) => { if (t.gone) return; if (t.ref?.slug && t.ref.repo) open({ kind: "place", repo: t.ref.repo, slug: t.ref.slug }); else pick(t.ref?.path ?? null); }} />
             <div className="dk-side">
               <div className="cap">SELECTED</div>
               {selNode ? (
@@ -680,10 +744,13 @@ function PlaceDisk({ scope, name, info, placePath, header, withShared, disk, onE
                   <div className="dk-list">
                     {others.slice().sort((a, b) => ownTotal(b.own) - ownTotal(a.own)).map((p) => {
                       const pi = infoOf(scope.repo, p.slug);
+                      const g = gone(scope.repo, p.slug);
                       return (
-                        <button className="dk-r" key={p.slug} onClick={() => open({ kind: "place", repo: scope.repo, slug: p.slug })}>
-                          <b>{p.slug}{pi.busy && <span className="dk-live"> ● agent</span>}</b><span className="num">{gb(ownTotal(p.own))}</span>
-                          <small>last commit {ago(now, pi.last)}</small><small>{p.own.build > 5e8 ? `build ${gb(p.own.build)}` : ""}</small>
+                        <button className={g ? "dk-r dk-gone" : "dk-r"} key={p.slug} disabled={g} data-gone={g || undefined} data-slug={p.slug} data-track="disk-place-row"
+                          title={g ? `${p.slug} was removed after this scan` : undefined}
+                          onClick={() => open({ kind: "place", repo: scope.repo, slug: p.slug })}>
+                          <b>{g && <i className="dk-stale-dot" />}{p.slug}{pi.busy && <span className="dk-live"> ● agent</span>}</b><span className="num">{gb(ownTotal(p.own))}</span>
+                          <small>{g ? "removed after this scan" : `last commit ${ago(now, pi.last)}`}</small><small>{p.own.build > 5e8 ? `build ${gb(p.own.build)}` : ""}</small>
                         </button>
                       );
                     })}
@@ -759,8 +826,11 @@ function DeleteDialog({ target, slug, name, busy, snaps, onClose, now, later, on
   );
 }
 
-function BulkSheet({ rows, now, disk, onClose, onError }: {
-  rows: BulkRow[]; now: number; disk: Disk; onClose: () => void; onError: (e: unknown) => void;
+function BulkSheet({ rows, now, disk, left, onClose, onError }: {
+  rows: BulkRow[]; now: number; disk: Disk;
+  /** Places the scan holds that were removed after it: never offered. */
+  left: number;
+  onClose: () => void; onError: (e: unknown) => void;
 }) {
   useEscape(onClose);
   const key = (r: BulkRow) => r.repo + "|" + r.slug;
@@ -790,6 +860,7 @@ function BulkSheet({ rows, now, disk, onClose, onError }: {
         <header className="sync-h"><b>Clean up build output</b></header>
         <div className="sync-body">
           <div className="dk-hint">Build folders by name (target, .next, build, DerivedData…), and only where git ignores them. Source, dependencies and git are not touched.</div>
+          {left > 0 && <div className="dk-hint" data-testid="disk-bulk-left">{left === 1 ? "1 place was" : `${left} places were`} removed after the scan and {left === 1 ? "is" : "are"} left out.</div>}
           <div className="dk-tbl">
             <div className="dk-th"><span /><span>Place</span><span>Last commit</span><span>Agent</span><span className="num">Frees</span></div>
             {rows.map((r) => (

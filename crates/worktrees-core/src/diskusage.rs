@@ -1098,6 +1098,34 @@ mod tests {
         fs::remove_dir_all(&d).unwrap();
     }
 
+    /// The Disk view keeps a scan until Rescan, so a delete it sends can name
+    /// a folder that was replaced since, or a place that is gone. Both are
+    /// refused by the scan's identity and by the path, with nothing deleted.
+    #[test]
+    fn a_folder_replaced_after_the_scan_is_refused_and_kept() {
+        let d = repo("swap");
+        let scan = summarize("x", &d.to_string_lossy(), false, &walk(&d, false));
+        let id = scan.cleanable.iter().find(|c| c.path == "target").map(|c| parse_id(&c.id).unwrap()).unwrap();
+        // A build that cleans and rebuilds: same name, a new folder.
+        fs::remove_dir_all(d.join("target")).unwrap();
+        write(&d.join("target/debug/fresh"), 1000);
+        let e = delete_in_place("x", &d, false, "target", Some(id)).unwrap_err();
+        assert!(e.contains("changed since the scan"), "{e}");
+        assert!(d.join("target/debug/fresh").exists(), "the new folder is left alone");
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_place_removed_after_the_scan_is_refused() {
+        let d = repo("gone");
+        let scan = summarize("x", &d.to_string_lossy(), false, &walk(&d, false));
+        let id = scan.cleanable.iter().find(|c| c.path == "target").map(|c| parse_id(&c.id).unwrap()).unwrap();
+        fs::remove_dir_all(&d).unwrap();
+        let e = delete_in_place("x", &d, false, "target", Some(id)).unwrap_err();
+        assert!(e.contains("not there any more"), "{e}");
+        assert!(!d.exists(), "nothing was made where the place was");
+    }
+
     #[test]
     fn delete_never_goes_through_a_link() {
         let d = repo("link");
