@@ -1546,12 +1546,9 @@ pub(crate) fn turns_at(ctx: &Ctx, at: &Locus, session: Option<String>, n: Option
             None => return Ok(json!({ "turns": [], "more": false, "reason": "no agent is running in this place", "note": TURNS_NOTE })),
         },
     };
-    let read: fn(&[String], usize) -> Vec<turns::Turn> = match lane.harness {
-        h if h == provider::CLAUDE.id => turns::claude,
-        h if h == provider::CODEX.id => turns::codex,
-        h if h == provider::KIMI.id => turns::kimi,
-        h => return Err(format!("agent_turns reads Claude's, Codex's and Kimi's transcripts; {h}'s is not read yet")),
-    };
+    if ![provider::CLAUDE.id, provider::CODEX.id, provider::KIMI.id].contains(&lane.harness) {
+        return Err(format!("agent_turns reads Claude's, Codex's and Kimi's transcripts; {}'s is not read yet", lane.harness));
+    }
     let lines = match io.transcript(at, &lane) {
         Ok(l) => l,
         // A desk session's transcript is found by its id: none on disk
@@ -1563,8 +1560,11 @@ pub(crate) fn turns_at(ctx: &Ctx, at: &Locus, session: Option<String>, n: Option
         Err(e) => return Err(e),
     };
     let n = n.map_or(DEFAULT_TURNS, |n| n as usize);
-    let claude = lane.harness == provider::CLAUDE.id;
-    let (t, more) = turns::within_budget(if claude { turns::claude_opened(&lines, n, openers) } else { read(&lines, n) });
+    // `more`: older turns exist than the answer carries, whether the count
+    // or the byte budget left them out.
+    let (latest, older) = turns::latest(lane.harness, &lines, n, openers);
+    let (t, dropped) = turns::within_budget(latest);
+    let more = older || dropped;
     let mut v = json!({ "harness": lane.harness, "session": lane.session, "turns": t, "more": more, "note": TURNS_NOTE });
     // Ended: read-only, from the transcript alone (a desk session; a
     // place's chat still answers "no agent is running" once its lane ends).
@@ -2014,7 +2014,7 @@ impl AgentIo for Live {
             }
             h => return Err(format!("no transcript reader for {h}")),
         };
-        activity::tail_lines_checked(&path, turns::TAIL_BYTES)
+        turns::window(&path, lane.harness)
     }
 
     fn asked(&self, lane: &Lane) -> Vec<Asked> {
@@ -2144,7 +2144,7 @@ fn desk_activity(session: &str) -> activity::Activity {
 /// is nowhere is gone ([`ERR_TRANSCRIPT_GONE`]).
 fn desk_transcript(paths: &[PathBuf]) -> Result<Vec<String>, String> {
     match paths.iter().find(|p| p.is_file()) {
-        Some(p) => activity::tail_lines_checked(p, turns::TAIL_BYTES),
+        Some(p) => turns::window(p, provider::CLAUDE.id),
         None => Err(ERR_TRANSCRIPT_GONE.into()),
     }
 }
@@ -3642,6 +3642,28 @@ mod tests {
             }
             assert_eq!(fake.keys(), vec![], "{name}: a send presses no key of its own");
         }
+    }
+
+    /// `more` says older turns exist than the answer carries, whether the
+    /// count or the byte budget left them out: with only the budget behind
+    /// it, a chat of twenty turns said "The session's turns" over a
+    /// transcript holding hundreds.
+    #[test]
+    fn more_says_older_turns_exist_beyond_the_count_asked() {
+        let mut fake = Fake::with(vec![("claude", "repo-lane", pane(vec![], ""))]);
+        fake.transcript = (0..3)
+            .flat_map(|i| {
+                [
+                    json!({"type":"user","message":{"role":"user","content":format!("q{i}")}}).to_string(),
+                    json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":format!("a{i}")}]}}).to_string(),
+                ]
+            })
+            .collect();
+        let (ctx, repo) = setup("moreolder", Arc::new(fake));
+        let v = agent_turns(&ctx, repo.clone(), "lane".into(), None, Some(2)).unwrap();
+        assert_eq!((v["turns"].as_array().unwrap().len(), &v["more"]), (2, &json!(true)), "{v}");
+        let v = agent_turns(&ctx, repo, "lane".into(), None, Some(3)).unwrap();
+        assert_eq!((v["turns"].as_array().unwrap().len(), &v["more"]), (3, &json!(false)), "{v}");
     }
 
     /// One call's input, by the id a turn's step carries, from whichever of
