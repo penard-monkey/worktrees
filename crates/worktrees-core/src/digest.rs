@@ -115,10 +115,17 @@ pub struct Card {
     pub claude_dir: Option<String>,
 }
 
+/// When the owner last SAW a place: the later of its seen and opened stamps,
+/// the app's `seenEpoch` (`afterglow.ts`). The two sides share one table of
+/// cases (`tests/fixtures/unseen-work/cases.json`).
+pub fn seen_epoch(seen: Option<i64>, opened: Option<i64>) -> Option<i64> {
+    [seen, opened].into_iter().flatten().max()
+}
+
 impl Card {
     /// "An agent finished here and the owner has not looked since" — the
     /// app's `unseenWork` (`afterglow.ts::isUnread`): a real finish, later
-    /// than the last look.
+    /// than the last look. `afterglow-check.mjs` holds the two to one table.
     pub fn unseen_work(&self) -> bool {
         self.worked.is_some_and(|w| w > 0 && w > self.seen.unwrap_or(0))
     }
@@ -293,7 +300,7 @@ fn project_cards(e: &Entry, now: i64, panes: Option<&tmux::PaneList>, probes: &[
         };
         let worked = decl.and_then(|d| d.last_worked_epoch);
         let opened = decl.and_then(|d| d.last_opened_epoch);
-        let seen = [decl.and_then(|d| d.last_seen_epoch), opened].into_iter().flatten().max();
+        let seen = seen_epoch(decl.and_then(|d| d.last_seen_epoch), opened);
         let last_active = [worked, seen, pl.last_commit_epoch].into_iter().flatten().max();
         let facts = health::HealthFacts {
             slug: pl.slug.clone(),
@@ -394,7 +401,13 @@ pub fn line(c: &Card, why: Reason, at: i64, now: i64, prompt: Option<&str>, plan
             if c.dirty_files > 0 {
                 parts.push(format!("{} uncommitted file{}", c.dirty_files, plural(i64::from(c.dirty_files))));
             }
-            format!("{}, untouched for {}", parts.join(" and "), ago(now - at).trim_end_matches(" ago"))
+            let idle = ago(now - at).trim_end_matches(" ago").to_string();
+            if parts.is_empty() {
+                // Not reached from `gather_in`: `health::assess` needs one of
+                // the two for at-risk. A sentence all the same.
+                return format!("Untouched for {idle}, holding work that exists only here");
+            }
+            format!("{}, untouched for {idle}", parts.join(" and "))
         }
         Reason::Recent => {
             let head = if c.state == Some(State::Busy) { "Working now".to_string() } else { format!("Last active {age}") };
@@ -599,6 +612,58 @@ mod tests {
         let json = serde_json::to_string(&a).unwrap();
         assert!(!json.contains(&private), "a private root reaches no row: {json}");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Nesting under a private project hides the inner one whatever
+    /// characters the outer path has: a non-ASCII root, and one whose folder
+    /// name ends in a space, which no permission rule can name.
+    #[test]
+    fn a_project_inside_a_private_root_no_rule_can_name_is_left_out() {
+        let base = scratch("oddpriv");
+        let mut projects = Vec::new();
+        for outer in ["Priv\u{e9}", "spaced "] {
+            let root = base.join(outer);
+            let inner = root.join("inner");
+            std::fs::create_dir_all(&inner).unwrap();
+            projects.push(entry(&root.to_string_lossy(), outer, true));
+            projects.push(entry(&inner.to_string_lossy(), "inner", false));
+        }
+        let open = base.join("open");
+        std::fs::create_dir_all(&open).unwrap();
+        projects.push(entry(&open.to_string_lossy(), "open", false));
+        let (read, left) = split(&Registry { projects, ..Default::default() });
+        assert_eq!(read.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["open"]);
+        assert_eq!(left, LeftOut { private: 4, unreadable: 0 });
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `health::assess` calls a place at-risk only when it is ahead of its
+    /// base or dirty (`has_unique_work`), and a card carries those same two
+    /// facts, so a gathered at-risk card always has words. A card built by
+    /// hand with neither still gets a whole sentence, never ", untouched for".
+    #[test]
+    fn an_at_risk_line_always_says_something() {
+        for tmux_up in [false, true] {
+            let facts = health::HealthFacts { last_commit_epoch: Some(NOW - 90 * 86_400), tmux_up, ..Default::default() };
+            assert_ne!(health::assess(&facts, NOW, &|e| e.to_string()).0, "at-risk", "assess cannot reach at-risk with neither");
+        }
+        let bare = Card { verdict: "at-risk".into(), last_active: Some(NOW - 20 * 86_400), ..card("bare") };
+        assert_eq!(line(&bare, Reason::AtRisk, NOW - 20 * 86_400, NOW, None, None), "Untouched for 20 days, holding work that exists only here");
+        let one = Card { dirty_files: 1, ..bare.clone() };
+        assert_eq!(line(&one, Reason::AtRisk, NOW - 20 * 86_400, NOW, None, None), "1 uncommitted file, untouched for 20 days");
+    }
+
+    /// The table `afterglow-check.mjs` drives `isUnread` over: the same
+    /// answers here, or the two mirrors have drifted.
+    #[test]
+    fn unseen_work_matches_the_apps_table() {
+        let t: serde_json::Value = serde_json::from_str(include_str!("../tests/fixtures/unseen-work/cases.json")).unwrap();
+        let cases = t["cases"].as_array().unwrap();
+        assert!(cases.len() >= 10);
+        for c in cases {
+            let c_ = Card { worked: c["worked"].as_i64(), seen: seen_epoch(c["seen"].as_i64(), c["opened"].as_i64()), ..card("x") };
+            assert_eq!(c_.unseen_work(), c["unseen"].as_bool().unwrap(), "{c}");
+        }
     }
 
     fn card(slug: &str) -> Card {

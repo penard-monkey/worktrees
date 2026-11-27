@@ -665,6 +665,17 @@ fn denied_private(w: &crate::workspaces::Workspace, reg: &crate::registry::Regis
     w.projects.iter().filter(|p| reg.by_root(&p.root).is_some_and(|e| e.private)).filter_map(|p| rule_root(&p.root).ok()).collect()
 }
 
+/// The private projects of `w` by FOLDER, canonical where the folder is
+/// there: what nesting is judged against, whatever characters a path holds.
+/// A path no rule can name is still a folder a project can sit inside.
+fn private_folders(w: &crate::workspaces::Workspace, reg: &crate::registry::Registry) -> Vec<PathBuf> {
+    w.projects
+        .iter()
+        .filter(|p| reg.by_root(&p.root).is_some_and(|e| e.private))
+        .map(|p| fs::canonicalize(&p.root).unwrap_or_else(|_| PathBuf::from(&p.root)))
+        .collect()
+}
+
 /// [`project_reads`] where the registry could not be read: each is named, and
 /// none is read.
 pub fn project_reads_unknown(w: &crate::workspaces::Workspace) -> Vec<ProjectRead> {
@@ -675,13 +686,15 @@ pub fn project_reads_unknown(w: &crate::workspaces::Workspace) -> Vec<ProjectRea
 /// registry decides which, and [`settings`] says it to Claude. A project
 /// inside a private one of `w` is not read: that one's deny beats any allow.
 pub fn project_reads(w: &crate::workspaces::Workspace, reg: &crate::registry::Registry) -> Vec<ProjectRead> {
-    let denied = denied_private(w, reg);
+    let private = private_folders(w, reg);
     let readable = |root: &str| {
-        let r = rule_root(root)?;
-        if denied.iter().any(|d| Path::new(&r).starts_with(d)) {
+        // Nesting first, by folder: a private root no rule can hold still
+        // hides what is inside it (and the inner path fails the rule too).
+        let at = fs::canonicalize(root).unwrap_or_else(|_| PathBuf::from(root));
+        if private.iter().any(|d| at.starts_with(d)) {
             return Err(WHY_WITHIN);
         }
-        private_inside(&r, reg)
+        private_inside(&rule_root(root)?, reg)
     };
     w.projects
         .iter()
@@ -908,7 +921,7 @@ pub fn doc_reads(w: &crate::workspaces::Workspace, src: &Sources) -> Vec<DocRead
         return Vec::new();
     }
     let idx = crate::ideas::list_at(src.ideas);
-    let (folder, denied) = (ideas_rule(src), denied_private(w, src.reg));
+    let (folder, denied) = (ideas_rule(src), private_folders(w, src.reg));
     ids.into_iter()
         .map(|(kind, id)| {
             let no = |why| DocRead { kind, id: id.clone(), live: None, title: None, path: None, reads: Reads::No, why: Some(why) };
@@ -2532,6 +2545,32 @@ mod tests {
         assert!(!rules(&both, &reg).unwrap().contains("Edit("), "no rule for what is not read");
         // Without the private one in the workspace nothing denies it.
         assert_eq!(project_reads(&workspace(&[&inside]), &reg)[0].reads, Reads::Yes);
+        let _ = fs::remove_dir_all(&top);
+    }
+
+    /// Nesting is by folder, not by rule: a project inside a private one
+    /// whose path no rule can hold (a non-ASCII letter, a name ending in a
+    /// space) is not read BECAUSE it is inside a private project, and says
+    /// so. Its own path fails the rule too, so it was never read; the reason
+    /// is what the digest and the list go by.
+    #[test]
+    fn a_project_inside_a_private_root_no_rule_can_hold_is_within_it() {
+        let top = fs::canonicalize(tmp("oddwithin")).unwrap();
+        let mut roots = Vec::new();
+        let mut reg = crate::registry::Registry::default();
+        for outer in ["Priv\u{e9}", "spaced "] {
+            let (o, i) = (top.join(outer), top.join(outer).join("inner"));
+            fs::create_dir_all(&i).unwrap();
+            reg.projects.push(project(&o, true));
+            reg.projects.push(project(&i, false));
+            roots.extend([o, i]);
+        }
+        let w = workspace(&roots.iter().map(|r| r.as_path()).collect::<Vec<_>>());
+        let reads = project_reads(&w, &reg);
+        assert_eq!(
+            reads.iter().map(|r| (r.reads, r.why)).collect::<Vec<_>>(),
+            vec![(Reads::No, Some(WHY_PRIVATE_PATH)), (Reads::No, Some(WHY_WITHIN)), (Reads::No, Some(WHY_PRIVATE_PATH)), (Reads::No, Some(WHY_WITHIN))]
+        );
         let _ = fs::remove_dir_all(&top);
     }
 
