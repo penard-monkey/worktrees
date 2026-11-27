@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+
+- A place's Chat view shows the conversation again in long sessions. It read only the last 2 MB of the transcript, and Claude writes every request and tool result into that file, so one long turn filled it: the chat showed that turn without the message that began it, and nothing before. The chat now reads back until it has the latest turns it can show, each with its message. "The latest N turns" now also says when older turns exist beyond the count shown.
+
 ## [0.54.0] - 2026-11-26
 
 ### Added

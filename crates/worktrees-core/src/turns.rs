@@ -56,10 +56,9 @@ pub const TEXT_MAX: usize = 4000;
 /// Bytes of turn text one answer carries, in all: the oldest turns are
 /// dropped past it.
 pub const TOTAL_MAX: usize = 64 * 1024;
-/// How much of a transcript's end is read. Claude writes the system prompt
-/// into the file on every request (`api-request-blob`, ~100 KB each), so the
-/// window is wide; a turn that started before it is returned without its
-/// prompt (`user: null`).
+/// The first read of a transcript's end ([`window`], which grows it until
+/// it holds the turns an answer shows). A turn whose opening line [`window`]
+/// cannot find is returned without its prompt (`user: null`).
 pub const TAIL_BYTES: u64 = 2 * 1024 * 1024;
 /// Bytes kept of one call's input ([`claude_tool_call`], [`codex_tool_call`]).
 /// The longest measured across this machine's recent transcripts on
@@ -384,6 +383,23 @@ pub fn claude_opened(lines: &[String], n: usize, openers: &[Opener]) -> Vec<Turn
     let mut turns = claude_turns(lines);
     mark_openers(&mut turns, openers);
     finish(turns, n)
+}
+
+/// The last `n` turns of `lines` as `harness` writes them ([`claude_opened`],
+/// [`codex`], [`kimi`]), and whether `lines` hold older turns than those.
+pub fn latest(harness: &str, lines: &[String], n: usize, openers: &[Opener]) -> (Vec<Turn>, bool) {
+    let mut all = if harness == crate::provider::CODEX.id {
+        codex_turns(lines)
+    } else if harness == crate::provider::KIMI.id {
+        kimi_turns(lines)
+    } else {
+        claude_turns(lines)
+    };
+    if harness == crate::provider::CLAUDE.id {
+        mark_openers(&mut all, openers);
+    }
+    let older = all.len() > n.clamp(1, MAX_TURNS);
+    (finish(all, n), older)
 }
 
 /// Every turn in a Claude transcript's `lines`, as [`claude`] reads them.
@@ -2547,6 +2563,175 @@ pub fn within_budget(mut turns: Vec<Turn>) -> (Vec<Turn>, bool) {
     (turns, dropped)
 }
 
+/// The largest read [`window`] makes before it looks back for the line that
+/// opened its first turn instead. The owner's (main) on 2026-11-26 needed
+/// 5.4 MB for its current turn alone and 13.5 MB for twenty prompts.
+pub const WINDOW_MAX: u64 = 32 * 1024 * 1024;
+/// How far back [`window`] looks for that line, past [`WINDOW_MAX`].
+const OPENER_SEARCH_MAX: u64 = 256 * 1024 * 1024;
+/// Bytes read per step of that look back.
+const OPENER_CHUNK: u64 = 1024 * 1024;
+/// A line longer than this is not read as an opener (a prompt measured at
+/// most ~400 KB; the longest lines are request blobs and pictures).
+const OPENER_LINE_MAX: usize = 16 * 1024 * 1024;
+
+/// Where each transcript's window starts, kept between reads ([`window`]).
+#[derive(Default)]
+pub struct WindowCache(HashMap<std::path::PathBuf, Anchor>);
+
+#[derive(Clone, Copy, Debug)]
+struct Anchor {
+    /// (device, inode): another file at the same path is read anew.
+    file: (u64, u64),
+    /// The file's length when the start was chosen.
+    len: u64,
+    /// The first byte of the window's first line.
+    start: u64,
+    /// The line that opened the window's first turn, when it lies before
+    /// `start`: its first byte and its end, newline excluded.
+    opener: Option<(u64, u64)>,
+}
+
+static WINDOW: std::sync::Mutex<Option<WindowCache>> = std::sync::Mutex::new(None);
+
+/// The lines of the transcript at `path` that the turn rows read
+/// (`agent_turns`, and a call, a picture or a whole turn by id): its end,
+/// from the first of the turns an answer can show. A fixed tail is not
+/// enough: Claude writes the whole request (`api-request-blob`, ~470 KB on
+/// 2.1.331) and every tool result (twice) into the file, so one long turn
+/// filled 2 MiB and the chat showed that turn without its message and
+/// nothing before it. So the read doubles from [`TAIL_BYTES`] until it
+/// holds [`MAX_TURNS`] turns with their messages, or more words than
+/// [`TOTAL_MAX`] lets an answer carry, or the whole file, or [`WINDOW_MAX`].
+/// At that cap a turn still started before the window: the line that opened
+/// it is found by looking back and read first, so no turn reaches a client
+/// without its message (`user: null` remains only for a turn whose opening
+/// line is more than [`OPENER_SEARCH_MAX`] back).
+///
+/// The start is kept per file, so a poll of a growing transcript reads from
+/// it with no second parse, until the window is twice what it was chosen at
+/// (then it is chosen again, from the end). Another file at the path, or a
+/// shorter one, is read anew. A file that cannot be opened has no lines, as
+/// [`crate::activity::tail_lines_checked`] answers.
+pub fn window(path: &std::path::Path, harness: &str) -> Result<Vec<String>, String> {
+    let mut g = WINDOW.lock().unwrap_or_else(|e| e.into_inner());
+    window_in(g.get_or_insert_with(WindowCache::default), path, harness, TAIL_BYTES, WINDOW_MAX)
+}
+
+/// [`window`], with its cache, its first read and its largest read given.
+pub fn window_in(cache: &mut WindowCache, path: &std::path::Path, harness: &str, first: u64, cap: u64) -> Result<Vec<String>, String> {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(f) = std::fs::File::open(path) else {
+        cache.0.remove(path);
+        return Ok(Vec::new());
+    };
+    let meta = f.metadata().map_err(|e| format!("transcript stat failed ({e}): {}", path.display()))?;
+    let (len, file) = (meta.len(), (meta.dev(), meta.ino()));
+    let all: fn(&[String]) -> Vec<Turn> = match harness {
+        h if h == crate::provider::CODEX.id => codex_turns,
+        h if h == crate::provider::KIMI.id => kimi_turns,
+        _ => claude_turns,
+    };
+    if let Some(a) = cache.0.get(path).copied() {
+        let chosen = a.len - a.start;
+        if a.file == file && len >= a.len && len - a.start <= (2 * chosen).max(first).min(cap.max(chosen)) {
+            let mut lines = match a.opener {
+                Some((s, e)) => vec![String::from_utf8_lossy(&read_range(&f, s, e, path)?).into_owned()],
+                None => Vec::new(),
+            };
+            lines.extend(lines_from(&f, a.start, len, path)?.0);
+            return Ok(lines);
+        }
+    }
+    let mut w = first.max(1);
+    loop {
+        let (lines, start) = lines_from(&f, len.saturating_sub(w), len, path)?;
+        let turns = all(&lines);
+        let whole = start == 0 || window_enough(turns.clone());
+        if whole || w >= cap {
+            let starts_inside = !whole && turns.first().is_some_and(|t| t.user.is_none());
+            let opener = if starts_inside { opener_before(&f, start, path, all)? } else { None };
+            cache.0.insert(path.to_path_buf(), Anchor { file, len, start, opener });
+            let mut out = match opener {
+                Some((s, e)) => vec![String::from_utf8_lossy(&read_range(&f, s, e, path)?).into_owned()],
+                None => Vec::new(),
+            };
+            out.extend(lines);
+            return Ok(out);
+        }
+        w = w.saturating_mul(2).min(cap);
+    }
+}
+
+/// Would a wider window change what an answer shows? Not once it holds more
+/// than [`MAX_TURNS`] turns (the last of them all have their message), nor
+/// once the ones with their message already hold more words than
+/// [`TOTAL_MAX`] (`within_budget` would drop the rest).
+/// A turn past the last [`MAX_TURNS`] in the window also says that older
+/// turns exist ([`latest`]'s flag).
+fn window_enough(turns: Vec<Turn>) -> bool {
+    if turns.len() > MAX_TURNS {
+        return true;
+    }
+    finish(turns, MAX_TURNS).iter().filter(|t| t.user.is_some()).map(|t| t.bytes() - t.summary_bytes()).sum::<usize>() > TOTAL_MAX
+}
+
+/// `[from, to)` of `f`.
+fn read_range(f: &std::fs::File, from: u64, to: u64, path: &std::path::Path) -> Result<Vec<u8>, String> {
+    use std::os::unix::fs::FileExt;
+    let mut buf = vec![0u8; to.saturating_sub(from) as usize];
+    f.read_exact_at(&mut buf, from).map_err(|e| format!("tail read failed ({e}): {}", path.display()))?;
+    Ok(buf)
+}
+
+/// The lines of `f` that begin at or after `from` and before `len`, and the
+/// first one's first byte. A line that `from` falls inside is left out.
+fn lines_from(f: &std::fs::File, from: u64, len: u64, path: &std::path::Path) -> Result<(Vec<String>, u64), String> {
+    // From the byte before, so a `from` on a line's first byte keeps it.
+    let at = from.saturating_sub(1);
+    let buf = read_range(f, at, len, path)?;
+    let skip = if from == 0 { 0 } else { buf.iter().position(|b| *b == b'\n').map_or(buf.len(), |i| i + 1) };
+    let text = String::from_utf8_lossy(&buf[skip..]);
+    Ok((text.lines().map(str::to_string).collect(), at + skip as u64))
+}
+
+/// The nearest line before `top` (a line's first byte) that opens a turn on
+/// its own, as `all` reads it: `(first byte, end)`, newline excluded. Read
+/// backward a chunk at a time, at most [`OPENER_SEARCH_MAX`] back.
+fn opener_before(f: &std::fs::File, top: u64, path: &std::path::Path, all: fn(&[String]) -> Vec<Turn>) -> Result<Option<(u64, u64)>, String> {
+    let floor = top.saturating_sub(OPENER_SEARCH_MAX);
+    // `buf` holds `[pos, end)`; `end` is a line's first byte, so `buf`
+    // ends on the newline of the line being looked for.
+    let (mut pos, mut end) = (top, top);
+    let mut buf: Vec<u8> = Vec::new();
+    let opens = |line: &[u8]| {
+        line.len() <= OPENER_LINE_MAX && all(&[String::from_utf8_lossy(line).into_owned()]).first().is_some_and(|t| t.user.is_some())
+    };
+    loop {
+        let body = &buf[..buf.len().saturating_sub(1)];
+        if let Some(i) = body.iter().rposition(|b| *b == b'\n') {
+            let s = pos + i as u64 + 1;
+            if opens(&buf[i + 1..buf.len() - 1]) {
+                return Ok(Some((s, end - 1)));
+            }
+            buf.truncate(i + 1);
+            end = s;
+            continue;
+        }
+        if pos == 0 {
+            return Ok((!body.is_empty() && opens(body)).then_some((0, end - 1)));
+        }
+        if pos <= floor || buf.len() > OPENER_LINE_MAX + OPENER_CHUNK as usize {
+            return Ok(None);
+        }
+        let n = OPENER_CHUNK.min(pos);
+        pos -= n;
+        let mut chunk = read_range(f, pos, pos + n, path)?;
+        chunk.extend_from_slice(&buf);
+        buf = chunk;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4046,5 +4231,146 @@ mod tests {
         let bare = t.bytes();
         t.id = "0123456789abcdef".into();
         assert_eq!(t.bytes(), bare + 16);
+    }
+
+    // ---- the read window (`window`): its shape is the owner's (main) on
+    // 2026-11-26: one turn 5.4 MB from its prompt, 3.6 MB of it `tool_result`
+    // user entries and 1.8 MB `api-request-blob`s of ~470 KB each, so a fixed
+    // 2 MiB tail started inside that turn and showed nothing older.
+
+    fn window_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("wt-window-{tag}-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn person(id: &str, at: u32, text: &str) -> String {
+        serde_json::json!({"type":"user","uuid":id,"timestamp":format!("2026-11-26T23:{:02}:{:02}Z", at / 60, at % 60),"message":{"role":"user","content":text}}).to_string()
+    }
+
+    fn said(at: u32, text: &str) -> String {
+        serde_json::json!({"type":"assistant","timestamp":format!("2026-11-26T23:{:02}:{:02}Z", at / 60, at % 60),"message":{"role":"assistant","content":[{"type":"text","text":text}]}}).to_string()
+    }
+
+    /// One tool round as Claude writes it: the request blob, the call, and
+    /// its result (twice over, as 2.1.33x keeps `toolUseResult` beside it).
+    fn round(id: &str, at: u32, bytes: usize) -> Vec<String> {
+        let ts = format!("2026-11-26T23:{:02}:{:02}Z", at / 60, at % 60);
+        vec![
+            serde_json::json!({"type":"api-request-blob","blob":"b".repeat(bytes)}).to_string(),
+            serde_json::json!({"type":"assistant","timestamp":ts,"message":{"role":"assistant","content":[{"type":"tool_use","id":id,"name":"Bash","input":{"command":"ls"}}]}}).to_string(),
+            serde_json::json!({"type":"user","timestamp":ts,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":"o".repeat(bytes)}]},"toolUseResult":{"stdout":"o".repeat(bytes)}}).to_string(),
+        ]
+    }
+
+    fn write_lines(path: &std::path::Path, lines: &[String]) {
+        std::fs::write(path, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+    }
+
+    fn append_lines(path: &std::path::Path, lines: &[String]) {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        f.write_all(lines.iter().map(|l| format!("{l}\n")).collect::<String>().as_bytes()).unwrap();
+    }
+
+    /// Three short turns, then a turn whose tool rounds outweigh `first`
+    /// many times over.
+    fn long_turn(rounds: usize, bytes: usize) -> Vec<String> {
+        let mut l = Vec::new();
+        for i in 0..3u32 {
+            l.push(person(&format!("p{i}"), i * 2, &format!("question {i}")));
+            l.push(said(i * 2 + 1, &format!("answer {i}")));
+        }
+        l.push(person("now", 10, "the message that began this turn"));
+        for r in 0..rounds {
+            l.extend(round(&format!("t{r}"), 11 + r as u32, bytes));
+        }
+        l
+    }
+
+    #[test]
+    fn a_turn_longer_than_the_first_read_keeps_its_prompt_and_the_turns_before_it() {
+        let d = window_dir("long");
+        let path = d.join("s.jsonl");
+        write_lines(&path, &long_turn(8, 40 * 1024));
+        let lines = window_in(&mut WindowCache::default(), &path, "claude", 64 * 1024, 16 * 1024 * 1024).unwrap();
+        let got = claude(&lines, MAX_TURNS);
+        assert_eq!(got.len(), 4, "the three turns before it are read too");
+        assert_eq!(got[0].user.as_deref(), Some("question 0"));
+        assert_eq!(got[3].user.as_deref(), Some("the message that began this turn"));
+        assert_eq!(got[3].tools.len(), 8);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn past_the_largest_read_the_turn_still_opens_on_its_prompt() {
+        let d = window_dir("cap");
+        let path = d.join("s.jsonl");
+        write_lines(&path, &long_turn(12, 40 * 1024));
+        let mut cache = WindowCache::default();
+        let lines = window_in(&mut cache, &path, "claude", 64 * 1024, 256 * 1024).unwrap();
+        let read: usize = lines.iter().map(|l| l.len() + 1).sum();
+        assert!(read < 300 * 1024, "the read stays near its cap, not the whole file: {read}");
+        let got = claude(&lines, MAX_TURNS);
+        let last = got.last().unwrap();
+        assert_eq!(last.user.as_deref(), Some("the message that began this turn"), "the line that opened the turn is found before the window");
+        assert_eq!(last.id, "now");
+        assert!(got.iter().all(|t| t.user.is_some()), "no turn without its message");
+        // A second read, the file grown by a round: the same opening, from
+        // the kept anchor.
+        append_lines(&path, &round("t99", 59, 1024));
+        let again = claude(&window_in(&mut cache, &path, "claude", 64 * 1024, 256 * 1024).unwrap(), MAX_TURNS);
+        assert_eq!(again.last().unwrap().user.as_deref(), Some("the message that began this turn"));
+        assert_eq!(again.last().unwrap().tools.len(), last.tools.len() + 1);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_poll_reads_from_the_kept_start_and_a_replaced_file_from_scratch() {
+        let d = window_dir("poll");
+        let path = d.join("s.jsonl");
+        write_lines(&path, &long_turn(8, 40 * 1024));
+        let mut cache = WindowCache::default();
+        let first = claude(&window_in(&mut cache, &path, "claude", 64 * 1024, 16 * 1024 * 1024).unwrap(), MAX_TURNS);
+        assert_eq!(first.len(), 4);
+        let start = cache.0[&path].start;
+        append_lines(&path, &[person("next", 50, "a new message"), said(51, "ok")]);
+        let next = claude(&window_in(&mut cache, &path, "claude", 64 * 1024, 16 * 1024 * 1024).unwrap(), MAX_TURNS);
+        assert_eq!(next.len(), 5);
+        assert_eq!(next[4].user.as_deref(), Some("a new message"));
+        assert_eq!(cache.0[&path].start, start, "a grown file is read from the same start");
+        // Another, shorter file at the same path: read anew.
+        let _ = std::fs::remove_file(&path);
+        write_lines(&path, &[person("fresh", 1, "a fresh session"), said(2, "hi")]);
+        let fresh = claude(&window_in(&mut cache, &path, "claude", 64 * 1024, 16 * 1024 * 1024).unwrap(), MAX_TURNS);
+        assert_eq!(fresh.len(), 1);
+        assert_eq!(fresh[0].user.as_deref(), Some("a fresh session"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_window_stops_growing_once_it_holds_what_the_answer_can_carry() {
+        let d = window_dir("enough");
+        let path = d.join("s.jsonl");
+        // 40 turns of 8 KB replies: TOTAL_MAX holds 8 of them, so reading
+        // past ~10 turns changes nothing a client sees.
+        let mut l = Vec::new();
+        for i in 0..40u32 {
+            l.push(person(&format!("p{i}"), i * 2, &format!("question {i}")));
+            l.push(said(i * 2 + 1, &"r".repeat(3900)));
+            l.push(said(i * 2 + 1, &"s".repeat(3900)));
+            l.extend(round(&format!("t{i}"), i * 2 + 1, 4 * 1024));
+        }
+        write_lines(&path, &l);
+        let len = std::fs::metadata(&path).unwrap().len();
+        let mut cache = WindowCache::default();
+        let lines = window_in(&mut cache, &path, "claude", 16 * 1024, 64 * 1024 * 1024).unwrap();
+        assert!(cache.0[&path].start > 0, "the whole file ({len} bytes) was read");
+        let (got, more) = within_budget(claude(&lines, MAX_TURNS));
+        assert!(more);
+        assert_eq!(got.last().unwrap().user.as_deref(), Some("question 39"));
+        assert!(got.iter().all(|t| t.user.is_some()));
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
