@@ -99,4 +99,4 @@
 .wsm-newf { display: flex; flex-direction: column; gap: var(--s1); padding: var(--s1) var(--s2); }
 .wsm-newf .wsm-skipped { padding: 0; }
 .md-link.gone { color: var(--txt-dim); border-bottom-style: dotted; }
-.wsf-chip-dot.new { background: var(--done); }
+.wsf-dot.new { background: var(--done); }

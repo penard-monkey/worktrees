@@ -259,6 +259,16 @@ export function ChatPane(props: ChatPaneProps) {
         </div>
       );
     } else body = <p className="chat-note" role="status">Reading the conversation…</p>;
+  } else if (data.not_started) {
+    // The session is up and pane 0 is still the launch shell: something in
+    // it waits on the person (an rc file's question), and only the terminal
+    // can answer it.
+    body = (
+      <div className="chat-fallback" role="status" data-testid="chat-not-started">
+        <p><b>Claude hasn’t started here yet.</b> The terminal may be waiting on a question, such as a shell update prompt.</p>
+        <button className="ctrl sm with-icon" onClick={props.onTerminal}><Icons.SquareTerminal size={13} /> Open the terminal</button>
+      </div>
+    );
   } else if (data.reason) {
     body = <p className="chat-note" data-testid="chat-no-agent">{props.ws ? `${data.reason.replace(/^./, (x) => x.toUpperCase())}.` : "No agent is running in this place."}</p>;
   } else {

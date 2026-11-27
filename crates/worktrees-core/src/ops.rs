@@ -726,7 +726,7 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
 fn pane0_command(ui: &mut dyn Ui, wt: &str, ai: &crate::profile::AiLaunch, session: &str) -> String {
     let keep = "exec \"${SHELL:-/bin/sh}\"";
     let helper = deferred_opener(ui, wt, ai);
-    format!("exec \"${{SHELL:-/bin/sh}}\" -ic {}", tmux::sq(&format!("{helper}{}", ai.pane0_body_for(keep, session))))
+    tmux::rc_launch(&format!("{helper}{}", ai.pane0_body_for(keep, session)))
 }
 
 /// The command that relaunches the `harness` agent of the place at `wt`
