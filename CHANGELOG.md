@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+
+- **Back and Forward work inside Disk.** Each step in Disk is a step in the app's history: a project, one of its places, a file or folder picked in the treemap. Back from a place's treemap goes to the list you clicked it from, and Back from the first Disk screen goes to what was shown before Disk opened. Disk now opens over what you are looking at and no longer selects a place. Opening it from a place's menu keeps your place selected, and **✕** or Escape takes you back to it. Over Home or a workspace view, Disk has its own Back and Forward buttons.
+
 ## [0.54.0] - 2026-11-26
 
 ### Added

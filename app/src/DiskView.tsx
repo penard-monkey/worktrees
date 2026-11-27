@@ -8,7 +8,7 @@ import { invoke } from "./ipc";
 import { useEscape } from "./useEscape";
 import * as Icons from "./icons";
 import {
-  CATS, CAT_LABEL, ago, bulkDefault, bulkRows, gb, ownTotal, placeTM, squarify, tmValue, treeTM,
+  CATS, CAT_LABEL, ago, bulkDefault, bulkRows, findPath, gb, ownTotal, placeTM, squarify, tmValue, treeTM,
   type BulkRow, type Cat, type Cleanable, type Deleted, type DiskScope, type PlaceTree, type ProjectUsage, type TM,
 } from "./diskmodel";
 import "./DiskView.css";
@@ -317,8 +317,14 @@ const Tile = ({ label, value, note }: { label: React.ReactNode; value: string; n
 
 // ── the view ───────────────────────────────────────────────────────────────
 
-export function DiskView({ scope, projects, workspaces, byWorkspace, busy, disk, open, close, onError }: {
+export function DiskView({ scope, path, pick, navButtons, projects, workspaces, byWorkspace, busy, disk, open, close, onError }: {
   scope: DiskScope;
+  /** What is picked in a place's treemap, and the way to pick: App holds it,
+   *  because it is part of the history location (Back unpicks). */
+  path: string | null;
+  pick: (path: string | null) => void;
+  /** The app's ‹ ›, when no topbar above carries them (Home, a workspace view). */
+  navButtons: React.ReactNode;
   projects: DiskProject[];
   workspaces: DiskWorkspace[] | null;
   byWorkspace: boolean;
@@ -330,6 +336,26 @@ export function DiskView({ scope, projects, workspaces, byWorkspace, busy, disk,
 }) {
   const light = useLight();
   const now = Math.floor(Date.now() / 1000);
+  // Escape closes Disk. Not `useEscape`: that stack is for modal surfaces and
+  // takes the key from everything, a dock terminal included, and Disk is not
+  // modal. A bubble listener hears Escape only where nothing else used it:
+  // xterm stops the ones it handles, and a dialog above (Delete…, Clean up…)
+  // takes it in useEscape's capture phase first.
+  const closeRef = useRef(close);
+  closeRef.current = close;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented || e.repeat || e.isComposing) return;
+      const t = e.target;
+      if (t instanceof HTMLElement && (t.isContentEditable || t.closest("input, textarea, select, .term-host, .cm-editor"))) return;
+      // A menu, or the sidebar shown over the panes (App closes that one, and
+      // one Escape should close one thing).
+      if (document.querySelector(".menu-catch, .nav.overlay")) return;
+      closeRef.current();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
   const [withShared, setWithShared] = useState(scope.kind === "place");
   const [bulk, setBulk] = useState(false);
   const names = useMemo(() => Object.fromEntries(projects.map((p) => [p.root, p.name])), [projects]);
@@ -358,6 +384,7 @@ export function DiskView({ scope, projects, workspaces, byWorkspace, busy, disk,
 
   const header = (title: React.ReactNode, sub: React.ReactNode, onRescan: () => void, scanning: boolean, extra?: React.ReactNode) => (
     <div className="dk-h">
+      {navButtons}
       <div className="dk-title"><h2>{title}</h2><div className="sub">{sub}</div></div>
       <span className="sp" />
       {extra}
@@ -372,7 +399,7 @@ export function DiskView({ scope, projects, workspaces, byWorkspace, busy, disk,
 
   if (scope.kind === "place") {
     return <PlaceDisk scope={scope} name={names[scope.repo] ?? scope.repo} info={info(scope.repo, scope.slug)} placePath={placeOf(scope.repo, scope.slug)?.path ?? ""}
-      header={header} withShared={withShared} disk={disk} onError={onError} light={light} now={now} open={open} infoOf={info} />;
+      header={header} withShared={withShared} disk={disk} onError={onError} light={light} now={now} open={open} infoOf={info} path={path} pick={pick} />;
   }
 
   const have = roots.filter((r) => disk.usage[r]);
@@ -545,7 +572,9 @@ export function DiskView({ scope, projects, workspaces, byWorkspace, busy, disk,
 
 // ── one place ──────────────────────────────────────────────────────────────
 
-function PlaceDisk({ scope, name, info, placePath, header, withShared, disk, onError, light, now, open, infoOf }: {
+function PlaceDisk({ scope, name, info, placePath, header, withShared, disk, onError, light, now, open, infoOf, path, pick }: {
+  path: string | null;
+  pick: (path: string | null) => void;
   scope: { kind: "place"; repo: string; slug: string };
   name: string;
   info: { last: number | null; busy: boolean };
@@ -562,13 +591,12 @@ function PlaceDisk({ scope, name, info, placePath, header, withShared, disk, onE
   const [tree, setTree] = useState<PlaceTree | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [sel, setSel] = useState<TM | null>(null);
   const [confirm, setConfirm] = useState<{ path: string; id?: string; bytes: number; files: number; cat?: Cat } | null>(null);
   const load = useCallback(() => {
     setLoading(true);
     setErr(null);
     invoke<PlaceTree>("disk_place_tree", { repo: scope.repo, slug: scope.slug })
-      .then((t) => { setTree(t); setSel(null); })
+      .then((t) => setTree(t))
       .catch((e) => setErr(String(e)))
       .finally(() => setLoading(false));
   }, [scope.repo, scope.slug]);
@@ -598,6 +626,7 @@ function PlaceDisk({ scope, name, info, placePath, header, withShared, disk, onE
   }, [tree, withShared, others, scope.repo]);
   const u = tree?.usage;
   const snaps = tree?.volume.snapshots ?? 0;
+  const sel = tm && path ? findPath(tm, path) : null;
   const selNode = sel?.ref?.path ? sel : null;
   const sizeOf = (t: TM) => tmValue(t);
   const askDelete = (path: string, id: string | undefined, bytes: number, files: number, cat?: Cat) => setConfirm({ path, id, bytes, files, cat });
@@ -618,7 +647,7 @@ function PlaceDisk({ scope, name, info, placePath, header, withShared, disk, onE
           </div>
           <div className="dk-body">
             <Treemap root={tm} selected={sel?.key ?? null} light={light}
-              onPick={(t) => { if (t.ref?.slug && t.ref.repo) open({ kind: "place", repo: t.ref.repo, slug: t.ref.slug }); else setSel(t); }} />
+              onPick={(t) => { if (t.ref?.slug && t.ref.repo) open({ kind: "place", repo: t.ref.repo, slug: t.ref.slug }); else pick(t.ref?.path ?? null); }} />
             <div className="dk-side">
               <div className="cap">SELECTED</div>
               {selNode ? (
@@ -679,6 +708,7 @@ function PlaceDisk({ scope, name, info, placePath, header, withShared, disk, onE
           now={async () => {
             await disk.del({ repo: scope.repo, slug: scope.slug, path: confirm.path, id: confirm.id, placePath, label: `${scope.slug}/${confirm.path}` });
             setConfirm(null);
+            if (confirm.path === path) pick(null);
             load();
             void disk.scan([scope.repo], true);
           }}

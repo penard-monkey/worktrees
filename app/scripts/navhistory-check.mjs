@@ -122,5 +122,32 @@ eq("…and two chats are two", H.locKey(C("plan", "c1")) === H.locKey(C("plan", 
 eq("…in the same where", H.whereKey(C("plan", "c1")), H.whereKey(V("ideas", "a")));
 eq("its label names the chat", H.label(C("plan", "c1"), undefined, () => "Jellyfin", () => "Release order"), "Jellyfin · Release order · Plan");
 
+// ── Disk ────────────────────────────────────────────────────────────────────
+const D = (scope, path, under = HOME) => ({ ...under, disk: { scope, ...(path ? { path } : {}) } });
+const DP = { kind: "place", repo: "/r", slug: "b" };
+eq("Disk over a place is not the place", H.locKey(D(DP, null, P("a"))) === H.locKey(P("a")), false);
+eq("…nor another place's Disk over it", H.whereKey(D(DP, null, P("a"))) === H.whereKey(D({ kind: "place", repo: "/r", slug: "c" }, null, P("a"))), false);
+eq("a picked folder is a step in the same where", H.whereKey(D(DP, "target")), H.whereKey(D(DP)));
+eq("…and a location of its own", H.locKey(D(DP, "target")) === H.locKey(D(DP)), false);
+eq("only a place's treemap picks: a path on a project's Disk is dropped",
+  H.normalize(D({ kind: "project", root: "/r" }, "x")), D({ kind: "project", root: "/r" }));
+eq("stray scope fields are dropped", H.normalize({ place: null, disk: { scope: { kind: "project", root: "/r", junk: 1 } } }), D({ kind: "project", root: "/r" }));
+{
+  let h = H.empty();
+  for (const [i, l] of [HOME, D({ kind: "project", root: "/r" }), D(DP), D(DP, "target/debug")].entries()) h = H.record(h, l, 10_000 * (i + 1));
+  eq("the owner's walk is four entries", h.entries.length, 4);
+  h = H.step(h, -1);
+  eq("Back from the folder: the place's treemap", H.current(h), D(DP));
+  h = H.step(h, -1);
+  eq("…then the project's Disk it was opened from", H.current(h), D({ kind: "project", root: "/r" }));
+  h = H.step(h, -1);
+  eq("…then Home, where Disk was opened", H.current(h), HOME);
+  eq("…and Forward goes the other way", H.current(H.step(h, 1)), D({ kind: "project", root: "/r" }));
+}
+eq("Disk labels: a place", H.label(D(DP, "target/debug"), () => "Bravo"), "Disk · Bravo · debug");
+eq("…a project", H.label(D({ kind: "project", root: "/w/worktrees" })), "Disk · worktrees");
+eq("…a workspace", H.label(D({ kind: "workspace", id: "w1" }), undefined, () => "Jellyfin"), "Disk · Jellyfin");
+eq("…everything", H.label(D({ kind: "all" })), "Disk · All projects");
+
 if (failed) { console.log(`\n${failed} failed`); process.exit(1); }
 console.log("navhistory-check: all ok");

@@ -142,4 +142,21 @@ const m = await import(`data:text/javascript;base64,${Buffer.from(js).toString("
 }
 
 if (bad) { console.error(`\n${bad} failure(s)`); process.exit(1); }
+// ── 4. the pick ────────────────────────────────────────────────────────────
+// A treemap pick is kept as a PATH (it is part of the history location), so
+// Back must find the node again in whatever tree is drawn, or say it is gone.
+{
+  const t = m.treeTM({ n: "", own: 0, shared: 0, files: 0, c: "source", dir: true, k: [
+    { n: "target", p: "target", own: 0, shared: 0, files: 0, c: "build", dir: true, k: [
+      { n: "debug", p: "target/debug", own: 5, shared: 0, files: 1, c: "build" },
+      { n: "", own: 2, shared: 0, files: 1, c: "build" },
+    ] },
+  ] }, false);
+  const f = m.findPath(t, "target/debug");
+  if (f?.ref?.path !== "target/debug") fail(`findPath: the picked folder is found, got ${f?.ref?.path}`);
+  else ok("findPath: a picked path is found again in the tree");
+  if (m.findPath(t, "target/release") !== null) fail("findPath: a path that is gone answers null");
+  else ok("findPath: a path that is gone (deleted, rescanned away) answers null");
+}
+
 console.log("\nall disk checks passed");

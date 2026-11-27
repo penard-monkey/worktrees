@@ -68,6 +68,15 @@ export type TM = {
 
 export const tmValue = (t: TM): number => (t.kids ? t.kids.reduce((a, k) => a + tmValue(k), 0) : t.value);
 
+/** The node a picked path names, or null once it is gone (deleted, rescanned
+ *  away). The pick lives in the history location as a path, not a node, so
+ *  Back finds it again in whatever tree is drawn now. */
+export function findPath(t: TM, path: string): TM | null {
+  if (t.ref?.path === path) return t;
+  for (const k of t.kids ?? []) { const f = findPath(k, path); if (f) return f; }
+  return null;
+}
+
 /** A place as category leaves: its own bytes, and (with `shared`) the bytes
  *  it shares as one hatched leaf. */
 export function placeTM(repo: string, u: PlaceUsage, withShared: boolean): TM {

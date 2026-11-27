@@ -10,6 +10,17 @@ export type DockTab = "files" | "terminal" | "docs" | "plan" | "prs" | "workspac
 /** A workspace view's tabs (wsview.ts says which are drawn). */
 export type WsTab = "overview" | "memory" | "plan" | "ideas" | "chats";
 
+/** The Disk view over the panes (DiskView.tsx): which scope, and the file or
+ *  folder picked in a place's treemap. Restated here, not imported from
+ *  diskmodel.ts, because this module has no imports (the check loads it as a
+ *  data: module). */
+export type DiskScope =
+  | { kind: "all" }
+  | { kind: "workspace"; id: string }
+  | { kind: "project"; root: string }
+  | { kind: "place"; repo: string; slug: string };
+export type DiskAt = { scope: DiskScope; path?: string };
+
 /** What the panes show. `place: null` is Home, or the workspace view when `ws`
  *  names one: its id, its tab, on Ideas the idea picked (on Memory the file), and the chat in its
  *  middle column. `dock.file` only means anything
@@ -20,6 +31,10 @@ export type Loc = {
   ws?: { id: string; tab: WsTab; doc?: string; chat?: string };
   agent?: string;
   dock?: { tab: DockTab; file?: { path: string; line?: number; col?: number }; shell?: number };
+  /** Disk, drawn over what the rest of the location shows. That rest stays a
+   *  part of the entry: closing Disk goes back to it, and so does Back from the
+   *  first Disk screen, because that is the entry before. */
+  disk?: DiskAt;
 };
 
 export type History = {
@@ -35,7 +50,18 @@ export const COALESCE_MS = 600;
 
 export const empty = (): History => ({ entries: [], index: -1, at: 0 });
 
+const diskScope = (s: DiskScope): DiskScope =>
+  s.kind === "place" ? { kind: "place", repo: s.repo, slug: s.slug }
+    : s.kind === "project" ? { kind: "project", root: s.root }
+    : s.kind === "workspace" ? { kind: "workspace", id: s.id } : { kind: "all" };
+/** A place's treemap is the only scope with something to pick. */
+const diskAt = (d: DiskAt): DiskAt => ({ scope: diskScope(d.scope), ...(d.path && d.scope.kind === "place" ? { path: d.path } : {}) });
+
 export const normalize = (l: Loc): Loc => {
+  const out = under(l);
+  return l.disk ? { ...out, disk: diskAt(l.disk) } : out;
+};
+const under = (l: Loc): Loc => {
   if (!l.place) return l.ws ? { place: null, ws: { id: l.ws.id, tab: l.ws.tab, ...((l.ws.tab === "ideas" || l.ws.tab === "memory") && l.ws.doc ? { doc: l.ws.doc } : {}), ...(l.ws.chat ? { chat: l.ws.chat } : {}) } } : { place: null };
   const out: Loc = { place: { repo: l.place.repo, slug: l.place.slug } };
   if (l.agent) out.agent = l.agent;
@@ -56,7 +82,8 @@ export const locKey = (l: Loc): string => JSON.stringify(normalize(l));
 
 /** WHERE a location is, whatever it shows there: the place, the workspace, or
  *  Home. What history waits to see land when it puts one back. */
-export const whereKey = (l: Loc): string => (l.place ? `p|${l.place.repo}|${l.place.slug}` : l.ws ? `w|${l.ws.id}` : "home");
+export const whereKey = (l: Loc): string => (l.place ? `p|${l.place.repo}|${l.place.slug}` : l.ws ? `w|${l.ws.id}` : "home")
+  + (l.disk ? `|disk|${JSON.stringify(diskScope(l.disk.scope))}` : "");
 
 export const current = (h: History): Loc | null => h.entries[h.index] ?? null;
 
@@ -146,6 +173,13 @@ export const WS_TAB_LABEL: Record<WsTab, string> = { overview: "Overview", memor
  *  what the nav calls it (a title, `(main)`); the slug otherwise. `wsName` is
  *  a workspace's name, `chatName` one of its chats'. */
 export const label = (l: Loc, nameOf?: (repo: string, slug: string) => string, wsName?: (id: string) => string | null, chatName?: (id: string, conv: string) => string | null): string => {
+  if (l.disk) {
+    const s = l.disk.scope;
+    const what = s.kind === "place" ? nameOf?.(s.repo, s.slug) ?? s.slug
+      : s.kind === "project" ? base(s.root)
+      : s.kind === "workspace" ? wsName?.(s.id) ?? "A workspace" : "All projects";
+    return ["Disk", what, l.disk.path ? base(l.disk.path) : null].filter(Boolean).join(" · ");
+  }
   if (!l.place) {
     if (!l.ws) return "Home";
     const chat = l.ws.chat ? chatName?.(l.ws.id, l.ws.chat) ?? "a chat" : null;
