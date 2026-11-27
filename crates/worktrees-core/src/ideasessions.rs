@@ -462,7 +462,7 @@ mod tests {
         let resumed = launch_line("claude", &idea, &c, &s, Start::Resume, hook.clone()).unwrap();
         assert_eq!(resumed, format!("claude --name '{s}' --resume '{}' --plugin-dir '/data/claude-prompt'", c.session_id), "no opener and no new id on a resume");
         let pane = pane0("claude", &idea, &c, &s, Start::Fresh, hook).unwrap();
-        assert!(pane.starts_with("exec \"${SHELL:-/bin/sh}\" -ic 'exec claude --name"), "{pane}");
+        assert!(pane.starts_with("exec env DISABLE_AUTO_UPDATE=true \"${SHELL:-/bin/sh}\" -ic 'unset DISABLE_AUTO_UPDATE; exec claude --name"), "{pane}");
         assert!(pane0("codex", &idea, &c, &s, Start::Fresh, vec![]).is_err(), "Claude only");
     }
 

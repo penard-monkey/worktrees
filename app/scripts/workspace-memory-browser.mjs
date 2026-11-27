@@ -6,7 +6,7 @@
 //   PLAYWRIGHT_MODULE=<…>/node_modules/playwright/index.mjs \
 //     IDEAS_MOCK_URL=http://localhost:1466 node app/scripts/workspace-memory-browser.mjs
 //
-// What it holds: the chip and its purple dot; the Overview's column (the index as
+// What it holds: the Memory tab's purple dot; the Overview's column (the index as
 // it reads, cut, what last changed it, Diff, Undo); the Memory tab in Read with no
 // editor fetched, the file list at two widths, a filter, links in place with ‹ ›,
 // a missing link dim, an idea: link, images, a preview; History filtered and whole,
@@ -36,15 +36,19 @@ async function boot(page, betas = ["beta_workspace_chats"], query = "") {
     if (!sessionStorage.getItem("wt-mock-ui-state")) sessionStorage.setItem("wt-mock-ui-state", JSON.stringify(s));
   }, { places_side: "left", dock_side: "right", settings_rev: 5, nav_pinned: true, nav_view: "workspaces", ...Object.fromEntries(betas.map((b) => [b, true])) });
   await page.goto(`${BASE}/?ideas=seed&workspaces=1&folding=0&memtick=150${query}`);
-  await page.waitForSelector("[data-testid=ws-doc-memory]");
+  await page.waitForSelector("[data-testid=ws-name]");
   return (await call(page, "workspaces_list", {})).workspaces.find((w) => w.name === "Everything").id;
 }
 const name = (page, n = "Everything") => page.locator("[data-testid=ws-name]", { hasText: n }).first().click();
+// The workspace's Memory tab, through its overview: the nav card has no
+// document chips since 2026-11-26.
+const memTab = async (page, n = "Everything") => { await name(page, n); await page.waitForSelector("[data-testid=ws-tab][data-tab=memory]"); await tab(page, "memory"); };
+const freshDot = "[data-testid=ws-tab][data-tab=memory] [data-testid=memory-fresh]";
 
 async function overview(page, tag, eng) {
   const ws = await boot(page);
-  ok(await until(page, () => !!document.querySelector("[data-testid=ws-doc-memory] [data-testid=memory-fresh]")) && !(await page.locator("[data-testid=ws-doc-memory]").first().evaluate((e) => e.classList.contains("none"))), `${tag} the Memory chip has something behind it, and the purple dot: it changed since you looked`);
   await name(page);
+  ok(await until(page, (q) => !!document.querySelector(q), freshDot), `${tag} the Memory tab wears the purple dot: it changed since you looked`);
   await page.waitForSelector("[data-testid=memory-excerpt]");
   ok(await page.evaluate(() => { const e = document.querySelector("[data-testid=memory-excerpt]"); const h1 = e.querySelector(".md-h1"), h2 = e.querySelector(".md-h2"), p = e.querySelector("p"); const px = (x) => parseFloat(getComputedStyle(x).fontSize); return h1.getBoundingClientRect().height === 0 && px(h2) <= px(p) * 1.15; }), `${tag} its headings are a card's, and its own title is not drawn twice`);
   ok(/What this workspace is for/.test(await page.locator("[data-testid=memory-excerpt]").innerText()) && /MEMORY\.md · [\d.]+ (B|KB) · 5 files/.test(await page.locator("[data-testid=ws-ov-card-memory] .wsf-card-side").innerText()), `${tag} the Overview has the index as it reads, its size and the file count`);
@@ -60,7 +64,7 @@ async function overview(page, tag, eng) {
   ok(await isTab(page, "memory") && await isDoc(page, "MEMORY.md"), `${tag} which opens the index on the Memory tab`);
   await tab(page, "overview");
   await page.waitForTimeout(200);
-  const dot = () => page.evaluate(() => !!document.querySelector("[data-testid=ws-docs]").querySelector("[data-testid=memory-fresh]"));
+  const dot = () => page.evaluate((q) => !!document.querySelector(q), freshDot);
   ok(!(await dot()), `${tag} and the dot goes, and stays gone: it was looked at`);
   await page.evaluate((id) => window.__mock.memoryEdit(id, "topics/nas-layout.md", "# NAS layout\n\nChanged by an agent.\n"), ws);
   await page.waitForTimeout(400);
@@ -73,7 +77,7 @@ async function overview(page, tag, eng) {
 
 async function tabs(page, tag, eng) {
   const ws = await boot(page, ["beta_workspace_chats", "beta_ideas"]);
-  await page.locator("[data-testid=ws-doc-memory]").first().click();
+  await memTab(page);
   ok(await isDoc(page, "MEMORY.md") && /What this workspace is for/.test(await read(page)), `${tag} the Memory tab opens the index, in Read`);
   await page.waitForTimeout(400);
   ok(!(await fetched(page)), `${tag} …and no editor is fetched`);
@@ -137,7 +141,7 @@ async function tabs(page, tag, eng) {
 
 async function hist(page, tag, eng) {
   const ws = await boot(page);
-  await page.locator("[data-testid=ws-doc-memory]").first().click();
+  await memTab(page);
   await isDoc(page, "MEMORY.md");
   await history(page);
   ok(await until(page, () => document.querySelectorAll("[data-testid=memory-log-row]").length > 0) && await histRows(page) === "edit,fold,undo,fold,made", `${tag} the index's changes, newest first (${await histRows(page)})`);
@@ -221,11 +225,11 @@ async function commits(page, tag) {
 
 async function states(page, tag) {
   const ws = await boot(page, ["beta_workspace_chats"], "&memory=none");
-  ok(await page.locator("[data-testid=ws-doc-memory]").first().evaluate((e) => e.classList.contains("none")) && !(await page.$("[data-testid=memory-fresh]")), `${tag} no memory: a dashed chip, no dot`);
   await name(page);
+  ok(!(await page.$("[data-testid=memory-fresh]")), `${tag} no memory: no dot`);
   ok(await until(page, () => /No memory yet\. It starts with the first chat\./.test(document.querySelector("[data-testid=ws-ov-card-memory]")?.textContent ?? "")), `${tag} the Overview says so`);
   ok(await page.evaluate(() => document.querySelector("[data-testid=ws-ov-card-memory]").getBoundingClientRect().height < 180), `${tag} …in a card as tall as its words`);
-  await page.locator("[data-testid=ws-doc-memory]").first().click();
+  await memTab(page);
   ok(await until(page, () => !!document.querySelector("[data-testid=ws-no-memory]")) && !(await page.$("[data-testid=ws-side]")), `${tag} and the tab, with no list`);
   await page.click("[data-testid=ws-make-memory]");
   ok(await isDoc(page, "MEMORY.md") && /What this workspace is for/.test(await read(page)), `${tag} Make memory makes it, and opens the index`);
@@ -251,7 +255,7 @@ async function states(page, tag) {
   // ── off ──
   await page.keyboard.press("Meta+Comma");
   await page.click("[data-testid=beta-workspace-chats]");
-  ok(await until(page, () => !document.querySelector("[data-testid=main-doc]") && !document.querySelector("[data-testid=ws-doc-memory]")), `${tag} turned off, the open file is closed and the chip is gone`);
+  ok(await until(page, () => !document.querySelector("[data-testid=main-doc]") && !document.querySelector("[data-testid=ws-tab][data-tab=memory]")), `${tag} turned off, the open file is closed and the tab is gone`);
 }
 
 /** Slice 5: a person writes in it, beside chats that may. */
@@ -259,7 +263,7 @@ async function edit(page, tag, eng) {
   const ws = await boot(page, ["beta_workspace_chats", "beta_ideas"]);
   await call(page, "workspace_link_idea", { id: ws, idea: "01JC8Z4K3M9QX2T7VB00000901" });
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
-  await page.locator("[data-testid=ws-doc-memory]").first().click();
+  await memTab(page);
   await isDoc(page, "MEMORY.md");
   ok(!(await page.$("[data-testid=memory-may-edit]")), `${tag} in Read nothing is said of live chats`);
   await page.click("[data-testid=main-doc] [data-testid=ideas-mode-edit]");
@@ -358,7 +362,7 @@ async function edit(page, tag, eng) {
 
 async function themes(page, tag, eng) {
   await boot(page, ["beta_workspace_chats", "beta_ideas"]);
-  await page.locator("[data-testid=ws-doc-memory]").first().click();
+  await memTab(page);
   await isDoc(page, "MEMORY.md");
   for (const w of [1600, 1440, 1200, 900]) {
     await page.setViewportSize({ width: w, height: 900 });
