@@ -3413,6 +3413,8 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       const memory = mockMemory.remove(id);
       const held = mockWsDefs!.some((w) => w.id === id) && ((mockChats.get(id)?.length ?? 0) > 0 || memory);
       mockWsDefs = mockWsDefs!.filter((w) => w.id !== id);
+      // Its dock shells go with it (`term::forget_shell_scope`).
+      for (const k of [...shellSidecars.keys()]) if (k === sidecarKey("~", id)) shellSidecars.delete(k);
       // Its live chats end and its folder is moved, never deleted.
       mockChats.delete(id);
       chatSessionsPush();
@@ -5335,6 +5337,12 @@ Phase 3: Frontend pane and mock harness
     // registry the same way — spawn-or-reattach keyed by repo+slug+index — so a
     // tab flip re-renders the banner exactly where the real one replays its ring.
     case "shell_open": {
+      // A workspace's dock shells (wsdock.ts): the engine's own refusal for
+      // one `workspaces.json` does not list (`term::shell_start`).
+      if (args.repo === "~") {
+        mockWsView();
+        if (!mockWsDefs!.some((w) => w.id === args.slug)) throw `no such workspace: ${String(args.slug)}`;
+      }
       const i = (args.index as number) ?? 1;
       const k = sidecarKey(args.repo, args.slug);
       const tk = tabKey(args.repo as string, args.slug as string, i);
@@ -5355,7 +5363,7 @@ Phase 3: Frontend pane and mock harness
       const banner =
         "\x1b[38;5;110m worktrees \x1b[0m mock shell — design harness\r\n" +
         "\x1b[90m(a real login shell only in the Tauri app)\x1b[0m\r\n\r\n" +
-        `\x1b[32m➜\x1b[0m  \x1b[36m${args.slug} sh ${i}\x1b[0m $ \x1b[5m▌\x1b[0m\r\n`;
+        `\x1b[32m➜\x1b[0m  \x1b[36m${args.repo === "~" ? "~" : args.slug} sh ${i}\x1b[0m $ \x1b[5m▌\x1b[0m\r\n`;
       // `replay_cols` is snake_case because it comes off a Rust struct verbatim
       // (serde is pass-through here, as for `app_version`).
       const gen = ++shellGen;

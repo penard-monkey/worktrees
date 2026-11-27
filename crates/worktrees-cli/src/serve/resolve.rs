@@ -98,7 +98,13 @@ pub enum Obj {
     /// that id may name someone else's attach; it must neither close it nor
     /// turn a routine stale close into an error.
     Close(&'static str),
-    /// A dock shell: `place(repo, slug)` and a `u32` index.
+    /// Whose dock shells `(repo, slug)` names: a place (`place(repo, slug)`),
+    /// or, for `repo` = `term::WORKSPACE_SCOPE`, a workspace (`slug` its
+    /// id, `workspace(slug)`): the CONSOLE's alone, since its shells start in
+    /// the host's home directory. Any other caller is refused as an
+    /// out-of-scope place is, before `workspaces.json` is read.
+    ShellScope(&'static str, &'static str),
+    /// A dock shell: `shell_scope(repo, slug)` and a `u32` index.
     Shell(&'static str, &'static str, &'static str),
     /// An optional nested `{repo, slug, index}` (`resolve_term_paths.shell`).
     ShellRef(&'static str),
@@ -182,7 +188,7 @@ impl Obj {
             SessionIn(s, _) => vec![s],
             Idea(a) | Share(a) | Workspace(a) => vec![a],
             IdeaConv(c, i) | WorkspaceChat(c, i) => vec![c, i],
-            Place(r, s) => vec![r, s],
+            Place(r, s) | ShellScope(r, s) => vec![r, s],
             SessionOf(s, _, _) => vec![s],
             Shell(r, s, i) => vec![r, s, i],
             Global | Filtered(_) | All | NotRemote | Guest => vec![],
@@ -750,8 +756,18 @@ impl St<'_> {
                     return Err(Refusal::new(RefusalKind::NoopNotOwned, format!("terminal {id} is not this connection's")));
                 }
             }
+            Obj::ShellScope(r, s) => {
+                if args.raw(r).as_str() == Some(worktrees_api::term::WORKSPACE_SCOPE) {
+                    if !self.cx.caller.is_console() {
+                        return Err(Refusal::not_found("a workspace's dock shell is the console's"));
+                    }
+                    self.resolve(row, &Obj::Workspace(s), args)?;
+                } else {
+                    self.resolve(row, &Obj::Place(r, s), args)?;
+                }
+            }
             Obj::Shell(r, s, i) => {
-                self.resolve(row, &Obj::Place(r, s), args)?;
+                self.resolve(row, &Obj::ShellScope(r, s), args)?;
                 let _: u32 = self.get(args, i)?;
             }
             Obj::ShellRef(a) => {
@@ -762,7 +778,7 @@ impl St<'_> {
                     let mut inner = Args(serde_json::Map::new());
                     inner.set("repo", Value::from(sh.repo));
                     inner.set("slug", Value::from(sh.slug));
-                    self.resolve(row, &Obj::Place("repo", "slug"), &mut inner)?;
+                    self.resolve(row, &Obj::ShellScope("repo", "slug"), &mut inner)?;
                     let mut fixed = serde_json::Map::new();
                     fixed.insert("repo".into(), inner.raw("repo"));
                     fixed.insert("slug".into(), inner.raw("slug"));
@@ -1825,6 +1841,61 @@ mod tests {
         let cx = call_as(caller, reg);
         let e = try_row("reorder_projects", &cx, &g, json!({ "roots": [s(&t.a)] }), &t.world()).unwrap_err();
         assert_eq!(e.wire(), json!(ERR_DENIED));
+    }
+
+    // ── shell_scope(…): a workspace's dock shells ────────────────────────
+
+    /// `cx` over the `workspaces.json` in `top`, which lists one workspace
+    /// (made on first use); its id.
+    fn with_a_workspace(mut cx: Call, top: &Path) -> (Call, String) {
+        let file = top.join("workspaces.json");
+        let listed = worktrees_core::workspaces::read_at(&file).unwrap().workspaces.first().map(|w| w.id.clone());
+        let id = listed.unwrap_or_else(|| worktrees_core::workspaces::create_at(&file, "Home").unwrap().id);
+        cx.ctx = cx.ctx.clone().with_workspaces_file(file);
+        (cx, id)
+    }
+
+    /// A workspace's shells start in the host's home directory, so they are
+    /// the console's: it reaches a workspace `workspaces.json` lists and no
+    /// other, and a device holding every capability and scope `"*"` is
+    /// refused the scope on every shell row, in the words an out-of-scope
+    /// place gets, so it learns nothing of which workspaces exist. A place's
+    /// shell is unchanged for both.
+    #[test]
+    fn a_workspaces_shells_are_the_consoles_alone() {
+        let t = two("wsshell");
+        let w = t.world();
+        let (con, all) = console();
+        let (con, id) = with_a_workspace(con, &t.top);
+        let mut reg = Devices::default();
+        reg.devices.insert(DeviceId::new("admin"), (PrincipalId::owner(), Grant::everything()));
+        let caller = Caller::paired(PrincipalId::owner(), DeviceId::new("admin"));
+        let reg: Arc<dyn worktrees_core::authz::Registry> = Arc::new(reg);
+        let star = authz::effective(&*reg, &caller);
+        let (dev, _) = with_a_workspace(call_as(caller, reg), &t.top);
+        let shell = |slug: &str| json!({ "repo": "~", "slug": slug, "index": 1, "cols": 80, "rows": 24, "data": [], "gen": 1, "keep_cwd": false });
+        let rows = ["list_shell_sessions", "shell_open", "shell_write", "shell_resize", "shell_detach", "close_shell_session"];
+        for cmd in rows {
+            let a = try_row(cmd, &con, &all, shell(&id), &w).unwrap_or_else(|e| panic!("{cmd}: {e:?}"));
+            assert_eq!((a.raw("repo"), a.raw("slug")), (json!("~"), json!(id)), "{cmd}: arrives as sent");
+            let e = try_row(cmd, &con, &all, shell("01NOPE"), &w).unwrap_err();
+            assert_eq!(e.kind, RefusalKind::NotFound, "{cmd}: a workspace nobody made");
+            for slug in [id.as_str(), "01NOPE"] {
+                let e = try_row(cmd, &dev, &star, shell(slug), &w).unwrap_err();
+                assert_eq!((e.kind, e.wire()), (RefusalKind::NotFound, json!(ERR_NOT_FOUND)), "{cmd} {slug}: a device");
+            }
+            // A place's shell, as it was.
+            let place = json!({ "repo": s(&t.a), "slug": "feat", "index": 1, "cols": 80, "rows": 24, "data": [], "gen": 1, "keep_cwd": false });
+            assert!(try_row(cmd, &con, &all, place.clone(), &w).is_ok(), "{cmd}: the console's place shell");
+            assert!(try_row(cmd, &dev, &star, place, &w).is_ok(), "{cmd}: a device's place shell");
+        }
+        // The nested reference of `resolve_term_paths` by the same rule.
+        let refs = |cx: &Call, g: &Grant, slug: &str| {
+            try_row("resolve_term_paths", cx, g, json!({ "root": s(&t.a), "shell": { "repo": "~", "slug": slug, "index": 1 }, "paths": [] }), &w)
+        };
+        assert!(refs(&con, &all, &id).is_ok());
+        assert_eq!(refs(&con, &all, "01NOPE").unwrap_err().kind, RefusalKind::NotFound);
+        assert_eq!(refs(&dev, &star, &id).unwrap_err().wire(), json!(ERR_NOT_FOUND));
     }
 
     #[test]

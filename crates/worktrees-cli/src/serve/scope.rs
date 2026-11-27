@@ -270,8 +270,9 @@ pub const EVENTS: &[(&str, Event)] = &[
     // `{drafts: [{path, text, queued}]}`: the composer TEXT, by session cwd —
     // the event twin of `list_drafts`.
     ("sessions:drafts", Event::Drafts),
-    // `{repo, slug, index}`: a dock shell exited.
-    ("shell:exit", Event::ByPath("repo")),
+    // `{repo, slug, index}`: a dock shell exited — by `repo`, or the
+    // console's alone for a workspace's (`term::WORKSPACE_SCOPE`).
+    ("shell:exit", Event::Shell),
     // `worktrees show` is run by someone at the host (§9.1).
     ("app:open-doc", Event::Console),
     // `{alert, …}`: §5.3's alerts are for the person at the host, and a
@@ -400,6 +401,10 @@ pub enum Event {
     Everyone,
     Busy,
     ByPath(&'static str),
+    /// `shell:exit`: [`Event::ByPath`] over `repo`, except a workspace's
+    /// shell (`repo` = `term::WORKSPACE_SCOPE`), which names no project and
+    /// is the console's alone — whatever a device's scope, `"*"` included.
+    Shell,
     Drafts,
     Console,
     /// The console, and the callers whose principal the payload's `to`
@@ -449,6 +454,9 @@ pub fn event(name: &str, payload: &Value, caller: &Caller, grant: &Grant, roots:
         }
         Event::Everyone => return Some(payload.clone()),
         Event::Console => return caller.is_console().then(|| payload.clone()),
+        Event::Shell if payload.get("repo").and_then(Value::as_str).is_none_or(worktrees_api::term::is_workspace_scope) => {
+            return caller.is_console().then(|| payload.clone());
+        }
         _ if scope.is_all() => return Some(payload.clone()),
         _ => {}
     }
@@ -457,6 +465,7 @@ pub fn event(name: &str, payload: &Value, caller: &Caller, grant: &Grant, roots:
     let view = View { projects: scope, roots: &roots, caller, names: &NoDevices };
     match how {
         Event::Everyone | Event::Console | Event::Principals | Event::NamedWorkspaces => unreachable!("answered above"),
+        Event::Shell => payload.get("repo").and_then(Value::as_str).is_some_and(|p| covers(&view, p)).then(|| payload.clone()),
         Event::ByPath(field) => payload.get(field).and_then(Value::as_str).is_some_and(|p| covers(&view, p)).then(|| payload.clone()),
         Event::Drafts => {
             let mut v = payload.clone();
@@ -636,6 +645,24 @@ mod tests {
 
     fn ev(name: &str, p: &Value, c: &Caller, g: &Grant) -> Option<Value> {
         event(name, p, c, g, &mut reg)
+    }
+
+    /// A workspace's dock shell names no project: its exit reaches the
+    /// console and no device, a device whose scope is `"*"` included, while a
+    /// place's shell is judged by its repo as before.
+    #[test]
+    fn a_workspace_shells_exit_reaches_the_console_alone() {
+        let ws = json!({"repo": worktrees_api::term::WORKSPACE_SCOPE, "slug": "01WS", "index": 1});
+        let all = Grant { capabilities: Caps::ALL, projects: Projects::All };
+        assert_eq!(ev("shell:exit", &ws, &Caller::console(), &Grant::everything()), Some(ws.clone()));
+        for g in [all.clone(), scoped(&["/r/a"])] {
+            assert_eq!(ev("shell:exit", &ws, &phone(), &g), None, "{:?}", g.projects);
+            assert_eq!(ev("shell:exit", &json!({"slug": "s", "index": 1}), &phone(), &g), None, "no repo, no device");
+        }
+        let place = json!({"repo": "/r/a", "slug": "s", "index": 1});
+        assert_eq!(ev("shell:exit", &place, &phone(), &all), Some(place.clone()));
+        assert_eq!(ev("shell:exit", &place, &phone(), &scoped(&["/r/a"])), Some(place.clone()));
+        assert_eq!(ev("shell:exit", &place, &phone(), &scoped(&["/r/b"])), None);
     }
 
     /// The console's scope is `"*"`: every projection is the identity, which

@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+
+- **A workspace's view has a terminal.** With a workspace open (its chats, memory or overview, no place selected), the Terminal button in the right rail now works: its shells start in your home folder, and a new tab starts there too. Each workspace has its own tabs, and they are remembered like a place's: their names, the tab in front, the folder each was last in, its output and its command history all come back after a restart. Opening or closing the terminal in a workspace leaves every place's panels as they were. Files, Docs and Plan stay a place's. Removing a workspace closes its shells and forgets what they kept. These shells run on the computer worktrees runs on, so a paired device cannot open one.
+
 ## [0.55.0] - 2026-11-27
 
 ### Added

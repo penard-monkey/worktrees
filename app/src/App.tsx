@@ -2,7 +2,8 @@ import { adaptClaude, adaptCodex, adaptKimi, checking, compactUsage, detailMessa
 import { HARNESSES, HARNESS_LABEL, NEEDS_MODEL, liveHarness, type Harness } from "./harness";
 import { ModelPicker, defaultModel, modelOk, useAgentModels, type PiStatus } from "./ModelPicker";
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ComponentType } from "react";
-import { Channel, engineState, grantHas, invoke, listen } from "./ipc";
+import { Channel, engineState, grantHas, invoke, listen, remoteHost } from "./ipc";
+import { WORKSPACE_SCOPE, dockEligibleAt, dockTabAt, dockWhyFor, wsDockKey, wsOfDockKey } from "./wsdock";
 import { hostOnly, pickDirForHost, revealOnHost } from "./onhost";
 import { RemoteNotice, useEngine, useRemoteNotice } from "./EngineGate";
 import { copyToClipboard } from "./clipboard";
@@ -477,6 +478,9 @@ function findTarget(s: {
   dockTab: Settings["dock_tab"]; mainTermUp: boolean; last: Surface;
   /** The Terminal is in the dock's LOWER slot (Settings → Layout), on screen. */
   lowerUp: boolean;
+  /** The dock's Terminal tab has shells: the place's session is up, or the
+   *  dock is a workspace's (whose shells need no session). Absent: `mainTermUp`. */
+  dockTermUp?: boolean;
 }): null | Surface {
   if (s.reading && s.dockFile) return "read";
   // The Terminal tab renders NO shell when the place's session is down (dock
@@ -491,7 +495,7 @@ function findTarget(s: {
   //  none is worse than no target (above) — ⌘F there goes to the terminal.
   const dockOk =
     s.dockShown &&
-    (s.dockTab === "terminal" ? s.mainTermUp
+    (s.dockTab === "terminal" ? s.dockTermUp ?? s.mainTermUp
       : s.dockTab === "docs" ? true
       : s.dockTab === "plan" ? false
       : !!s.dockFile);
@@ -604,8 +608,8 @@ function DockRailGroup({ items, shown, tab, lower, why, prsView, onPick }: {
   /** The section in the lower slot, ON SCREEN — lit with the column, and its
    *  click focuses it rather than collapsing anything. */
   lower: Settings["dock_lower"];
-  /** Why every button is disabled, or null when they are live. */
-  why: string | null;
+  /** Why this button is disabled, or null when it is live (`dockWhyFor`). */
+  why: (key: Settings["dock_tab"]) => string | null;
   prsView: { attention_count: number; open_count: number } | null | undefined;
   /** `on`: the button was lit when pressed, i.e. the press collapses the dock. */
   onPick: (key: Settings["dock_tab"], on: boolean) => void;
@@ -613,18 +617,19 @@ function DockRailGroup({ items, shown, tab, lower, why, prsView, onPick }: {
   return (
     <>
       {items.map((d) => {
+        const off = why(d.key);
         const below = shown && lower === d.key;
         const on = shown && (tab === d.key || below);
         return (
           <button
             key={d.key}
             className={"rail-icon" + (on ? " active" : "")}
-            disabled={!!why}
+            disabled={!!off}
             // The entry's own key, not an either/or over two of them: a
             // ternary here files any tab it does not name under another
             // tab's key, silently. See `DOCK_RAIL`.
             data-track={d.track}
-            title={why ? `${d.title} — ${why}` : below ? `${d.title} — below the panel; click to focus it` : on ? `hide ${d.title.toLowerCase()} (⌘J)` : `${d.title} (⌘J)`}
+            title={off ? `${d.title} — ${off}` : below ? `${d.title} — below the panel; click to focus it` : on ? `hide ${d.title.toLowerCase()} (⌘J)` : `${d.title} (⌘J)`}
             onClick={() => onPick(d.key, on)}
           >
             {d.icon}
@@ -1631,8 +1636,9 @@ function TermTabRename({ initial, onCommit, onCancel }: {
 
 function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken, hydratedTick, names, onRename, tabs, onTabs, activeTab, onActiveTab, goto, onFront, onError, root, onOpenPath, findOpen, findToken, onFindClose }: {
   repo: string; slug: string; sessionUp: boolean; termVersion: number; focusToken: number; addToken: number;
-  /** ⌘-clickable paths in the shells (see `TermLinks`). */
-  root: string; onOpenPath: (path: string, line?: number, col?: number) => void;
+  /** ⌘-clickable paths in the shells (see `TermLinks`). No `onOpenPath`, no
+   *  links: a workspace's shells have no Files tab to open one in. */
+  root: string; onOpenPath?: (path: string, line?: number, col?: number) => void;
   /** Bumped once, when persisted settings land — see the restore below. */
   hydratedTick: number;
   names: Record<number, string>; onRename: (index: number, name: string | null) => void;
@@ -4712,11 +4718,15 @@ function App() {
   // `eff` is what the UI must READ everywhere the dock is concerned — reading
   // `settings.dock_*` directly is the bug this indirection exists to prevent.
   const selKey = sel ? placeKey(sel.repo, sel.slug) : null;
-  const eff = panelsFor(settings, selKey);
+  // (`eff`, what the UI reads, is declared below `dockEligible`: in a
+  // workspace's view the dock's record is the workspace's.)
   // The selected place, for callbacks that must stay dependency-free (see
   // `toggleDock`, registered once in the keydown effect).
   const selRef = useRef(sel);
   selRef.current = sel;
+  // The workspace whose view owns the dock while no place is selected
+  // (`wsDock` below), for `updatePanels`, which reads it as it reads `selRef`.
+  const wsDockRef = useRef<string | null>(null);
   // Settings as they are RIGHT NOW, for an effect that must NOT re-run when
   // they change. The file restore below is exactly that: its trigger is a place
   // switch, and a dependency on `settings` would re-fire it on every unrelated
@@ -5775,9 +5785,22 @@ function App() {
   const updatePanels = useCallback((patch: DockPatch | ((cur: PlacePanels) => DockPatch)) => {
     setSettings((prev) => {
       const s = selRef.current;
-      const key = s ? placeKey(s.repo, s.slug) : null;
+      const wsId = s ? null : wsDockRef.current;
+      const key = s ? placeKey(s.repo, s.slug) : wsId ? placeKey(WORKSPACE_SCOPE, wsId) : null;
       const cur = panelsFor(prev, key);
       const p = typeof patch === "function" ? patch(cur) : patch;
+      // A workspace's dock (wsdock.ts) is its own and nobody's seed: only its
+      // record is written, never a global, so opening, closing or widening it
+      // there moves no place's dock — and never `dock_tab`, which it does not
+      // have (it shows its Terminal whatever the tab says). Pre-hydration it
+      // stashes nothing: the stash is merged over the globals.
+      if (wsId && key) {
+        const own: PlacePanels = { dock_open: p.dock_open ?? cur.dock_open, dock_tab: "terminal", dock_width: p.dock_width ?? cur.dock_width };
+        const next: Settings = { ...prev, place_panels: { ...(prev.place_panels ?? {}), [key]: own } };
+        applySettings(next);
+        if (hydrated.current) saveSettings(next);
+        return next;
+      }
       // The zoom is the one field that must NOT be filled in from `cur`, which
       // falls back to the global: every dock toggle would freeze whatever the
       // seed happened to be into a place you never chose a size in, and then —
@@ -5826,6 +5849,22 @@ function App() {
       return next;
     });
   }, []);
+  // The workspace whose view owns the dock: shells in the home directory, a
+  // Terminal alone (wsdock.ts). The one the main area shows (the frame's
+  // `wsShown`, further down, which this cannot read yet), with no place
+  // selected at all, on this machine's own engine: the shells are the
+  // console's, and a remote window is no console.
+  const wsDock = !sel && !diskOpen && !guestOpen && remoteHost() === null && wsOpen !== null
+    && (frameOn || (docStuck !== null && mainDoc !== null))
+    && !!wsList?.workspaces.some((w) => w.id === wsOpen) ? wsOpen : null;
+  wsDockRef.current = wsDock;
+  // A space owns its dock: what is open, which tab, how wide. `settings` holds
+  // the LAST-USED values (the seed a never-visited place inherits), and
+  // `place_panels[key]` overrides them for a place you have set up before.
+  // `eff` is what the UI must READ everywhere the dock is concerned — reading
+  // `settings.dock_*` directly is the bug this indirection exists to prevent.
+  // A workspace's record is `~|<id>`, and its tab is always the Terminal.
+  const eff = wsDock ? { ...panelsFor(settings, wsDockKey(wsDock)), dock_tab: "terminal" as const } : panelsFor(settings, selKey);
   // A place left on the Pull requests tab, reopened where there is no such tab
   // (a project not on GitHub, or the feature switched off): fall back to Files,
   // once, rather than a tab whose icon does not exist. Waits for THIS project's
@@ -5959,6 +5998,10 @@ function App() {
   // tracked at all reports nothing either way, which is why untracking has its
   // own drop (see removeProject).
   const prunedOnce = useRef(false);
+  // …and the workspaces' dock records (`~|<id>`, wsdock.ts), which no
+  // project's snapshot can vouch for: judged by the workspace list, once it
+  // has answered. A list that cannot load (null) decides nothing.
+  const wsPrunedOnce = useRef(false);
   useEffect(() => {
     if (!ws || prunedOnce.current || !hydrated.current) return;
     const ok = ws.projects.filter((pv) => pv.ok && pv.snapshot);
@@ -5967,6 +6010,13 @@ function App() {
     const live = new Set(ok.flatMap((pv) => pv.snapshot!.places.map((p) => placeKey(pv.root, p.slug))));
     dropPanels((k) => ok.some((pv) => k.startsWith(pv.root + "|")) && !live.has(k));
   }, [ws, dropPanels]);
+  useEffect(() => {
+    // A remote window's list is the device's projection, not every workspace.
+    if (!wsList || wsPrunedOnce.current || !hydrated.current || remoteHost() !== null) return;
+    wsPrunedOnce.current = true;
+    const live = new Set(wsList.workspaces.map((w) => w.id));
+    dropPanels((k) => { const id = wsOfDockKey(k); return id !== null && !live.has(id); });
+  }, [wsList, hydratedTick, dropPanels]);
 
   /** Name a place, or clear the name with "". Declared state, so it lives in
    *  `.worktrees.places.json` beside the note and the pin — NOT in ui-state,
@@ -6189,8 +6239,11 @@ function App() {
   const dockLeft = settings.dock_side === "left";
   const merged = railsMerged(settings);
 
-  // Dock only makes sense with a place selected (Files/Terminal need a worktree).
-  const dockEligible = !!selected && !!sel;
+  // Dock only makes sense with a place selected (Files/Terminal need a
+  // worktree) — or in a workspace's view, whose dock is a Terminal alone
+  // (`wsDock`, above `updatePanels`).
+  const dockWhere = { place: !!selected && !!sel, workspace: wsDock !== null };
+  const dockEligible = dockEligibleAt({ ...dockWhere, fits: true });
   const fit = fitLayout(eff, dockEligible, vw);
   const dockShown = fit.dockShown;
   // Would the dock fit if it were open? Drives the toggle's disabled state, so a
@@ -6231,7 +6284,7 @@ function App() {
   const lowerOn = lowerSet && dockShown && !!selected?.tmux_session.up && lowerFits(spaceH);
   const dockLower: Settings["dock_lower"] = lowerOn ? "terminal" : null;
   // What the UPPER half shows: never the section in the lower slot.
-  const shownTab = upperTab(dockTabHere, dockLower);
+  const shownTab = dockTabAt(dockWhere, upperTab(dockTabHere, dockLower));
   // ⌘J / the rail says "hide files" — leaving a full-pane reader behind would
   // make that a lie. Same for flipping the dock to the Terminal tab. Keyed on
   // `shownTab` (what is ON SCREEN), like every other reader of the tab.
@@ -6879,6 +6932,9 @@ function App() {
       if (moved) setWsMoved(moved);
       commitHist((h) => pruneNav(h, (x) => x.ws?.id === id));
       setWsOpen((cur) => (cur === id ? null : cur));
+      // Its dock's tabs, names, front tab and panels go with it, as a removed
+      // place's do (the engine forgot its shells' directories and history).
+      dropPanels((k) => k === wsDockKey(id));
     })();
   };
   const toggleWs = (key: string) =>
@@ -8777,7 +8833,7 @@ function App() {
   // the keydown listener stays stable (registered once, no per-render churn).
   // The history step, for the chord handler below (stable effect, live function).
   const navStepRef = useRef<(dir: -1 | 1) => void>(() => {});
-  const keyRef = useRef({ selectedPath: null as string | null, editorCmd: settings.editor_cmd, switchOpen, dockFile: null as string | null, reading: false, settingsOpen: false, filesTabOpen: false, mdPreview: false, mdZoom: DEFAULTS.files_md_zoom, appZoom: DEFAULTS.app_zoom, dockShown: false, dockTab: "files" as Settings["dock_tab"], mainTermUp: false, findOn: null as null | Surface, lowerUp: false, lowerSet: false, dockOpen: false, dockEligible: false, dockFits: true, navPinned: false, ideasOn: false });
+  const keyRef = useRef({ selectedPath: null as string | null, editorCmd: settings.editor_cmd, switchOpen, dockFile: null as string | null, reading: false, settingsOpen: false, filesTabOpen: false, mdPreview: false, mdZoom: DEFAULTS.files_md_zoom, appZoom: DEFAULTS.app_zoom, dockShown: false, dockTab: "files" as Settings["dock_tab"], mainTermUp: false, dockTermUp: false, findOn: null as null | Surface, lowerUp: false, lowerSet: false, dockOpen: false, dockEligible: false, dockFits: true, navPinned: false, ideasOn: false });
   const filesTabOpen = eff.dock_open && shownTab === "files";
   keyRef.current = {
     selectedPath: selected?.path ?? null, editorCmd: settings.editor_cmd, switchOpen, dockFile, reading, settingsOpen,
@@ -8792,7 +8848,7 @@ function App() {
     // App zoom is global by nature — one window, one page zoom.
     appZoom: settings.app_zoom,
     // ⌘F: which surfaces can take the bar, and which one already has it.
-    dockShown, dockTab: shownTab, mainTermUp: !!selected?.tmux_session.up, findOn,
+    dockShown, dockTab: shownTab, mainTermUp: !!selected?.tmux_session.up, dockTermUp: !!selected?.tmux_session.up || wsDock !== null, findOn,
     lowerUp: lowerOn, lowerSet,
     // ⌘J's "no room" notice.
     dockOpen: eff.dock_open, dockEligible, dockFits, navPinned: settings.nav_pinned,
@@ -10453,7 +10509,7 @@ function App() {
   ];
   // What `DockRailGroup` renders, wherever it is hosted (see there).
   const dockRailItems: DockRailItem[] = DOCK_RAIL.filter((d) => (d.key !== "prs" || prsOn) && (d.key !== "workspace" || placeWsAll.length > 0));
-  const dockWhy = !dockEligible ? "select a place first" : !dockFits ? "window too narrow" : null;
+  const dockWhy = (key: Settings["dock_tab"]) => dockWhyFor(key, { ...dockWhere, fits: dockFits });
   const onDockRailPick = (key: Settings["dock_tab"], on: boolean) => {
     if (key === "prs" && !on) prs.refresh(TAB_MAX_AGE_S);
     pickDockTab(key);
@@ -11769,6 +11825,37 @@ function App() {
                   </div>
                 </>
               )}
+            </aside>
+          )}
+
+          {/* ── a workspace's dock: its Terminal and nothing else (wsdock.ts).
+              The same strip, panes and records as a place's, under the
+              workspace's own key, `~|<id>`; its shells start in the home
+              directory. No links (no Files tab to open them in), no lower
+              slot and no grip: those are a place's. */}
+          {dockShown && wsDock && (
+            <aside className="dock" data-testid="ws-dock" style={{ order: dockLeft ? -1 : 0, flex: `0 0 ${fit.dockW}px` }}>
+              <div className="dock-resizer" onMouseDown={onDockResize} />
+              <div className="dock-tabs">
+                <span className="dock-title" title="Shells in your home directory">Terminal</span>
+                <span className="dock-spacer" />
+              </div>
+              <div className="dock-body">
+                <TerminalTabs key={wsDockKey(wsDock)}
+                  repo={WORKSPACE_SCOPE} slug={wsDock} sessionUp
+                  termVersion={termVersion} focusToken={termFocus} addToken={newTermToken}
+                  hydratedTick={hydratedTick}
+                  names={(settings.term_tab_names ?? {})[wsDockKey(wsDock)] ?? {}}
+                  onRename={(index, name) => renameTermTab(WORKSPACE_SCOPE, wsDock, index, name)}
+                  tabs={(settings.term_tabs ?? {})[wsDockKey(wsDock)] ?? []}
+                  onTabs={(ids) => setTermTabs(WORKSPACE_SCOPE, wsDock, ids)}
+                  activeTab={(settings.term_tab_active ?? {})[wsDockKey(wsDock)] ?? null}
+                  onActiveTab={(index) => setTermTab(WORKSPACE_SCOPE, wsDock, index)}
+                  onFront={onTermFront}
+                  onError={fail}
+                  root=""
+                  findOpen={findOn === "dock"} findToken={findToken} onFindClose={closeFind} />
+              </div>
             </aside>
           )}
 
