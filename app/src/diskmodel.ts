@@ -19,7 +19,8 @@ export type PlaceUsage = {
 export type Volume = { free: number; total: number; snapshots: number | null };
 export type ProjectUsage = { root: string; scanned_epoch: number; scan_ms: number; places: PlaceUsage[]; unique: number; volume: Volume };
 /** `diskusage::Node`: `n` empty = small entries folded together; `id` is
- *  `"<dev>:<ino>"`, the identity a delete is checked against. */
+ *  `"<dev>:<ino>:b<ns>"` (or `c<ns>`, a ctime), opaque here: the identity a
+ *  delete is checked against (`diskusage::Ident`). */
 export type DNode = { n: string; p?: string; own: number; shared: number; files: number; c: Cat; dir?: boolean; id?: string; k?: DNode[] };
 export type PlaceTree = { usage: PlaceUsage; tree: DNode; scanned_epoch: number; scan_ms: number; volume: Volume };
 export type Deleted = { path: string; bytes: number; files: number; dir: boolean };
