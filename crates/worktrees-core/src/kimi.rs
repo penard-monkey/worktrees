@@ -1084,6 +1084,22 @@ mod tests {
         assert_eq!(screen_from("kimi", &fixture("kimi-screen/2.2.0/idle.txt")), KimiScreen::Composer);
     }
 
+    /// kimi 2.8.1 draws its permission mode's name at the head of the status
+    /// row under the composer (`Ask When Needed` for `--yolo`, `Never Ask` for
+    /// `--auto`) and none in Always Ask. Neither moves the composer's box or the approval's rules, so the
+    /// reader (and the opener's empty-composer wait) read them as before.
+    #[test]
+    fn kimi_2_8_1_screens_read_in_either_permission_mode() {
+        let f = |n: &str| fixture(&format!("kimi-screen/2.8.1/{n}.txt"));
+        assert_eq!(read_screen(&f("yolo-idle")), KimiScreen::Composer);
+        assert_eq!(read_composer(&f("yolo-idle")), Some(Composer { input: String::new(), queued: vec![] }));
+        assert_eq!(read_composer(&f("yolo-resumed")), Some(Composer { input: String::new(), queued: vec![] }));
+        assert_eq!(read_composer(&f("auto-idle")), Some(Composer { input: String::new(), queued: vec![] }));
+        assert_eq!(read_screen(&f("yolo-dangerous")), KimiScreen::Modal);
+        assert_eq!(read_screen(&f("manual-approval")), KimiScreen::Modal);
+        assert_eq!(read_composer(&f("yolo-dangerous")), None);
+    }
+
     #[test]
     fn a_trust_prompt_quoted_in_history_is_not_the_modal() {
         let mut screen = fixture("kimi-screen/2.2.0/trust.txt");
