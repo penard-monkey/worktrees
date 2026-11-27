@@ -1651,6 +1651,18 @@ impl Audit {
         self.record(Record::new("fold", json!({ "event": n.event, "workspace": id(&n.workspace), "chat": id(&n.chat), "commit": commit })));
     }
 
+    /// The engine typed its wake line into an idle workspace chat, as the
+    /// poll decided it: no request did, so the record names no actor. Ids,
+    /// the count, our own word, and the line's length and SHA-256; never the
+    /// line, which names the senders.
+    pub fn wake(&self, n: &worktrees_api::workspacewake::WakeNote) {
+        let id = |s: &str| worktrees_core::ulid::is_valid(s).then(|| s.to_string());
+        self.record(Record::new(
+            "wake",
+            json!({ "event": n.event, "workspace": id(&n.workspace), "chat": id(&n.chat), "count": n.count, "len": n.line.len(), "sha256": sha256_hex(n.line.as_bytes()) }),
+        ));
+    }
+
     /// The listener is down. Open episodes end first, so their counts land.
     pub fn stopped(&self) {
         let mut st = guard(&self.st);
@@ -4268,6 +4280,26 @@ mod tests {
         assert_eq!(l[1]["principal"], Value::Null, "no caller made it");
         assert_eq!(verify(&d).broken, None);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The engine's wake line is a record of its own: ids, the count, the
+    /// line's length and hash, and never the line.
+    #[test]
+    fn a_wake_the_poll_typed_is_a_record_without_its_line() {
+        let d = dir("wake");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        let (ws, chat) = (worktrees_core::ulid::new(), worktrees_core::ulid::new());
+        let line = worktrees_api::workspacewake::line(2, &["worktrees:kid".into()]);
+        a.wake(&worktrees_api::workspacewake::WakeNote { workspace: ws.clone(), chat: "../x".into(), event: "woke", count: 2, line: line.clone() });
+        let l = live(&d);
+        assert_eq!(
+            (l[1]["kind"].as_str(), &l[1]["detail"]),
+            (Some("wake"), &json!({ "event": "woke", "workspace": ws, "chat": null, "count": 2, "len": line.len(), "sha256": sha256_hex(line.as_bytes()) }))
+        );
+        assert!(!std::fs::read_to_string(d.join(FILE)).unwrap().contains("worktrees:kid"), "never the line");
+        assert_eq!(l[1]["principal"], Value::Null, "no caller made it");
+        assert_eq!(verify(&d).broken, None);
+        let _ = (chat, std::fs::remove_dir_all(&d));
     }
 
     /// Idea board phase 5: a plan's Start is a console act whose brief reaches

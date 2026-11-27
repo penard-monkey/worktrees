@@ -531,7 +531,11 @@ pub fn cmd_serve(args: &[String]) -> i32 {
         }
         // The engine's background work: sweep, merge, the 3 s poll.
         let audit = running.listener.audit();
-        host::start(running.ctx.clone(), host::Hooks { on_fold: Some(Box::new(move |n| audit.fold(n))), ..host::Hooks::default() });
+        let woke = audit.clone();
+        host::start(
+            running.ctx.clone(),
+            host::Hooks { on_fold: Some(Box::new(move |n| audit.fold(n))), on_wake: Some(Box::new(move |n| woke.wake(n))), ..host::Hooks::default() },
+        );
         // Group chat's shares (§3.3): every share's lane and binding checked
         // now and on serve's own poll, whether or not a guest is reading.
         tokio::spawn(shares::watch(opts.config_dir.clone(), running.ctx.host.clone()));

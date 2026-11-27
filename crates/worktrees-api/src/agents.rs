@@ -1106,6 +1106,22 @@ pub fn agent_send(ctx: &Ctx, repo: String, slug: String, session: String, text: 
 
 /// [`agent_send`]'s body, for a place's lanes or a desk session's.
 pub(crate) fn send_at(ctx: &Ctx, at: &Locus, session: String, text: String) -> Result<Value, String> {
+    send_checked(ctx, at, session, text, false)
+}
+
+/// What the engine's wake line meets when the agent is not plainly idle.
+pub const ERR_NOT_IDLE: &str = "the agent is not idle at an empty composer: the engine types nothing now";
+
+/// [`send_at`]'s body for the ENGINE's one line (`workspacewake`): the same
+/// lock, prompt and empty-composer checks, and before them one more on the
+/// same fresh capture: the screen must show the turn idle
+/// (`prompt::turn_shown`), so a turn that began after the poll looked gets
+/// nothing ([`ERR_NOT_IDLE`]). The text is the engine's own, never a person's.
+pub(crate) fn wake_at(ctx: &Ctx, at: &Locus, session: String, text: String) -> Result<Value, String> {
+    send_checked(ctx, at, session, text, true)
+}
+
+fn send_checked(ctx: &Ctx, at: &Locus, session: String, text: String, idle_only: bool) -> Result<Value, String> {
     // Before the pane is looked at: what no harness would take.
     harness::typed_message(provider::CLAUDE.id, &text)?;
     let io = &*ctx.agents.io;
@@ -1128,6 +1144,9 @@ pub(crate) fn send_at(ctx: &Ctx, at: &Locus, session: String, text: String) -> R
         Some(true) => {}
         Some(false) => return Err(ERR_MID_INPUT.into()),
         None => return Err(ERR_NO_COMPOSER.into()),
+    }
+    if idle_only && prompt::turn_shown(lane.harness, &screen) != Some(prompt::TurnShown::Idle) {
+        return Err(ERR_NOT_IDLE.into());
     }
     ctx.agents.forget_switch(&lane);
     let outcome = io.deliver(at, &lane, &text)?;

@@ -98,6 +98,9 @@ pub struct Hooks {
     /// A workspace chat's fold landed or failed: the poll's decision, which no
     /// request made. Serve writes it to its audit log, which is in no `Ctx`.
     pub on_fold: Option<Box<dyn Fn(&crate::workspacefolds::FoldNote) + Send + 'static>>,
+    /// The engine typed its wake line into an idle workspace chat
+    /// (`workspacewake`): no request did. Serve writes it to its audit log.
+    pub on_wake: Option<Box<dyn Fn(&crate::workspacewake::WakeNote) + Send + 'static>>,
 }
 
 /// Start the engine's background work for `ctx`, and return the poll thread.
@@ -150,6 +153,7 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
     let mut busy_gate = BusyGate::default();
     let mut last_ideas: Option<crate::watch::IdeaSessions> = None;
     let mut last_chats: Option<crate::watch::WorkspaceSessions> = None;
+    let mut wakes = crate::workspacewake::Wakes::default();
     let mut last_models: Option<Vec<(i32, Option<String>)>> = None;
     let mut ticks: u32 = 0;
     // Inbox requests the last tick left waiting for a client, for its log line.
@@ -352,6 +356,15 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
         for note in crate::workspacechats::tick(&pollctx, chats, &mut last_chats) {
             if let Some(f) = &hooks.on_fold {
                 f(&note);
+            }
+        }
+        // An idle chat with a place's new report gets the engine's one line
+        // (`workspacewake`), read off the sessions this tick just pushed.
+        if let Some(now) = last_chats.as_ref() {
+            for note in crate::workspacewake::tick(&pollctx, now, &mut wakes, worktrees_core::messages::now_ms()) {
+                if let Some(f) = &hooks.on_wake {
+                    f(&note);
+                }
             }
         }
         // After the chats, so who is live is read in the same beat.

@@ -5,6 +5,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- A workspace chat that sits idle now hears a lane's report. When a report arrives, the app types one line into the chat: how many messages wait and who sent them, never their words. It does this only while the chat is idle, with nothing typed in its box and no question or fold up. It types once per batch and at most once a minute. A message from another chat never wakes it, so two chats cannot keep waking each other. Each line is kept in the audit log. Part of the Workspace chats beta.
+
 ## [0.55.0] - 2026-11-27
 
 ### Added
