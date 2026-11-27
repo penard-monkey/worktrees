@@ -13,6 +13,8 @@ import * as Icons from "./icons";
 import { SubMenu } from "./SubMenu";
 import { CtxMenu } from "./CtxMenu";
 import { useEscape } from "./useEscape";
+import { RowNameField } from "./RowNameField";
+import { isRenameKey, laneChange, namedChange } from "./rowname";
 import { batchJobs, bytes, changedSincePush, chosenIds, connectedHubs, defaultPushHubs, holders, newestHub, projectNames, type HubDash, type SyncItem, type SyncJob } from "./hubs";
 import { destAt, destinations, GRIP_LABEL, isCurrent, resetPatch, undoOf, zoneOf, type Dest, type Geometry, type Grip, type LayoutPatch } from "./arrange";
 import { cloneSource, dirNameProblem, isCloneError, type CloneProgress } from "./clone";
@@ -4494,6 +4496,8 @@ function App() {
   const fromRow = (el: Element, repo: string, slug: string) => fromWs(repo, slug, el.closest<HTMLElement>("[data-ws-id]")?.dataset.wsId ?? null);
   /** The card of the row a place's menu was opened on; undefined: not on a row. */
   const ctxCard = useRef<string | null | undefined>(undefined);
+  /** The place menu was opened on a lane's ghost row (its Rename names that row). */
+  const ctxGhost = useRef(false);
   /** Which of a place's workspace documents the dock shows. */
   const [dockDoc, setDockDoc] = useState<DockDoc>("memory");
   const [placeWsPick, setPlaceWsPick] = useState<{ x: number; y: number } | null>(null);
@@ -4732,6 +4736,15 @@ function App() {
   // rename-in-place for the header name. Transient, and reset on a place switch
   // like dockFile below — a half-typed name must not follow you somewhere else.
   const [renaming, setRenaming] = useState(false);
+  // rename-in-place for a NAV row (rowname.ts): a lane, or a workspace chat.
+  // `ghost`: the field is in a lane's ghost row, where its menu was opened,
+  // not in the real row (both can be drawn at once, and two fields would
+  // fight over focus).
+  const [navNaming, setNavNaming] = useState<
+    { kind: "place"; repo: string; slug: string; ghost: boolean } | { kind: "chat"; ws: string; conv: string } | null
+  >(null);
+  /** F2: rename what is on screen. Read through a ref by the key handler. */
+  const renameKey = useRef<() => boolean>(() => false);
 
   // right dock: which file the Files tab is viewing (null = none). Reset per
   // place, then restored from `files_open` by the effect below the reset.
@@ -7967,6 +7980,7 @@ function App() {
   const placeCtx = (e: React.MouseEvent, repo: string, p: Place) => {
     e.preventDefault();
     ctxCard.current = e.currentTarget.matches("li.row") ? e.currentTarget.closest<HTMLElement>("[data-ws-id]")?.dataset.wsId ?? null : undefined;
+    ctxGhost.current = e.currentTarget.matches("li.row.ghost");
     e.stopPropagation();
     setMenu(null);
     setConfirmRm(null);
@@ -8842,6 +8856,15 @@ function App() {
         hideNav();
         return;
       }
+      // F2 renames the row on screen (a lane, a workspace chat, a workspace).
+      // Never from a text field, which xterm's own textarea is, so the
+      // terminal keeps its F2; never behind a dialog.
+      if (e.key === "F2") {
+        const t = e.target instanceof Element ? e.target : null;
+        const inField = !!t?.closest("input, textarea, select, [contenteditable='true']");
+        if (isRenameKey(e, inField) && !modalOpen() && renameKey.current()) e.preventDefault();
+        return;
+      }
       // Which size chord this is, if any (undefined = not one). Computed HERE,
       // above the guard, so the guard and the handler below ask the same
       // question of the same event instead of each deciding for itself what a
@@ -9563,6 +9586,41 @@ function App() {
   });
   /** The chat in the middle of the workspace view, or the start of one. */
   const wsConv = wsShown ? wsChat[wsShown.id] ?? null : null;
+  /** Start renaming lane `slug`'s nav row, or its header when the nav does not
+   *  draw it (filtered out, folded away, or the nav hidden). */
+  const renamePlace = (repo: string, slug: string, ghost = false) => {
+    const q = `[data-project-root="${CSS.escape(repo)}"] li.row${ghost ? ".ghost[data-ghost" : ":not(.ghost)[data-slug"}="${CSS.escape(slug)}"]`;
+    if (document.querySelector(q)) setNavNaming({ kind: "place", repo, slug, ghost });
+    else if (sel?.repo === repo && sel.slug === slug) setRenaming(true);
+  };
+  renameKey.current = () => {
+    if (navNaming || renaming || wsNaming) return true; // already editing: F2 is spent
+    if (selected && sel) { renamePlace(sel.repo, sel.slug); return true; }
+    if (wsShown && wsConv) {
+      if (!document.querySelector(`[data-testid=ws-chat-row][data-chat="${CSS.escape(wsConv)}"]`)) return false;
+      setNavNaming({ kind: "chat", ws: wsShown.id, conv: wsConv });
+      return true;
+    }
+    if (wsShown && wsShown.id !== EVERYTHING_ELSE_ID) { setWsNaming(wsShown.id); return true; }
+    return false;
+  };
+  /** A lane's inline field, in its row (`ghost` says which row). */
+  const laneField = (repo: string, p: Place, ghost: boolean) =>
+    navNaming?.kind === "place" && navNaming.repo === repo && navNaming.slug === p.slug && navNaming.ghost === ghost ? (
+      <RowNameField
+        key={repo + "|" + p.slug}
+        initial={nameOf(p)}
+        label={`Name for ${p.slug}`}
+        placeholder={p.slug}
+        testid="row-name-input"
+        onSave={(typed) => {
+          setNavNaming(null);
+          const c = laneChange(typed, p.declared?.title, p.slug);
+          if (c.kind === "set") setTitle(repo, p.slug, c.title);
+        }}
+        onCancel={() => setNavNaming(null)}
+      />
+    ) : null;
   const wsMiddle = !wsShown || !wsChatsOn ? null
     : wsStart?.ws === wsShown.id
       ? (wsStart.why === null ? <StartingChat name={wsShown.name} />
@@ -9922,7 +9980,7 @@ function App() {
         {b.rails}{b.caret}
         <span className="status-dot" />
         <span className="row-id">
-          <span className="row-name">{b.level}{nameOf(p)}</span>
+          {laneField(repo, p, true) ?? <span className="row-name">{b.level}{nameOf(p)}</span>}
         </span>
         <span className="glyphs">{b.pill}{other && <span className="lane-tier">{GROUP_LABEL[other] ?? other}</span>}</span>
       </li>
@@ -9969,11 +10027,13 @@ function App() {
         {lb?.rails}{lb?.caret}
         <span className={"status-dot" + dotClass(p)} style={dotStyle(p)} title={dotTitle(p)} />
         <span className="row-id">
-          <span className="row-name">
-            {lb?.level}
-            {p.is_main ? "◆ " : p.declared?.pinned ? "★ " : ""}
-            {nameOf(p)}
-          </span>
+          {laneField(repo, p, false) ?? (
+            <span className="row-name">
+              {lb?.level}
+              {p.is_main ? "◆ " : p.declared?.pinned ? "★ " : ""}
+              {nameOf(p)}
+            </span>
+          )}
           {divergent ? <span className="row-branch">↗ {p.branch}</span> : null}
         </span>
         <span className="glyphs">
@@ -10344,6 +10404,14 @@ function App() {
                         retry={() => void wsChats.refresh(w.id)}
                         arm={(e, conv, title) => arm(e, { kind: "chat", ws: w.id, conv, title })}
                         acts={chatActsHost(w.id)}
+                        naming={navNaming?.kind === "chat" && navNaming.ws === w.id ? navNaming.conv : null}
+                        onRename={(conv) => setNavNaming({ kind: "chat", ws: w.id, conv })}
+                        onRenamed={(conv, typed, current) => {
+                          setNavNaming(null);
+                          const c = namedChange(typed, current);
+                          if (c.kind === "set") wsChats.rename(w.id, conv, c.title).catch((e) => fail(`Could not rename the chat: ${String(e)}`));
+                        }}
+                        onRenameCancel={() => setNavNaming(null)}
                       />
                     )}
                     {w.projects.length === 0 && (
@@ -12284,6 +12352,8 @@ function App() {
         <CtxMenu x={ctx.x} y={ctx.y} onClose={closeCtx}>
           <div className="pop-hint">{ctxPlace.is_main ? "◆ main" : ctxPlace.slug}</div>
           <button className="pop-item" onClick={() => { if (ctxCard.current !== undefined) fromWs(ctx.repo, ctxPlace.slug, ctxCard.current); enterPlace(ctx.repo, ctxPlace); }}>Enter <Icons.ChevronRight size={12} /></button>
+          <button className="pop-item" data-testid="ctx-rename" data-track="nav.row.rename"
+            onClick={() => { const r = ctx.repo, sl = ctxPlace.slug, g = ctxGhost.current; closeCtx(); renamePlace(r, sl, g); }}>Rename…</button>
           <button className="pop-item" data-testid="ctx-disk" onClick={() => openDisk({ kind: "place", repo: ctx.repo, slug: ctxPlace.slug })}>Disk usage</button>
           {groupChatOn && shareStart(ctx.repo, ctxPlace.slug) && (
             <button className="pop-item" data-testid="ctx-share" onClick={() => { const r = ctx.repo, sl = ctxPlace.slug; closeCtx(); openShareDialog(r, sl); }}>Share this session…</button>

@@ -220,24 +220,24 @@ async function rowmenu(page, tag) {
   const items = () => page.locator(".ctxmenu .pop-item").evaluateAll((b) => b.map((x) => (x.disabled ? "~" : "") + x.querySelector("span span").textContent));
   const ctx = async (t) => { await row(page, t).click({ button: "right" }); return until(page, () => !!document.querySelector(".ctxmenu")); };
   ok(await ctx("Release order"), `${tag} a chat row has a right-click menu`);
-  ok(JSON.stringify(await items()) === JSON.stringify(["Close", "Close without folding", "Delete"]), `${tag} …a live chat's: Close, Close without folding, Delete (${JSON.stringify(await items())})`);
+  ok(JSON.stringify(await items()) === JSON.stringify(["Rename…", "Close", "Close without folding", "Delete"]), `${tag} …a live chat's: Rename…, Close, Close without folding, Delete (${JSON.stringify(await items())})`);
   ok((await page.locator(".ctxmenu .wsc-menu-h").innerText()) === "Release order" && await page.evaluate(() => document.querySelector(".ctxmenu").getAttribute("role") === "menu"), `${tag} …a menu, named by the chat`);
   ok(!(await page.$("[data-testid=ws-chat-col]")), `${tag} …and opening it opens no chat`);
   await page.keyboard.press("ArrowDown");
-  ok(await page.evaluate(() => document.activeElement?.dataset.act === "close"), `${tag} ↓ goes into it`);
+  ok(await page.evaluate(() => document.activeElement?.dataset.act === "rename"), `${tag} ↓ goes into it, Rename… first`);
   await page.keyboard.press("Escape");
   ok(await until(page, () => !document.querySelector(".ctxmenu")), `${tag} Escape closes it`);
   // By key: the menu key on a focused row, its first act focused.
   await row(page, "Release order").focus();
   await page.keyboard.press("Shift+F10");
-  ok(await until(page, () => document.activeElement?.dataset.act === "close"), `${tag} Shift+F10 on a row opens it, its first act focused`);
+  ok(await until(page, () => document.activeElement?.dataset.act === "rename"), `${tag} Shift+F10 on a row opens it, its first item (Rename…) focused`);
   await page.keyboard.press("Escape");
   // Close without folding, from the row.
   await ctx("Release order");
   await page.click("[data-testid=ws-chat-act-close-none]");
   ok(await until(page, () => [...document.querySelectorAll("[data-testid=ws-chat-row]")].find((r) => r.querySelector(".wsc-title").textContent === "Release order")?.dataset.state === "ended"), `${tag} Close without folding ends it`);
   await ctx("Release order");
-  ok(JSON.stringify(await items()) === JSON.stringify(["Fold now", "Resume", "Delete"]), `${tag} an ended one: Fold now, Resume, Delete (${JSON.stringify(await items())})`);
+  ok(JSON.stringify(await items()) === JSON.stringify(["Rename…", "Fold now", "Resume", "Delete"]), `${tag} an ended one: Rename…, Fold now, Resume, Delete (${JSON.stringify(await items())})`);
   await page.click("[data-testid=ws-chat-act-resume]");
   ok(await until(page, () => [...document.querySelectorAll("[data-testid=ws-chat-row]")].find((r) => r.querySelector(".wsc-title").textContent === "Release order")?.dataset.state === "running"), `${tag} Resume starts it again`);
   // Another chat folds: its fold would be refused, and says why.
@@ -254,7 +254,7 @@ async function rowmenu(page, tag) {
   // Close, the fold, from the row.
   await until(page, (c) => document.querySelector(`[data-chat='${c}']`)?.dataset.state !== "folding", rel);
   await ctx("Storage layout");
-  ok(JSON.stringify(await items()) === JSON.stringify(["Resume", "Delete"]), `${tag} a folded one: Resume, Delete (${JSON.stringify(await items())})`);
+  ok(JSON.stringify(await items()) === JSON.stringify(["Rename…", "Resume", "Delete"]), `${tag} a folded one: Rename…, Resume, Delete (${JSON.stringify(await items())})`);
   await page.keyboard.press("Escape");
   await ctx("First look");
   await page.click("[data-testid=ws-chat-act-fold-now]");

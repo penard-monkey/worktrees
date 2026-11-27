@@ -12,6 +12,8 @@ import { CtxMenu } from "./CtxMenu";
 import * as Icons from "./icons";
 import { DeskTerminalPane } from "./TerminalPane";
 import { useArmed } from "./useArmed";
+import { RowNameField } from "./RowNameField";
+import { namedChange } from "./rowname";
 import {
   accessWords, activeAt, ageWords, asksTrust, chatActs, endedLine, failedWords, firstMessage, foldOf, foldRuns, introWords, isDefaultTitle, monthOf, navRows, quietLine, readsWords, stateWords, titleFrom, transcriptGone, TRUST_WORDS, whenWords,
   type ChatAct, type ChatActItem, type ChatRow, type DocRead, unreadWords, type ProjectRead, type RowState, type WsChat, type WsChats, type WsSessionsEv,
@@ -117,12 +119,13 @@ function ActItem({ a, acts, busy, row, close }: { a: ChatActItem; acts: ChatActs
 }
 
 /** A chat row's right-click menu: the acts its header has, by its state. */
-function ChatRowMenu({ x, y, host, row, rows, onClose }: { x: number; y: number; host: ChatActsHost; row: ChatRow; rows: readonly ChatRow[]; onClose(): void }) {
+function ChatRowMenu({ x, y, host, row, rows, onClose, onRename }: { x: number; y: number; host: ChatActsHost; row: ChatRow; rows: readonly ChatRow[]; onClose(): void; onRename?(): void }) {
   const reason = useChat(wsChatKey({ id: host.ws, conv: row.chat.id })).turns.data?.reason;
   const acts = useChatActs(host, row, rows, transcriptGone(reason));
   return (
     <CtxMenu x={x} y={y} onClose={() => { acts.arm.disarm(); onClose(); }}>
       <div className="pop-head wsc-menu-h" title={row.chat.title}>{row.chat.title}</div>
+      {onRename && <button className="pop-item" data-testid="ws-chat-row-rename" data-act="rename" data-track="workspace.chat.row.rename" onClick={() => { acts.arm.disarm(); onClose(); onRename(); }}><span className="wsc-act-in"><span>Rename…</span></span></button>}
       {acts.items.map((a) => <ActItem key={a.act} a={a} acts={acts} busy={acts.busy} row={row} close={onClose} />)}
     </CtxMenu>
   );
@@ -163,6 +166,12 @@ export function NavChats(props: {
   arm?(e: React.PointerEvent, conv: string, title: string): void;
   /** A row's right-click menu. */
   acts?: ChatActsHost;
+  /** The chat whose row is an inline name field (rowname.ts), or null. */
+  naming?: string | null;
+  onRename?(conv: string): void;
+  /** The field's text, untrimmed, and the title it started from. */
+  onRenamed?(conv: string, typed: string, current: string): void;
+  onRenameCancel?(): void;
 }) {
   const { rows, rest } = navRows(props.rows, props.q);
   const menu = useRowMenu();
@@ -180,6 +189,17 @@ export function NavChats(props: {
       {props.starting && <div className="wsc-row starting" data-testid="ws-chat-starting"><span className="wsc-dot folding" aria-hidden="true" /><span className="wsc-title">Starting…</span></div>}
       {rows.map((r) => {
         const age = ageWords(r, props.ago(activeAt(r.chat)));
+        // Renamed in place: a div, never the row's <button>, which would take
+        // Space and Enter as its own press and cannot hold a field.
+        if (props.naming === r.chat.id && props.onRenamed) return (
+          <div key={r.chat.id} className={"wsc-row naming" + (r.chat.id === props.on ? " on" : "")} data-testid="ws-chat-row" data-chat={r.chat.id} data-state={r.state}>
+            <span className="wsc-row-in">
+              <ChatDot state={r.state} />
+              <RowNameField initial={r.chat.title} label="Chat name" testid="ws-chat-row-name-input" className="wsc-row-name"
+                onSave={(typed) => props.onRenamed!(r.chat.id, typed, r.chat.title)} onCancel={() => props.onRenameCancel?.()} />
+            </span>
+          </div>
+        );
         return (
           <button key={r.chat.id} className={"wsc-row" + (r.state === "ended" ? " closed" : "") + (r.chat.id === props.on ? " on" : "")} data-testid="ws-chat-row" data-track="nav.workspace.chat"
             data-chat={r.chat.id} data-state={r.state} title={`${r.chat.title} · ${stateWords(r)} · ${onWords(r.chat)}`} aria-current={r.chat.id === props.on || undefined} onClick={() => props.open(r.chat.id)}
@@ -194,7 +214,8 @@ export function NavChats(props: {
           </button>
         );
       })}
-      {mrow && props.acts && menu.m && <ChatRowMenu x={menu.m.x} y={menu.m.y} host={props.acts} row={mrow} rows={props.rows} onClose={menu.close} />}
+      {mrow && props.acts && menu.m && <ChatRowMenu x={menu.m.x} y={menu.m.y} host={props.acts} row={mrow} rows={props.rows} onClose={menu.close}
+        onRename={props.onRename ? () => props.onRename!(mrow.chat.id) : undefined} />}
       {rest && <button className="wsc-all" data-testid="ws-chats-all" data-track="nav.workspace.chats" onClick={props.all}>All chats · {props.total} ▸</button>}
     </div>
   );
@@ -328,7 +349,8 @@ export function WorkspaceChatColumn(props: {
   const closeItem = acts.item("close"), foldNow = acts.item("fold-now"), resumeItem = acts.item("resume");
   const rename = (t: string) => {
     setRenaming(null);
-    if (t.trim() && t.trim() !== c.title) void act("rename it", () => live.rename(ws.id, conv, t.trim()), false);
+    const n = namedChange(t, c.title);
+    if (n.kind === "set") void act("rename it", () => live.rename(ws.id, conv, n.title), false);
   };
   const term = view === "terminal" && row.live;
   const model = modelWords(c, live.sessions, row.live);
@@ -337,10 +359,8 @@ export function WorkspaceChatColumn(props: {
     <div className="wsc-col" data-testid="ws-chat-col" data-chat={conv} data-state={row.state}>
       <header className="wsc-head">
         {renaming !== null ? (
-          <input className="title-input wsc-rename" data-testid="ws-chat-rename-input" autoFocus value={renaming}
-            onChange={(e) => setRenaming(e.currentTarget.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") rename(renaming); if (e.key === "Escape") { e.stopPropagation(); setRenaming(null); } }}
-            onBlur={() => setRenaming(null)} />
+          <RowNameField key={conv} initial={renaming} label="Chat name" testid="ws-chat-rename-input" className="wsc-rename"
+            onSave={rename} onCancel={() => setRenaming(null)} />
         ) : (
           <button className="wsc-name" data-testid="ws-chat-menu" data-track="workspace.chat.menu" title={`${c.title} · ${stateWords(row)}`} aria-haspopup="menu" aria-expanded={menu?.kind === "chats"} onClick={at("chats")}>
             {/* An inner span is the row: WebKit shrink-wraps a <button> that is
