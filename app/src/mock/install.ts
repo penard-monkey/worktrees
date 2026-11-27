@@ -459,6 +459,33 @@ let mockPiMcp: Record<string, unknown> = (() => {
     config_path: "/Users/demo/.pi/agent/mcp.json",
   };
 })();
+// The `digest` row's answer: the contract's shape, from the mock's places.
+function mockDigest(since: number | null, limit: number | null, offset: number | null, empty: boolean) {
+  const t = now();
+  const reasons: [string, (title: string) => string, number][] = [
+    ["waiting", () => "Claude is waiting on your answer (4 min ago)", t - 240],
+    ["finished", () => "Finished 2 h ago, not seen yet: \u201cmake the retry banner say when it will try again\u201d", t - 7200],
+    ["pr", () => "Pull request #412: CI failing", t - 3 * 3600],
+    ["draft", () => "A message sits unsent at the prompt", t - 5 * 3600],
+    ["at-risk", () => "3 commits not on origin/main and 2 uncommitted files, untouched for 21 days", t - 21 * 86400],
+    ["recent", () => "Last active 1 day ago, plan at \u201cPhase 2: wire the poll\u201d", t - 86400],
+    ["recent", () => "Last active 3 days ago", t - 3 * 86400],
+  ];
+  const places = ws.projects.flatMap((p) =>
+    (p.snapshot?.places ?? []).map((pl) => ({ project: p.root.split("/").pop() ?? p.root, repo: p.root, slug: pl.slug, title: pl.declared?.title || pl.slug })),
+  );
+  const all = empty ? [] : reasons.slice(0, places.length).map(([reason, line, at], i) => ({ ...places[i], reason, line: line(places[i].title), at }));
+  const rows = all.slice(offset ?? 0, (offset ?? 0) + (limit ?? 5));
+  const changed = since == null ? all.length > 0 : all.some((r) => ["waiting", "finished", "pr"].includes(r.reason) && r.at > since);
+  return {
+    generated: t,
+    changed,
+    total: all.length,
+    rows,
+    left_out: { private: 0, unreadable: ws.projects.filter((p) => !p.ok).length },
+  };
+}
+
 // Cross-project reach (`cross_project_status`): `?reach=read|full` starts the
 // user's level there (default off, as shipped); `?private=<name>,…` marks
 // those registered projects private. Names are the root's basename, which is
@@ -3320,6 +3347,15 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     }
     case "cross_project_status":
       return mockCrossProject();
+    // "Where you left off" (`worktrees_api::digest`, console only): one row
+    // per reason from the mock's own places, ranked as the engine ranks them
+    // (reason, then newest). `?digest=empty` answers nothing to show, and
+    // `?digest=old` is a host from before the row.
+    case "digest": {
+      const mode = new URLSearchParams(location.search).get("digest");
+      if (mode === "old") throw `unknown command: ${cmd}`;
+      return mockDigest(args.since as number | null, args.limit as number | null, args.offset as number | null, mode === "empty");
+    }
     case "planning_status":
       return mockPlanning();
     case "set_planning_default":
