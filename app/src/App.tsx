@@ -1425,6 +1425,12 @@ function liveAgents(a: Place["agent_sessions"] | null | undefined): Harness[] {
   return HARNESSES.filter((h) => a?.[h]?.up);
 }
 
+/** Older snapshots report the Claude session in the legacy tmux field. */
+function agentsOf(p: Place): NonNullable<Place["agent_sessions"]> {
+  return p.agent_sessions ?? Object.fromEntries(HARNESSES.map((h) => [h, h === "claude" ? p.tmux_session
+    : { name: `${p.tmux_session.name}~agent~${h}`, up: false }])) as Record<Harness, AgentSession>;
+}
+
 /** The nav row's provider mark: the Claude spark or the OpenAI blossom (Codex),
  *  nothing when no agent is live. The SVG is aria-hidden, so the span carries
  *  the label; `title` is the hover. Sized in `em` by `.g-agent svg`, so it
@@ -6145,10 +6151,7 @@ function App() {
     (sel && ws?.projects.find((p) => p.root === sel.repo)?.snapshot?.places.find((pl) => pl.slug === sel.slug)) || null;
   // A snapshot from before `agent_sessions` existed: the place's session is the
   // default harness's, and every other harness is down in its own sidecar.
-  const selectedAgents: Place["agent_sessions"] | null = selected?.agent_sessions ?? (selected
-    ? Object.fromEntries(HARNESSES.map((h, i) => [h, i === 0 ? selected.tmux_session
-      : { name: `${selected.tmux_session.name}~agent~${h}`, up: false }])) as Record<Harness, AgentSession>
-    : null);
+  const selectedAgents = selected ? agentsOf(selected) : null;
   const liveHere = liveAgents(selectedAgents);
   const reconciledLegacyAgents = useRef(new Set<string>());
   useEffect(() => {
@@ -6285,6 +6288,10 @@ function App() {
   const placeDock = !!selected && !!sel;
   const dockEligible = placeDock || wsDock !== null;
   const fit = fitLayout(eff, dockEligible, vw);
+  // The overlay covers the terminal, so it reserves no width for the dock.
+  const navOverlayW = clampNav(settings.nav_width, 0, vw, railsWidth(settings));
+  const navWidth = fit.navShown ? fit.navW : navOverlayW;
+  const navNarrow = navWidth < 280;
   const dockShown = fit.dockShown;
   // Would the dock fit if it were open? Drives the toggle's disabled state, so a
   // ⌘J that can't visibly do anything is at least honest about why.
@@ -7480,6 +7487,10 @@ function App() {
     setMenu(null);
     setConfirmRm(null);
   };
+  useEscape(closeMenu, menu === "more" && !settings.quiet_chrome);
+  useEffect(() => {
+    if (settings.quiet_chrome && menu === "more") closeMenu();
+  }, [settings.quiet_chrome, menu]);
 
   // Browsing verb: point at a place, change nothing about it.
   //
@@ -7551,12 +7562,14 @@ function App() {
   const noteRefusal = (r: CmdResult | null, repo: string, slug: string, provider: Harness, model: string) => {
     if (r?.code === EXIT_LAUNCH_REFUSED) setLaunchRefused({ repo, slug, provider, model, reason: refusalLine(r.output) });
   };
-  const openAgent = (provider: Harness, chosen = "", opts?: { fresh?: boolean; force?: boolean }) => {
-    if (!sel) return;
+  const openAgent = (provider: Harness, chosen = "", opts?: { fresh?: boolean; force?: boolean }, target = sel) => {
+    if (!target) return;
     const model = chosen || (settings.default_models[provider] ?? "");
-    const { repo, slug } = sel;
-    setActiveProvider(provider);
-    setTermFocus((v) => v + 1);
+    const { repo, slug } = target;
+    if (sel?.repo === repo && sel.slug === slug) {
+      setActiveProvider(provider);
+      setTermFocus((v) => v + 1);
+    }
     (async () => {
       if (!(await ensureCodexCli(provider))) return;
       const r = await runCmd("open_place", {
@@ -7568,12 +7581,13 @@ function App() {
   };
   /** The sheet, opened on `to` — with what is live now, so it can say what
    *  switching closes. */
-  const openSwitch = (to: Harness) => {
-    if (!sel || !selected) return;
-    const h = liveHere[0];
-    const cur = h ? selectedAgents?.[h] : undefined;
+  const openSwitch = (to: Harness, repo = sel?.repo, place = selected) => {
+    if (!repo || !place) return;
+    const agents = agentsOf(place);
+    const h = liveAgents(agents)[0];
+    const cur = h ? agents[h] : undefined;
     setAgentSwitch({
-      repo: sel.repo, slug: sel.slug, placeName: nameOf(selected), to,
+      repo, slug: place.slug, placeName: nameOf(place), to,
       live: h && cur ? { harness: h, session: cur.name, model: cur.model ?? null } : null,
     });
   };
@@ -7592,8 +7606,9 @@ function App() {
     const pending = agentSwitch;
     setAgentSwitch(null);
     const live = pending.live;
-    if (sel?.repo !== pending.repo || sel.slug !== pending.slug ||
-        (live && (!selectedAgents?.[live.harness]?.up || selectedAgents[live.harness].name !== live.session))) {
+    const place = placeAt(pending.repo, pending.slug);
+    const current = live && place ? agentsOf(place)[live.harness] : null;
+    if (!place || (live && (!current?.up || current.name !== live.session))) {
       setNotice("The active session changed. Check the worktree and try switching again.");
       return;
     }
@@ -7602,12 +7617,12 @@ function App() {
       // this session and start fresh on the new model.
       (async () => {
         const r = await runCmd("close_place", { repo: pending.repo, slug: pending.slug, yes: false, session: live.session, provider: to });
-        if (r?.ok) openAgent(to, model, { fresh: true });
+        if (r?.ok) openAgent(to, model, { fresh: true }, pending);
       })();
       return;
     }
     // A new model on another agent is a fresh start there too.
-    openAgent(to, model, model ? { fresh: true } : undefined);
+    openAgent(to, model, model ? { fresh: true } : undefined, pending);
   };
 
   // ── close ──
@@ -7663,6 +7678,11 @@ function App() {
     closeCtx();
     closeMenu(); // also dismiss the topbar ⋯ popover (its "Copy path" routes here)
     copyToClipboard(text).catch(fail);
+  };
+  const togglePin = (repo: string, p: Place) => {
+    const on = !p.declared?.pinned;
+    patchDeclared(repo, p.slug, { pinned: on });
+    mutate(invoke("set_pin", { repo, slug: p.slug, on }));
   };
   /** Open a project (`place` null → the repo home) or a place (its branch's
    *  page when the branch is on origin, else the home) in the browser. Which
@@ -9669,11 +9689,26 @@ function App() {
     />
   );
 
-  /** ⌘K: every workspace's documents, and its chats. */
-  const switchMore = (): SwitchMore[] => (frameOn ? wsList?.workspaces ?? [] : []).flatMap((w) => [
-    ...docChips({ ideas: ideasOn, chats: wsChatsOn }).map((t) => ({ key: `${w.id}|${t}`, name: WS_TAB_LABEL[t], where: w.name, what: "document", dot: <span className="status-dot" />, go: () => void showWs(w.id, t) })),
-    ...(wsChatsOn ? wsChats.rows(w.id) : []).map((x: ChatRow) => ({ key: x.chat.id, name: x.chat.title, where: w.name, what: "chat", dot: <ChatDot state={x.state} />, go: () => openChat(w.id, x.chat.id) })),
-  ]);
+  /** ⌘K: workspace documents, chats and actions for the selected place. */
+  const switchMore = (): SwitchMore[] => {
+    const more = (frameOn ? wsList?.workspaces ?? [] : []).flatMap<SwitchMore>((w) => [
+      ...docChips({ ideas: ideasOn, chats: wsChatsOn }).map((t) => ({ key: `${w.id}|${t}`, name: WS_TAB_LABEL[t], where: w.name, what: "document", dot: <span className="status-dot" />, go: () => void showWs(w.id, t) })),
+      ...(wsChatsOn ? wsChats.rows(w.id) : []).map((x: ChatRow) => ({ key: x.chat.id, name: x.chat.title, where: w.name, what: "chat", dot: <ChatDot state={x.state} />, go: () => openChat(w.id, x.chat.id) })),
+    ]);
+    if (!sel || !selected) return more;
+    const { repo, slug } = sel;
+    const add = (key: string, name: string, go: () => void) => more.push({
+      key: `place-action|${key}`, name, where: nameOf(selected), what: "place action", dot: <span className="status-dot" />, go,
+    });
+    add("rename", "Rename place…", () => renamePlace(repo, slug));
+    add("copy-path", "Copy path", () => copyText(selected.path));
+    if (selected.tmux_session.up) add("status", "Status check…", () => openStatus(repo, slug));
+    if (!selected.is_main) add("remove", "Remove worktree…", () => openRemove(repo, slug));
+    if (liveHere.length === 1) add("switch-agent", "Switch agent…", () => openSwitch(liveHere[0]));
+    if (groupChatOn && shareStart(repo, slug)) add("share", "Share this session…", () => openShareDialog(repo, slug));
+    if (selected.declared?.title) add("clear-name", "Clear place name", () => setTitle(repo, slug, ""));
+    return more;
+  };
   /** What a chat row's right-click menu acts with: the header's handlers, for a
    *  chat that may not be on screen. */
   const chatActsHost = (id: string): ChatActsHost => ({
@@ -10021,7 +10056,7 @@ function App() {
    *  stop, and the pill a folded row shows. Shared by real rows and ghosts. */
   const laneBits = (repo: string, it: LaneItem<Place> | undefined) => {
     if (!it) return null;
-    const { lvl, step, label } = indentOf(it.depth, fit.navShown ? fit.navW : clampNav(settings.nav_width, 0, vw, railsWidth(settings)));
+    const { lvl, step, label } = indentOf(it.depth, navWidth);
     const style = { "--lvl": lvl, "--lstep": `${step}px` } as CSSProperties;
     const caret = it.kids ? (
       <button
@@ -10088,6 +10123,31 @@ function App() {
   const placeRow = (repo: string, p: Place, lane?: LaneItem<Place>) => {
     const lb = laneBits(repo, lane);
     const divergent = !p.is_main && !p.detached && p.branch && p.branch !== p.slug;
+    const compact = settings.quiet_chrome && navNarrow;
+    const branch = divergent ? <span className="row-branch">↗ {p.branch}</span> : null;
+    const marks = glyphs(p, health[repo]?.slugs.has(p.slug));
+    const draft = draftPaths.get(p.path);
+    const hasDetails = !!branch || marks.length > 0 || !!draft;
+    const agent = liveAgent(p);
+    const agentMark = <AgentMark agent={agent} model={agent ? p.agent_sessions?.[agent]?.model : null} />;
+    const facts = <>
+      {marks.map((g, i) => <span key={i} className={"g " + g.cls} title={g.title}>{g.text}</span>)}
+      {/* A draft is its own signal, outside the glyph limit. */}
+      {draft && <span className="g g-draft" title={draftTitle(draft)}>✎</span>}
+    </>;
+    const slot = (
+      <span className="row-slot">
+        <span className="row-age">{ago(activityAt(p))}</span>
+        <button
+          className="row-enter"
+          title="Enter — open the session"
+          data-track="nav.row.enter"
+          onClick={(e) => { e.stopPropagation(); fromRow(e.currentTarget, repo, p.slug); enterPlace(repo, p); hideNav(); }}
+        >
+          <Icons.ChevronRight size={12} />
+        </button>
+      </span>
+    );
     // The main worktree is not in any tier group and cannot leave one, so it is
     // the one row that never arms a drag.
     const draggable = !p.is_main;
@@ -10105,7 +10165,8 @@ function App() {
           (isSource ? " drag-src" : "") +
           (flash?.repo === repo && flash.slug === p.slug ? " flash" : "") +
           (draggable ? " draggable" : "") +
-          (stale ? " stale" : "")
+          (stale ? " stale" : "") +
+          (compact ? " row-compact" : "")
         }
         data-slug={p.slug}
         tabIndex={0}
@@ -10144,48 +10205,18 @@ function App() {
           {laneField(repo, p, false) ?? (
             <span className="row-name">
               {lb?.level}
-              {p.is_main ? "◆ " : p.declared?.pinned ? "★ " : ""}
+              {p.is_main ? "◆ " : ""}
+              {p.declared?.pinned && (!p.is_main || settings.quiet_chrome) ? "★ " : ""}
               {nameOf(p)}
             </span>
           )}
-          {divergent ? <span className="row-branch">↗ {p.branch}</span> : null}
+          {compact ? <span className="glyphs">{lb?.pill}{agentMark}{!hasDetails && slot}</span> : branch}
         </span>
-        <span className="glyphs">
-          {lb?.pill}
-          {glyphs(p, health[repo]?.slugs.has(p.slug)).map((g, i) => (
-            <span key={i} className={"g " + g.cls} title={g.title}>{g.text}</span>
-          ))}
-          {/* The unsent prompt. A row-level DATA marker like ● ↑ ⚑ beside it,
-              so it stays Unicode (icons.tsx: those sit inline with tabular
-              text, not on buttons) — and a span, so its interpolated title is
-              never read as a usage key. Outside `glyphs()` because that list
-              truncates at MAX and this one must not be the signal that falls
-              off: nothing else in the app says the place is waiting on YOU. */}
-          {draftPaths.has(p.path) && (
-            <span className="g g-draft" title={draftTitle(draftPaths.get(p.path)!)}>✎</span>
-          )}
-          {/* Which agent is live here. Shape carries it, not hue — the dot
-              slot already owns colour, and a second hued mark on the row would
-              read as a second state. Outside `glyphs()` like ✎, so truncation
-              cannot drop it. */}
-          <AgentMark agent={liveAgent(p)} model={(() => { const a = liveAgent(p); return a ? p.agent_sessions?.[a]?.model : null; })()} />
-          {/* Age and the enter button share ONE grid cell, stacked: the slot is
-              always as wide as the wider of the two, so swapping them on hover
-              cannot move the name beside it. Visibility (not display) does the
-              swap — a hidden button is out of the tab order either way, and the
-              age keeps reserving its width. */}
-          <span className="row-slot">
-            <span className="row-age">{ago(activityAt(p))}</span>
-            <button
-              className="row-enter"
-              title="Enter — open the session"
-              data-track="nav.row.enter"
-              onClick={(e) => { e.stopPropagation(); fromRow(e.currentTarget, repo, p.slug); enterPlace(repo, p); hideNav(); }}
-            >
-              <Icons.ChevronRight size={12} />
-            </button>
+        {compact
+          ? hasDetails && <span className="row-details">
+            {branch}<span className="glyphs">{facts}{slot}</span>
           </span>
-        </span>
+          : <span className="glyphs">{lb?.pill}{facts}{agentMark}{slot}</span>}
       </li>
     );
   };
@@ -10272,93 +10303,97 @@ function App() {
     return (
       <div className="project" data-project-root={pv.root} data-drop="project" data-ws-row={inWs ? pv.root : undefined}>
         <div
-          className="project-h"
+          className={"project-h" + (pv.ok ? " project-ready" : "")}
           // usage: the header's own label is the repo path; the buttons inside
           // it carry their own keys, which `closest` finds first.
           data-track="nav.project"
           onContextMenu={(e) => projectCtx(e, pv.root, inWs)}
           onPointerDown={(e) => arm(e, inNamed ? { kind: "project", root: pv.root, ws: inWs } : { kind: "project", root: pv.root })}
         >
-          <span className="caret" onClick={toggle}>{open ? <Icons.ChevronDown size={11} /> : <Icons.ChevronRight size={11} />}</span>
-          {pv.ok
-            ? <span className={"picon" + (rollup ? " " + rollup : "")} title={rollup === "busy" ? "a session is working" : rollup === "waiting" ? "a session needs input" : rollup === "done" ? (rollupUnread ? "a session finished — not seen yet" : "a session just finished") : undefined}><FolderIcon /></span>
-            : <span className="rollup broken" title="repo gone">⊘</span>}
-          <span className="pname" title={pv.root} onClick={toggle}>{basename(pv.root)}</span>
-          {pv.ok ? <span className="pcount">{places.length}</span> : <span className="pgone">repo gone</span>}
-          {pv.ok && disk.usage[pv.root] && (() => {
-            const own = disk.usage[pv.root].places.reduce((a, x) => a + ownTotal(x.own), 0);
-            return own >= 1e8 ? <span className="nav-disk" title="what this project's places hold on disk (Disk view)">{gb(own)}</span> : null;
-          })()}
-          {/* An unreadable .worktrees.toml is a PROJECT-level fact — no row can
-              carry it, and the row glyphs are deliberately frozen at their last
-              measurement while doctor can't run. Without this the nav's only
-              honest state for "the config broke" would be silence. */}
-          {pv.ok && health[pv.root]?.error ? (
-            <button
-              className="mini pbroken"
-              data-track="nav.project.broken"
-              title={`config unreadable — doctor could not run here:\n${health[pv.root]!.error}`}
-              onClick={() => setProjSheet(pv.root)}
-            >⚑</button>
-          ) : null}
-          {/* The project's things to do — doctor findings plus what the agent
-              setup Fix PR would carry (`projectTodos`, the same model as the
-              menu's "Repair / upgrade…" and the sheet's To do list). Its
-              dot remains visible in quiet mode, even on a collapsed project. */}
-          {pv.ok && (() => {
-            const n = todoCount(projectTodos(health[pv.root], agentSetup[pv.root]));
-            return n > 0 ? (
+          <div className="project-summary">
+            <span className="caret" onClick={toggle}>{open ? <Icons.ChevronDown size={11} /> : <Icons.ChevronRight size={11} />}</span>
+            {pv.ok
+              ? <span className={"picon" + (rollup ? " " + rollup : "")} title={rollup === "busy" ? "a session is working" : rollup === "waiting" ? "a session needs input" : rollup === "done" ? (rollupUnread ? "a session finished — not seen yet" : "a session just finished") : undefined}><FolderIcon /></span>
+              : <span className="rollup broken" title="repo gone">⊘</span>}
+            <span className="pname" title={pv.root} onClick={toggle}>{basename(pv.root)}</span>
+            {pv.ok ? <span className="pcount">{places.length}</span> : <span className="pgone">repo gone</span>}
+            {pv.ok && disk.usage[pv.root] && (() => {
+              const own = disk.usage[pv.root].places.reduce((a, x) => a + ownTotal(x.own), 0);
+              return own >= 1e8 ? <span className="nav-disk" title="what this project's places hold on disk (Disk view)">{gb(own)}</span> : null;
+            })()}
+            {/* An unreadable .worktrees.toml is a PROJECT-level fact — no row can
+                carry it, and the row glyphs are deliberately frozen at their last
+                measurement while doctor can't run. Without this the nav's only
+                honest state for "the config broke" would be silence. */}
+            {pv.ok && health[pv.root]?.error ? (
               <button
-                className="mini ptodo quiet-tool"
-                data-testid={`todo-mini|${pv.root}`}
-                data-track="nav.project.todo"
-                title={`${n} thing${n === 1 ? "" : "s"} to repair or upgrade — open the list`}
-                onClick={() => openRepair(pv.root)}
-              ><span className="todo-dot warn" />{n}</button>
-            ) : null;
-          })()}
-          {/* Also project-level: worktrees git registers OUTSIDE .worktrees/
-              (made by hand, or by another tool). No row can carry one — the
-              whole point is that it has no row. Comes with every snapshot
-              (`ls --json`'s `strays`), so it is known the moment the project
-              loads, without a doctor run. */}
-          {pv.ok && (pv.snapshot?.strays?.length ?? 0) > 0 ? (
-            <button
-              className="mini pstray quiet-tool"
-              data-testid={`stray-mini|${pv.root}`}
-              data-track="nav.project.strays"
-              title={`${pv.snapshot!.strays!.length} worktree${pv.snapshot!.strays!.length === 1 ? "" : "s"} registered outside .worktrees/ — this app can't see ${pv.snapshot!.strays!.length === 1 ? "it" : "them"}. Open the project sheet for the adopt command.`}
-              onClick={() => setProjSheet(pv.root)}
-            >⊟{pv.snapshot!.strays!.length}</button>
-          ) : null}
-          {/* The sync entry point David asked for on day one: hover-revealed,
-              next to + and ×, opening the popover the ctx menu duplicates.
-              `.mini` is a <button>, which navdrag's `arm` already declines to
-              start a drag from — no stopPropagation needed, same as +. */}
-          {pv.ok && (
-            <button className="mini quiet-tool" title="Sync" data-testid={`sync-mini|${pv.root}`} data-track="nav.project.sync"
-              aria-expanded={ctx?.kind === "sync" && ctx.root === pv.root}
-              onClick={(e) => openSyncPop(e, pv.root)}>⇄</button>
-          )}
-          <button className="mini pnew" title="new worktree (⌘N)" data-track="nav.project.new" onClick={() => { setNewFor(newFor === pv.root ? null : pv.root); setNewBase(""); setNewDraft(null); }}><Icons.Plus size={13} /></button>
-          {inNamed ? (
-            <button
-              className="mini quiet-tool"
-              data-testid="ws-project-remove"
-              data-track="nav.workspace.project.remove"
-              title="take it out of this workspace (it stays in All projects)"
-              onClick={() => wsRemoveProject(inNamed, pv.root)}
-            ><Icons.X size={13} /></button>
-          ) : (
-            <button
-              className={"mini quiet-tool" + (confirmRm === `hdr|${pv.root}` ? " armed" : "")}
-              data-track="nav.project.remove"
-              title={confirmRm === `hdr|${pv.root}` ? "click again to remove from All projects" : "remove project"}
-              onClick={() => removeProjectHdr(pv.root)}
-            >
-              {confirmRm === `hdr|${pv.root}` ? "remove?" : <Icons.X size={13} />}
-            </button>
-          )}
+                className="mini pbroken"
+                data-track="nav.project.broken"
+                title={`config unreadable — doctor could not run here:\n${health[pv.root]!.error}`}
+                onClick={() => setProjSheet(pv.root)}
+              >⚑</button>
+            ) : null}
+          </div>
+          <div className="project-extras">
+            {/* The project's things to do — doctor findings plus what the agent
+                setup Fix PR would carry (`projectTodos`, the same model as the
+                menu's "Repair / upgrade…" and the sheet's To do list). Its
+                dot remains visible in quiet mode, even on a collapsed project. */}
+            {pv.ok && (() => {
+              const n = todoCount(projectTodos(health[pv.root], agentSetup[pv.root]));
+              return n > 0 ? (
+                <button
+                  className="mini ptodo quiet-tool"
+                  data-testid={`todo-mini|${pv.root}`}
+                  data-track="nav.project.todo"
+                  title={`${n} thing${n === 1 ? "" : "s"} to repair or upgrade — open the list`}
+                  onClick={() => openRepair(pv.root)}
+                ><span className="todo-dot warn" />{n}</button>
+              ) : null;
+            })()}
+            {/* Also project-level: worktrees git registers OUTSIDE .worktrees/
+                (made by hand, or by another tool). No row can carry one — the
+                whole point is that it has no row. Comes with every snapshot
+                (`ls --json`'s `strays`), so it is known the moment the project
+                loads, without a doctor run. */}
+            {pv.ok && (pv.snapshot?.strays?.length ?? 0) > 0 ? (
+              <button
+                className="mini pstray quiet-tool"
+                data-testid={`stray-mini|${pv.root}`}
+                data-track="nav.project.strays"
+                title={`${pv.snapshot!.strays!.length} worktree${pv.snapshot!.strays!.length === 1 ? "" : "s"} registered outside .worktrees/ — this app can't see ${pv.snapshot!.strays!.length === 1 ? "it" : "them"}. Open the project sheet for the adopt command.`}
+                onClick={() => setProjSheet(pv.root)}
+              >⊟{pv.snapshot!.strays!.length}</button>
+            ) : null}
+            {/* The sync entry point David asked for on day one: hover-revealed,
+                next to + and ×, opening the popover the ctx menu duplicates.
+                `.mini` is a <button>, which navdrag's `arm` already declines to
+                start a drag from — no stopPropagation needed, same as +. */}
+            {pv.ok && (
+              <button className="mini quiet-tool" title="Sync" data-testid={`sync-mini|${pv.root}`} data-track="nav.project.sync"
+                aria-expanded={ctx?.kind === "sync" && ctx.root === pv.root}
+                onClick={(e) => openSyncPop(e, pv.root)}>⇄</button>
+            )}
+            <button className="mini pnew" title="new worktree (⌘N)" data-track="nav.project.new" onClick={() => { setNewFor(newFor === pv.root ? null : pv.root); setNewBase(""); setNewDraft(null); }}><Icons.Plus size={13} /></button>
+            {inNamed ? (
+              <button
+                className="mini quiet-tool"
+                data-testid="ws-project-remove"
+                data-track="nav.workspace.project.remove"
+                title="take it out of this workspace (it stays in All projects)"
+                onClick={() => wsRemoveProject(inNamed, pv.root)}
+              ><Icons.X size={13} /></button>
+            ) : (
+              <button
+                className={"mini quiet-tool" + (confirmRm === `hdr|${pv.root}` ? " armed" : "")}
+                data-track="nav.project.remove"
+                title={confirmRm === `hdr|${pv.root}` ? "click again to remove from All projects" : "remove project"}
+                onClick={() => removeProjectHdr(pv.root)}
+              >
+                {confirmRm === `hdr|${pv.root}` ? "remove?" : <Icons.X size={13} />}
+              </button>
+            )}
+          </div>
         </div>
 
         {settings.quiet_chrome && initNotice && (
@@ -10715,10 +10750,6 @@ function App() {
       ];
   const ord = Object.fromEntries(shell.map(([k], i) => [k, i + 1])) as Record<string, number>;
   const gridCols = shell.map(([, t]) => t).filter(Boolean).join(" ");
-  // The overlay's width. `clampNav` with NO dock reservation, unlike the pinned
-  // column: the overlay covers the terminal rather than sharing the row with
-  // it, so there is nothing to reserve width away from.
-  const navOverlayW = clampNav(settings.nav_width, 0, vw, railsWidth(settings));
   return (
     <div className="appwrap">
     {/* `.app` stays exactly the four-column grid it was. The strip is its
@@ -10812,6 +10843,7 @@ function App() {
       <aside
         ref={navRef}
         className={"nav" + (fit.navShown ? "" : navRevealed ? " overlay" : " hidden")}
+        data-narrow={navNarrow || undefined}
         // `order` rides along with the overlay's width rather than moving to a
         // class: both are geometry this component computes, and an overlaid nav
         // is out of flow anyway — the order simply stops mattering until it is
@@ -10930,7 +10962,7 @@ function App() {
 
         {selected && sel && (
           <>
-            <header className="topbar">
+            <header className="topbar place-topbar">
               {navButtons}
               <div className="identity">
                 {/* Which workspace: where its card was clicked, and the way back. */}
@@ -11092,12 +11124,10 @@ function App() {
                       if (!lines.length) return null;
                       const st = selected.lineage?.starter;
                       const to = st && "place" in st && !st.project && !st.chat && !st.removed ? here.find((x) => x.slug === st.place) ?? null : null;
-                      return (
-                        <span className={"s lane-line" + (to ? " link" : "")} data-testid="lane-line" title={lines.join("\n")}
-                          onClick={to ? () => selectPlace(sel.repo, to) : undefined}>
-                          ↳ {lines.join(" · ")}
-                        </span>
-                      );
+                      return to ? (
+                        <button type="button" className="s lane-line link" data-testid="lane-line" title={lines.join("\n")}
+                          onClick={() => selectPlace(sel.repo, to)}>↳ {lines.join(" · ")}</button>
+                      ) : <span className="s lane-line" data-testid="lane-line" title={lines.join("\n")}>↳ {lines.join(" · ")}</span>;
                     })()}
                     {/* §7.3: an instruction file a paired device wrote here,
                         marked out of band — never inside the file. */}
@@ -11152,27 +11182,14 @@ function App() {
                 ) : (
                   <button className="enter-btn with-icon" onClick={() => enterPlace(sel.repo, selected)}>Enter <Icons.ChevronRight size={13} /></button>
                 )}
-                <button className={"icon-btn" + (selected.declared?.pinned ? " on" : "")} data-track="place.pin" title={selected.declared?.pinned ? "unpin" : "pin"}
-                  onClick={() => {
-                    const on = !selected.declared?.pinned;
-                    patchDeclared(sel.repo, sel.slug, { pinned: on });
-                    mutate(invoke("set_pin", { repo: sel.repo, slug: sel.slug, on }));
-                  }}>
+                {!settings.quiet_chrome && <button className={"icon-btn" + (selected.declared?.pinned ? " on" : "")} data-track="place.pin" title={selected.declared?.pinned ? "unpin" : "pin"}
+                  onClick={() => togglePin(sel.repo, selected)}>
                   <Icons.Pin filled={!!selected.declared?.pinned} />
-                </button>
+                </button>}
 
-                {/* The menu is no longer gated on `!is_main`: Rename and Copy
-                    path apply to the main checkout too — its slug is the
-                    literal "(main)", which is exactly where a real name helps
-                    most. Only Remove stays main-only.
-                    It also absorbed Close, which used to be a permanent control
-                    beside the live badge: ending a session is deliberate and
-                    rare, and a destructive button standing in the header is one
-                    slip away from taking the session you are reading. The
-                    Lifecycle ▾ popover that sat here went entirely — the same
-                    four states are one right-click away on the row, which is
-                    where a lifecycle decision has the place in front of it. */}
-                <div className="menu-wrap">
+                {/* Show all restores the original header menu. The row menu
+                    holds these actions in both modes. */}
+                {!settings.quiet_chrome && <div className="menu-wrap">
                   <button className="ctrl icon-only" title="more actions" onClick={() => (menu === "more" ? closeMenu() : (setConfirmRm(null), setMenu("more")))}><Icons.Ellipsis /></button>
                   {menu === "more" && (
                     <div className="popover right">
@@ -11224,7 +11241,7 @@ function App() {
                       )}
                     </div>
                   )}
-                </div>
+                </div>}
               </div>
             </header>
           </>
@@ -12517,10 +12534,21 @@ function App() {
           <button className="pop-item" onClick={() => { if (ctxCard.current !== undefined) fromWs(ctx.repo, ctxPlace.slug, ctxCard.current); enterPlace(ctx.repo, ctxPlace); }}>Enter <Icons.ChevronRight size={12} /></button>
           <button className="pop-item" data-testid="ctx-rename" data-track="nav.row.rename"
             onClick={() => { const r = ctx.repo, sl = ctxPlace.slug, g = ctxGhost.current; closeCtx(); renamePlace(r, sl, g); }}>Rename…</button>
+          {ctxPlace.declared?.title && (
+            <button className="pop-item" data-testid="ctx-clear-name" data-track="nav.row.clear_name"
+              onClick={() => { closeCtx(); setTitle(ctx.repo, ctxPlace.slug, ""); }}>Clear name</button>
+          )}
           <button className="pop-item" data-testid="ctx-disk" onClick={() => openDisk({ kind: "place", repo: ctx.repo, slug: ctxPlace.slug })}>Disk usage</button>
           {groupChatOn && shareStart(ctx.repo, ctxPlace.slug) && (
-            <button className="pop-item" data-testid="ctx-share" onClick={() => { const r = ctx.repo, sl = ctxPlace.slug; closeCtx(); openShareDialog(r, sl); }}>Share this session…</button>
+            <button className="pop-item" data-testid="ctx-share" data-track="ctx-share" onClick={() => { const r = ctx.repo, sl = ctxPlace.slug; closeCtx(); openShareDialog(r, sl); }}>Share this session…</button>
           )}
+          {(() => {
+            const agents = liveAgents(agentsOf(ctxPlace));
+            return agents.length === 1 ? (
+              <button className="pop-item" data-testid="ctx-switch-agent" data-track="nav.row.switch_agent"
+                onClick={() => { closeCtx(); openSwitch(agents[0], ctx.repo, ctxPlace); }}>Switch agent…</button>
+            ) : null;
+          })()}
           {!ctxPlace.tmux_session.up && ctxPlace.claude_session_present && (
             settings.ai_auto_resume ? (
               <button className="pop-item" onClick={() => { if (ctxCard.current !== undefined) fromWs(ctx.repo, ctxPlace.slug, ctxCard.current); enterPlace(ctx.repo, ctxPlace, { fresh: true }); }}>Open fresh (skip resume)</button>
@@ -12531,11 +12559,11 @@ function App() {
           {ctxPlace.tmux_session.up && (
             <>
               {confirmRm === closeCtxKey(ctx.repo, ctxPlace.slug) ? (
-                <button className="pop-item danger armed" onClick={() => closeSession(ctx.repo, ctxPlace.slug)}>
+                <button className="pop-item danger armed" data-track="place.close.confirm" onClick={() => closeSession(ctx.repo, ctxPlace.slug)}>
                   Kill {closeSess} — whole session?
                 </button>
               ) : (
-                <button className="pop-item" onClick={() => closeSession(ctx.repo, ctxPlace.slug)}>Close session</button>
+                <button className="pop-item" data-track="nav.row.close_session" onClick={() => closeSession(ctx.repo, ctxPlace.slug)}>Close session</button>
               )}
               <button className="pop-item" onClick={() => copyText(`tmux attach -t ${shq(ctxPlace.tmux_session.name)}`)}>Copy attach command</button>
               {settings.terminal_cmd.trim() && (
@@ -12548,16 +12576,12 @@ function App() {
             </>
           )}
           <div className="ctx-sep" />
+          <button className="pop-item" data-track="nav.row.pin"
+            onClick={() => { closeCtx(); togglePin(ctx.repo, ctxPlace); }}>
+            {ctxPlace.declared?.pinned ? "★ Unpin" : "☆ Pin"}
+          </button>
           {!ctxPlace.is_main && (
             <>
-              <button className="pop-item" onClick={() => {
-                closeCtx();
-                const on = !ctxPlace.declared?.pinned;
-                patchDeclared(ctx.repo, ctxPlace.slug, { pinned: on });
-                mutate(invoke("set_pin", { repo: ctx.repo, slug: ctxPlace.slug, on }));
-              }}>
-                {ctxPlace.declared?.pinned ? "★ Unpin" : "☆ Pin"}
-              </button>
               <div className="pop-hint">lifecycle</div>
               <div className="ctx-life">
                 {SETTABLE.map((s) => (
@@ -12620,18 +12644,18 @@ function App() {
               blanket gate would have taken the check away at exactly the
               "should I resume this?" moment it exists for. */}
           {!(!ctxPlace.tmux_session.up && !!selected && sel?.repo === ctx.repo && selected.slug === ctxPlace.slug) && (
-            <button className="pop-item" data-testid="ctx-status"
+            <button className="pop-item" data-testid="ctx-status" data-track="ctx-status"
               onClick={() => openStatus(ctx.repo, ctxPlace.slug)}>Status check…</button>
           )}
-          <button className="pop-item" onClick={() => openRemote(ctx.repo, ctxPlace)}>Open on {remoteHostLabel(remoteBase[ctx.repo])}</button>
+          <button className="pop-item" data-track="nav.row.remote" onClick={() => openRemote(ctx.repo, ctxPlace)}>Open on {remoteHostLabel(remoteBase[ctx.repo])}</button>
           <button className="pop-item" {...hostOnly("Reveal in Finder")} onClick={() => revealPlace(ctxPlace.path)}>Reveal in Finder</button>
           <button className="pop-item" {...hostOnly("Open in editor")} onClick={() => editIn(ctxPlace.path)}>Open in editor</button>
-          <button className="pop-item" onClick={() => copyText(ctxPlace.path)}>Copy path</button>
+          <button className="pop-item" data-testid="ctx-copy-path" data-track="nav.row.copy_path" onClick={() => copyText(ctxPlace.path)}>Copy path</button>
           {ctxPlace.branch && <button className="pop-item" onClick={() => copyText(ctxPlace.branch!)}>Copy branch</button>}
           {!ctxPlace.is_main && (
             <>
               <div className="ctx-sep" />
-              <button className="pop-item danger" data-testid="ctx-remove"
+              <button className="pop-item danger" data-testid="ctx-remove" data-track="ctx-remove"
                 onClick={() => openRemove(ctx.repo, ctxPlace.slug)}>
                 Remove worktree…
               </button>

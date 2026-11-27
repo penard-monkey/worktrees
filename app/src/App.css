@@ -200,6 +200,7 @@ html[data-places-side="right"] .rail-group .rail-icon.active::before { left: aut
   padding: var(--s3) var(--s3) var(--s2);
 }
 .nav-title { flex: 1; font-size: var(--fs-meta); letter-spacing: 0.08em; color: var(--txt-dim); font-weight: var(--fw-bold); }
+.nav[data-narrow] .nav-head { gap: var(--s1); padding-inline: var(--s2); }
 .icon-btn {
   background: transparent; border: 0; color: var(--txt-dim);
   border-radius: var(--r-sm); padding: 2px 6px; font-size: var(--fs-label);
@@ -517,6 +518,18 @@ html[data-places-side="right"] .rail-group .rail-icon.active::before { left: aut
   padding: var(--s2) var(--s3); font-size: var(--fs-label);
   background: var(--bg-tree);
 }
+.project-summary, .project-extras { display: contents; }
+[data-quiet-chrome] .project-h { gap: var(--s1); }
+[data-quiet-chrome] .project-h .quiet-tool { padding-inline: 3px; min-width: 0; }
+[data-quiet-chrome] .project-ready .project-extras { display: flex; flex: none; align-items: center; }
+[data-quiet-chrome] .nav[data-narrow] .project-h.project-ready { flex-direction: column; align-items: stretch; gap: 0; }
+[data-quiet-chrome] .nav[data-narrow] .project-ready .project-summary {
+  display: flex; align-items: center; gap: var(--s1); padding-right: 22px;
+}
+[data-quiet-chrome] .nav[data-narrow] .project-ready .project-extras {
+  justify-content: flex-end; min-height: 16px;
+}
+[data-quiet-chrome] .nav[data-narrow] .project-ready .pnew { position: absolute; top: var(--s2); right: var(--s3); }
 .caret { color: var(--txt-mute); font-size: var(--fs-meta); cursor: pointer; width: 10px; }
 /* project icon; a busy child shows as a small pulsing badge on its corner */
 .picon { position: relative; display: grid; place-items: center; width: 16px; height: 16px; color: var(--txt-dim); flex: none; }
@@ -893,6 +906,14 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 [data-quiet-chrome] .row[data-slug] .row-slot { grid-auto-flow: column; gap: 2px; }
 [data-quiet-chrome] .row[data-slug] .row-slot > * { grid-area: auto; }
 [data-quiet-chrome] .row[data-slug]:is(:hover, :focus-within, .sel) .row-age { visibility: visible; }
+.row.row-compact { grid-template-columns: 14px minmax(0, 1fr); gap: 0 var(--s1); }
+.row-compact > .row-id { flex-direction: row; align-items: center; justify-content: space-between; gap: var(--s1); }
+.row-compact > .row-id > .glyphs { flex: none; }
+.row-details {
+  grid-column: 2; display: flex; align-items: center; justify-content: space-between; gap: var(--s1);
+}
+.row-details > .row-branch { flex: 1; }
+.row-details > .glyphs { margin-left: auto; flex: none; }
 .row[data-slug]:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 .row[data-slug]:focus-within .row-enter { visibility: visible; }
 .app:not([data-quiet-chrome]) .row[data-slug]:focus-within .row-age { visibility: hidden; }
@@ -966,6 +987,9 @@ html[data-guides="off"] .kids > .places::after { display: none; }
   display: flex; align-items: center; gap: var(--s3); flex-wrap: nowrap; min-width: 0;
   padding: var(--s2) var(--s3); border-bottom: 1px solid var(--line); background: var(--bg-panel);
 }
+/* Keep the original header height when the menu is tucked into the row.
+   The reference dock uses the height below this header for its panel split. */
+[data-quiet-chrome] .place-topbar { min-height: calc(18px + 4 * var(--s2)); }
 .identity { display: flex; align-items: center; gap: var(--s3); flex: 1 1 auto; min-width: 0; overflow: hidden; }
 .topbar .slug {
   flex: 0 1 auto; min-width: 5ch;
@@ -1072,6 +1096,10 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 .pr-dot.mute { background: transparent; box-shadow: inset 0 0 0 1.5px var(--txt-mute); }
 .status-cluster { display: flex; align-items: center; gap: var(--s3); flex: 0 1 auto; min-width: 0; overflow: hidden; font-size: var(--fs-meta); }
 .status-cluster .s { display: inline-flex; align-items: center; gap: 3px; }
+@media (hover: hover) and (pointer: fine) {
+  [data-quiet-chrome] .place-topbar:not(:is(:hover, :focus-within))
+  :is(.remote-link, .device-badge, .status-cluster) { opacity: 0; pointer-events: none; }
+}
 .status-cluster .ok { color: var(--ok); }
 .status-cluster .dirty { color: var(--dirty); }
 .status-cluster .ab { color: var(--dirty); font-variant-numeric: tabular-nums; }
@@ -4365,7 +4393,7 @@ html[data-guides="off"] .lane-rails { display: none; }
 }
 /* The place header's line (§8): one ellipsised row, the rest in its tooltip. */
 .status-cluster .lane-line { min-width: 0; max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--txt-dim); }
-.status-cluster .lane-line.link { cursor: pointer; }
+.status-cluster .lane-line.link { cursor: pointer; border: 0; padding: 0; background: transparent; font: inherit; }
 .status-cluster .lane-line.link:hover { color: var(--txt-hi); }
 /* A nav row renamed in place (RowNameField): row-sized, not header-sized. */
 .row .row-name-input { max-width: none; width: 100%; box-sizing: border-box; font-size: var(--fs-row); font-weight: var(--fw-med); }

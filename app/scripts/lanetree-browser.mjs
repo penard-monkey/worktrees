@@ -61,6 +61,10 @@ const rows = (page) => page.evaluate(() => {
 
 async function drag(page, from, to, frac) {
   const sel = (x) => `li.row[data-slug="${x}"], li.row[data-ghost="${x}"]`;
+  // The notices above this project can change its scroll position. Put the
+  // destination in view before grabbing the source so the pointer never aims
+  // at a row below the viewport.
+  await page.locator(sel(to)).evaluate((el) => el.scrollIntoView({ block: "center" }));
   await page.locator(sel(from)).scrollIntoViewIfNeeded();
   const a = await page.locator(sel(from)).boundingBox();
   await page.mouse.move(a.x + 60, a.y + a.height / 2);

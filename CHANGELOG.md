@@ -13,6 +13,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ### Changed
 
+- **Places and the place header are quieter by default.** Hover or focus to see more details. Selected lanes keep their details, and warnings stay visible. Open a project warning chip for the full notice. Right-click a lane or press Shift+F10 on its row for actions like Pin and Switch agent. Choose **Show all** in Places or in Layout settings to keep the full controls visible.
 - **Workspace chats use the same reference dock as lanes.** The right rail opens Overview, Memory, Plan, Ideas, Chats or Terminal. Use ⌘J, the active rail button or the dock’s close button to give the chat more room. The chat title menu holds read access, tool setup and Close. The chat still shows when it is folding or has no worktrees tools.
 
 ### Fixed
