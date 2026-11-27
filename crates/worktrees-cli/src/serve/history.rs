@@ -4,7 +4,8 @@
 //! share's bound transcript through.
 //!
 //! **One index per transcript, built once and extended as the file grows.**
-//! `agent_turns` reads the last 2 MiB and 20 turns; a shared history is the
+//! `agent_turns` reads its 20 latest turns (`turns::window`, at most 32 MiB
+//! of the end); a shared history is the
 //! whole file, which on this machine reaches 393 MB. So the bytes are read
 //! ONCE, line by line, through `turns::Indexer` — the same parser every turn
 //! read uses — into each turn's byte spans and the turn each tool call is

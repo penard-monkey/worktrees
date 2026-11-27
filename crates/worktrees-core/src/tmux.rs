@@ -245,6 +245,23 @@ pub fn sq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Pane 0's command for an agent launch: the user's shell, interactive so
+/// its rc files give the agent the PATH, nvm and the rest a terminal has,
+/// running `inner` (unquoted; this quotes it). Lanes and workspace, idea and
+/// desk chats all start this way, so they cannot drift.
+///
+/// An interactive rc can stop on a question, and nobody is there to answer
+/// it: oh-my-zsh's update check asks `Would you like to update? [Y/n]` and
+/// the agent never starts (2026-11-26, a workspace chat). The launch shell
+/// gets `DISABLE_AUTO_UPDATE=true`, oh-my-zsh's own switch (oh-my-bash reads
+/// the same name), and `inner` unsets it again before it runs anything, so
+/// the agent and any shell after it see the user's environment unchanged. A
+/// `zstyle ':omz:update' mode` set in the rc wins over the variable; that
+/// pane stays a shell, and the chat view says so.
+pub fn rc_launch(inner: &str) -> String {
+    format!("exec env DISABLE_AUTO_UPDATE=true \"${{SHELL:-/bin/sh}}\" -ic {}", sq(&format!("unset DISABLE_AUTO_UPDATE; {inner}")))
+}
+
 /// A session already living in place dir `wt` (a pane cwd'd there), so `open`
 /// reuses an AI pane running under any name — including one started under a
 /// prefix this repo has since changed (`ops::live_session`). Prefers a pane whose
@@ -1516,6 +1533,31 @@ pub fn kill_session(name: &str) {
 
 #[cfg(test)]
 mod tests {
+    /// A launch's rc runs with oh-my-zsh's update check off, and the
+    /// command after it sees the variable gone again. The rc here is `$ENV`,
+    /// which an interactive POSIX sh reads as zsh reads `.zshrc`.
+    #[test]
+    fn a_launch_shell_skips_the_rc_update_question_and_hands_the_env_back() {
+        let dir = std::env::temp_dir().join(format!("wt-rc-launch-{}", crate::ulid::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rc = dir.join("rc");
+        std::fs::write(&rc, "[ \"$DISABLE_AUTO_UPDATE\" = true ] || echo ASKED\n").unwrap();
+        let line = rc_launch("echo \"after=${DISABLE_AUTO_UPDATE-unset}\"");
+        let out = crate::childenv::command("/bin/sh")
+            .arg("-c")
+            .arg(&line)
+            .env("SHELL", "/bin/sh")
+            .env("ENV", &rc)
+            .env_remove("DISABLE_AUTO_UPDATE")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(!stdout.contains("ASKED"), "the rc asked: {stdout}");
+        assert!(stdout.contains("after=unset"), "{stdout} / {}", String::from_utf8_lossy(&out.stderr));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_failed_list_is_not_an_empty_one() {
         for gone in ["no server running on /tmp/tmux-501/default\n", "error connecting to /tmp/x/default (No such file or directory)\n"] {

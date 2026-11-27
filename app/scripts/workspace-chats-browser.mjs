@@ -52,7 +52,7 @@ async function nav(page, tag, name) {
   ok(!!(await page.$("[data-testid=nav-ws-waits]")) && !(await page.$("[data-testid=ws-chat-row]")), `${tag} …from All projects too, which lists no chat`);
   await page.click("[data-testid=nav-view-workspaces]");
   ok(await group(page, "Everything").locator("[data-testid=ws-chats-all]").count() === 0, `${tag} three closed are all of them: no All chats`);
-  ok(await page.evaluate(() => { const g = document.querySelector("[data-testid=ws-group]"); const c = g.querySelector("[data-testid=ws-chats]"), p = g.querySelector(".project"), d = g.querySelector("[data-testid=ws-docs]"); const F = Node.DOCUMENT_POSITION_FOLLOWING; return !!(d.compareDocumentPosition(c) & F) && !!(c.compareDocumentPosition(p) & F); }), `${tag} under the documents, above the projects`);
+  ok(await page.evaluate(() => { const g = document.querySelector("[data-testid=ws-group]"); const c = g.querySelector("[data-testid=ws-chats]"), p = g.querySelector(".project"); const F = Node.DOCUMENT_POSITION_FOLLOWING; return !g.querySelector("[data-testid=ws-docs]") && !!(c.compareDocumentPosition(p) & F); }), `${tag} above the projects, with no documents row`);
   // Folds, as the event says them.
   const id = async (t) => row(page, t).getAttribute("data-chat");
   const [rel, sto] = [await id("Release order"), await id("Storage layout")];
@@ -277,8 +277,9 @@ async function narrow(page, tag) {
   ok(JSON.stringify(await vis()) === "[false,true]", `${tag} Documents shows the other`);
   await row(page, "Who can see what").click();
   ok(JSON.stringify(await vis()) === "[true,false]", `${tag} a chat row goes to the chat`);
-  await page.click("[data-testid=ws-doc-memory]");
-  ok(JSON.stringify(await vis()) === "[false,true]" && await isTab(page, "memory"), `${tag} a document's chip goes to the documents`);
+  await page.click("[data-testid=ws-side-docs]");
+  await tab(page, "memory");
+  ok(JSON.stringify(await vis()) === "[false,true]" && await isTab(page, "memory"), `${tag} a document's tab is on the documents side`);
   await row(page, "Release order").click();
   ok(await draft(page).inputValue() === "kept", `${tag} and the draft was kept`);
   await page.setViewportSize({ width: 1440, height: 900 });

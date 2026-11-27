@@ -148,8 +148,11 @@ async function edits(page, tag) {
   await page.locator("[data-testid=ws-name]", { hasText: "Everything" }).first().click();
   await page.evaluate(() => localStorage.getItem("x"));
   await fold(page, ws, rel, "landed");
-  ok(await until(page, () => !!document.querySelector("[data-testid=ws-docs] [data-testid=memory-fresh]")), `${tag} one that lands elsewhere is the Memory chip's dot`);
-  ok(await isTab(page, "overview"), `${tag} …and moves nothing`);
+  // No dot is asserted here. The fold's commit is already the one looked at by
+  // this point in the mock, and the old check passed only on ANOTHER card's
+  // Memory chip (Tools'), its selector not scoped to this workspace. The Memory
+  // tab's dot is workspace-memory-browser.mjs's.
+  ok(await isTab(page, "overview"), `${tag} one that lands elsewhere moves nothing`);
   // ── closed without a fold, with changes left ──
   await row(page, "Who can see what").click();
   await colOf(page, "Who can see what");

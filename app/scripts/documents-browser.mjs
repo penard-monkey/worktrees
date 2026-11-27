@@ -252,10 +252,10 @@ async function flow(page, tag, name) {
   await again.close();
   await page.evaluate(() => { const t = window.__TAURI_INTERNALS__, i = t.invoke; window.__openReal = i; t.invoke = (c, a) => { if (c !== "open_companion") return i(c, a); const k = JSON.parse(localStorage.getItem("wt.ideas.show")); localStorage.setItem("wt.ideas.shown", JSON.stringify({ ask: k.ask, at: Date.now(), ok: true, doc: k.doc })); return Promise.resolve(null); }; });
   await page.click("[data-testid=main-doc-float]");
-  ok(await until(page, () => !!document.querySelector("[data-testid=ws-doc-plan] .wsf-chip-f")), `${tag} and its chip in the nav wears the mark`);
+  ok(await until(page, () => !!document.querySelector("[data-testid=ws-floated-here]")), `${tag} and its tab says where it went`);
   await page.evaluate(() => { window.__TAURI_INTERNALS__.invoke = window.__openReal; localStorage.removeItem("wt.ideas.show"); });
   await page.click("[data-testid=ws-floated-here]");
-  ok(await until(page, (id) => document.querySelector("[data-testid=main-doc]")?.dataset.doc === id, plan) && await until(page, () => !document.querySelector(".wsf-chip-f")), `${tag} Open it here opens it, and the mark goes`);
+  ok(await until(page, (id) => document.querySelector("[data-testid=main-doc]")?.dataset.doc === id, plan) && await until(page, () => !document.querySelector("[data-testid=ws-floated-here]")), `${tag} Open it here opens it, and the note goes`);
 
   // ── Float with a save that fails ──
   await page.click("[data-testid=main-doc] [data-testid=ideas-mode-edit]");
@@ -375,7 +375,7 @@ async function broken(page, tag) {
 /** A document that is only read fetches no editor; the choice is kept per kind. */
 async function readFirst(page, tag) {
   const { plan } = await setup(page);
-  await page.click("[data-testid=ws-doc-plan]");
+  await page.click("[data-testid=ws-tab][data-tab=plan]");
   ok(await until(page, () => !!document.querySelector("[data-testid=main-doc] [data-testid=ideas-read] .md-h1")), `${tag} a plan opens in Read`);
   await page.waitForTimeout(500);
   ok(!(await fetched(page)) && await page.locator("[data-testid=main-doc] [data-testid=ideas-editor]").count() === 0, `${tag} …which fetches no editor, and mounts none`);

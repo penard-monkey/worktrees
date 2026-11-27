@@ -11,8 +11,8 @@
 //   - which tabs, chips and cards each beta draws, and that with neither a
 //     workspace's name folds its card;
 //   - the frame: Overview first, the counts, Home not lit, the card's dot
-//     waiting before working, the documents row (dashed, marked, one row at the
-//     narrowest nav);
+//     waiting before working, no documents row in the nav card (the owner took
+//     it out, 2026-11-26), and a tab marked for text that is not saved;
 //   - the attention line, the empty states, every act of the old overview;
 //   - Back and Forward through tabs, ideas, workspaces and places, and a Back
 //     that a text which cannot be saved refuses;
@@ -61,6 +61,9 @@ const isDoc = (page, id) => until(page, (id) => { const d = document.querySelect
 const tabs = (page) => page.evaluate(() => [...document.querySelectorAll("[data-testid=ws-tab]")].map((t) => t.dataset.tab).join());
 const group = (page, name) => page.locator("[data-testid=ws-group]", { has: page.locator("[data-testid=ws-name]", { hasText: name }) }).first();
 const pickWs = (page, name = "Everything") => page.locator("[data-testid=ws-name]", { hasText: name }).first().click();
+// A document's tab, through the workspace's overview: the nav card has no
+// document chips since 2026-11-26.
+const docTab = async (page, t, name = "Everything") => { await pickWs(page, name); await page.waitForSelector(`[data-testid=ws-tab][data-tab=${t}]`); await tab(page, t); };
 const pickPlace = (page, n = 0) => page.locator("[data-testid=ws-group] li.row[data-slug]").nth(n).click();
 const homeLit = (page) => page.evaluate(() => document.querySelector(".home-item").classList.contains("on"));
 const back = (page) => page.locator("[data-testid=nav-back]:visible").first().click();
@@ -102,11 +105,11 @@ async function gates(page, tag) {
   await page.waitForTimeout(1200); // the app's own save of the fold
   await page.evaluate(() => { const s = JSON.parse(sessionStorage.getItem("wt-mock-ui-state")); sessionStorage.setItem("wt-mock-ui-state", JSON.stringify({ ...s, beta_workspace_chats: true, ws_collapsed: {} })); });
   await page.reload();
-  await page.waitForSelector("[data-testid=ws-docs]");
+  await page.waitForSelector("[data-testid=ws-name]");
   await pickWs(page);
   await page.waitForSelector("[data-testid=ws-overview]");
   ok(await tabs(page) === "overview,memory,chats", `${tag} workspace chats alone: Overview, Memory, Chats`);
-  ok(await page.locator("[data-testid=ws-docs]").first().locator("button").evaluateAll((b) => b.map((x) => x.dataset.testid).join()) === "ws-doc-memory", `${tag} …one chip, Memory, and no Plan or Ideas`);
+  ok(!(await page.$("[data-testid=ws-docs]")), `${tag} …and no documents row in the nav card`);
   ok(!(await page.$("[data-testid=ws-ov-card-work]")) && !(await page.$("[data-testid=ws-ov-card-ideas]")) && !!(await page.$("[data-testid=ws-ov-card-memory]")) && !!(await page.$("[data-testid=ws-ov-card-chats]")) && !!(await page.$("[data-testid=ws-ov-card-projects]")), `${tag} …and an Overview of Memory, Chats and Projects`);
   ok(await page.locator("[data-testid=ideas-rail]").count() === 0, `${tag} …without the lightbulb: Ideas is its own switch`);
   const other = await page.evaluate(() => [...document.querySelectorAll("[data-testid=ws-name]")].map((e) => e.textContent).find((n) => !n.startsWith("Everything")));
@@ -131,11 +134,9 @@ async function frame(page, tag, name) {
   ok(await page.locator("[data-testid=ws-frame-name]").innerText() === "Everything" && /^3 projects · 2 chats live$/.test(await page.locator(".wsf-counts").innerText()) && await page.locator("[data-testid=ws-frame-new-chat]").count() === 1, `${tag} its bar: the name, its projects and live chats, New chat`);
   ok(!(await homeLit(page)), `${tag} Home is not lit while a workspace is shown`);
   ok(await group(page, "Everything").locator(".ws-icon").first().evaluate((e) => e.classList.contains("waiting")), `${tag} the card's dot is waiting, though lanes work in it too`);
-  const chips = await page.evaluate(() => [...document.querySelectorAll("[data-testid=ws-docs]")[0].querySelectorAll("button")].map((b) => [b.dataset.testid, b.classList.contains("none"), b.querySelector(".wsf-chip-n")?.textContent ?? ""]));
-  ok(JSON.stringify(chips) === JSON.stringify([["ws-doc-memory", false, ""], ["ws-doc-plan", false, ""], ["ws-doc-ideas", false, "2"]]), `${tag} its chips: Memory, Plan, Ideas 2 (${JSON.stringify(chips)})`);
-  ok(await page.evaluate(() => { const g = document.querySelector("[data-testid=ws-group]"); const c = g.querySelector("[data-testid=ws-docs]"), p = g.querySelector(".project"); return !!(c.compareDocumentPosition(p) & Node.DOCUMENT_POSITION_FOLLOWING); }), `${tag} …above its projects`);
-  await page.click("[data-testid=ws-doc-memory]");
-  ok(await isTab(page, "memory"), `${tag} a chip opens its tab`);
+  ok(!(await page.$("[data-testid=ws-docs]")) && !(await page.$(".wsf-chip")), `${tag} its nav card has no documents row: the tabs are the way in`);
+  await tab(page, "memory");
+  ok(await isTab(page, "memory"), `${tag} a tab opens its document`);
   if (SHOTS) { await tab(page, "overview"); await page.screenshot({ path: `${SHOTS}/wsv-overview-${name}.png` }); }
 
   // ── the overview's acts ──
@@ -168,8 +169,8 @@ async function frame(page, tag, name) {
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/wsv-plan-${name}.png` });
 
   // ── the Ideas tab ──
-  await page.click("[data-testid=ws-doc-ideas]");
-  ok(await isTab(page, "ideas") && await isDoc(page, JELLY), `${tag} the Ideas chip opens the first linked idea`);
+  await tab(page, "ideas");
+  ok(await isTab(page, "ideas") && await isDoc(page, JELLY), `${tag} the Ideas tab opens the first linked idea`);
   await page.click(`[data-testid=ws-idea-row][data-idea='${GPU}'] .wsf-idea-open`);
   ok(await isDoc(page, GPU) && await page.evaluate((id) => document.querySelector("[data-testid=ws-idea-row].on")?.dataset.idea === id, GPU), `${tag} another is picked in the list, which marks it`);
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/wsv-ideas-${name}.png` });
@@ -189,7 +190,6 @@ async function frame(page, tag, name) {
   await tab(page, "overview");
   await page.click("[data-testid=ws-ov-plan-unlink]");
   ok(await until(page, () => !!document.querySelector("[data-testid=ws-ov-card-work] [data-testid=ws-ov-link-plan]")), `${tag} Unlink leaves No plan, Link a plan, Make a plan`);
-  ok(await until(page, () => document.querySelector("[data-testid=ws-doc-plan]").classList.contains("none")), `${tag} and its chip is dashed`);
   await tab(page, "plan");
   ok(await until(page, () => !!document.querySelector("[data-testid=ws-no-plan]") && !document.querySelector("[data-testid=main-doc]")), `${tag} the Plan tab with none says so, and holds no document`);
   await page.click("[data-testid=ws-ov-make-plan]");
@@ -203,7 +203,7 @@ async function frame(page, tag, name) {
 async function history(page, tag) {
   const { plan } = await setup(page);
   const step = async () => page.waitForTimeout(700); // past the coalesce window
-  await step(); await page.click("[data-testid=ws-doc-plan]"); await isDoc(page, plan);
+  await step(); await tab(page, "plan"); await isDoc(page, plan);
   await step(); await tab(page, "ideas"); await isDoc(page, JELLY);
   await step(); await page.click(`[data-testid=ws-idea-row][data-idea='${GPU}'] .wsf-idea-open`); await isDoc(page, GPU);
   await step(); await pickPlace(page); await until(page, () => !!document.querySelector(".space > .topbar .slug"));
@@ -255,7 +255,7 @@ async function history(page, tag) {
 
 async function life(page, tag) {
   const { plan } = await setup(page, ["beta_ideas", "beta_workspace_chats"]);
-  await page.click("[data-testid=ws-doc-plan]");
+  await docTab(page, "plan");
   await isDoc(page, plan);
   await page.evaluate(() => { window.__sec = document.querySelector("[data-testid=main-doc]"); window.__slot = window.__sec.parentElement; });
   const same = () => page.evaluate(() => { const s = document.querySelector("[data-testid=main-doc]"); return s === window.__sec && s.parentElement === window.__slot && s.isConnected; });
@@ -266,7 +266,7 @@ async function life(page, tag) {
   ok(await until(page, (id) => window.__mock.ideaFile(id).content.includes("Typed in the plan."), plan, 1000), `${tag} typed in a plan, then a place picked: it is saved at once`);
   ok(await same() && await page.evaluate(() => window.__sec.closest("[data-testid=ws-frame]").hidden), `${tag} the same section, in the same parent, hidden`);
   ok(await page.evaluate(() => { const f = document.querySelector("[data-testid=ws-frame]").getBoundingClientRect(); return f.width === 0 && f.height === 0; }), `${tag} …and the place has the whole room`);
-  await page.click("[data-testid=ws-doc-plan]");
+  await docTab(page, "plan");
   ok(await isDoc(page, plan) && await same() && (await page.locator("[data-testid=main-doc] .cm-content").innerText()).includes("Typed in the plan."), `${tag} back on the Plan tab it is there, as it was left`);
   for (const t of ["overview", "memory", "ideas", "chats", "plan"]) { await tab(page, t); await isTab(page, t); if (!(await same())) ok(false, `${tag} the section moved on the ${t} tab`); }
   ok(await same(), `${tag} through every tab it is one element with one parent`);
@@ -277,7 +277,7 @@ async function life(page, tag) {
   ok(await until(page, (n) => document.querySelector("[data-testid=ws-frame-name]")?.textContent === n, other) && await same(), `${tag} …and through another workspace (${other})`);
 
   // ── unsavable first ──
-  await page.click("[data-testid=ws-doc-plan]");
+  await docTab(page, "plan");
   await isDoc(page, plan);
   await page.locator("[data-testid=main-doc] .cm-content").click();
   await page.evaluate((id) => { const c = window.__mock.ideaFile(id).content; window.__theirs = c + "\nTheirs.\n"; }, plan);
@@ -289,7 +289,6 @@ async function life(page, tag) {
   ok(await isTab(page, "plan"), `${tag} its tab does not change`);
   await pickPlace(page);
   ok(await until(page, () => /is still open in its workspace/i.test(document.body.innerText)) && await same(), `${tag} a place is not refused: the text waits behind it, and the window says so`);
-  ok(await until(page, () => !!document.querySelector("[data-testid=ws-doc-plan] .wsf-chip-dot:not(.new)")), `${tag} its chip is marked`);
   await pickWs(page, other);
   ok(await until(page, () => /has text that is not saved/.test(document.querySelector("[data-testid=ws-attention][data-kind=unsaved]")?.textContent ?? "")) && /in Everything/.test(await page.locator("[data-testid=ws-attention][data-kind=unsaved]").innerText()), `${tag} another workspace's Overview says which document, and where`);
   await page.click("[data-testid=ws-attention-go]");
@@ -297,8 +296,11 @@ async function life(page, tag) {
   await pickPlace(page);
   await pickWs(page);
   ok(await isDoc(page, plan) && await isTab(page, "plan") && !!(await page.$("[data-testid=ideas-conflict]")), `${tag} its workspace's name goes to it too`);
+  await tab(page, "overview");
+  ok(await until(page, () => !!document.querySelector("[data-testid=ws-tab][data-tab=plan] .wsf-dot:not(.new)")), `${tag} from another tab, the Plan tab is marked`);
+  await tab(page, "plan");
   await page.click("[data-testid=ideas-keep-mine]");
-  ok(await until(page, (id) => window.__mock.ideaFile(id).content.includes(" MINE"), plan) && await until(page, () => !document.querySelector(".wsf-chip-dot:not(.new)")), `${tag} Keep mine saves it, and the mark goes`);
+  ok(await until(page, (id) => window.__mock.ideaFile(id).content.includes(" MINE"), plan) && await until(page, () => !document.querySelector(".wsf-dot:not(.new)")), `${tag} Keep mine saves it, and the mark goes`);
 
   // ── a slow save, and a newer click: the newer one wins ──
   await page.evaluate(() => window.__mock.ideaSlowWrites(1200));
@@ -308,7 +310,7 @@ async function life(page, tag) {
   await pickPlace(page);
   await page.waitForTimeout(2000);
   ok(await page.locator(".space > .topbar .slug").isVisible() && !(await page.locator("[data-testid=ws-frame]").isVisible()) && (await page.evaluate((id) => window.__mock.ideaFile(id).content, plan)).includes(" SLOW"), `${tag} a tab asked for, then a place while its save is out: the place stays, and it is saved`);
-  await page.click("[data-testid=ws-doc-plan]");
+  await docTab(page, "plan");
   await isDoc(page, plan);
   await page.evaluate(() => window.__mock.ideaSlowWrites(0));
 
@@ -325,7 +327,7 @@ async function life(page, tag) {
 
 async function removed(page, tag) {
   const { plan } = await setup(page);
-  await page.click("[data-testid=ws-doc-plan]");
+  await docTab(page, "plan");
   await isDoc(page, plan);
   await page.click("[data-testid=main-doc] [data-testid=ideas-mode-edit]");
   // ── a workspace removed with a document of it open ──
@@ -340,7 +342,7 @@ async function removed(page, tag) {
 /** …and removed elsewhere (another window) while its text cannot be saved. */
 async function orphan(page, tag) {
   const { plan, ws } = await setup(page);
-  await page.click("[data-testid=ws-doc-plan]");
+  await docTab(page, "plan");
   await isDoc(page, plan);
   await page.click("[data-testid=main-doc] [data-testid=ideas-mode-edit]");
   await page.locator("[data-testid=main-doc] .cm-content").click();
@@ -366,7 +368,7 @@ async function orphan(page, tag) {
 /** A workspace changed in the Ideas window (or by anybody else). */
 async function elsewhere(page, tag) {
   await boot(page, ["beta_ideas"]);
-  await page.click("[data-testid=ws-doc-plan]");
+  await docTab(page, "plan");
   ok(await until(page, () => /A plan is made from ideas: link one first\./.test(document.querySelector("[data-testid=ws-no-plan]")?.textContent ?? "")) && await page.locator("[data-testid=ws-ov-make-plan]").isDisabled(), `${tag} Make a plan with no idea linked says why, in words`);
   const ws = (await call(page, "workspaces_list", {})).workspaces.find((w) => w.name === "Everything").id;
   await pickWs(page);
@@ -374,7 +376,7 @@ async function elsewhere(page, tag) {
   await call(page, "workspace_link_idea", { id: ws, idea: JELLY });
   ok(await page.evaluate(() => /None linked/.test(document.querySelector("[data-testid=ws-ov-card-ideas]").textContent)), `${tag} linked elsewhere: nothing here has heard`);
   await page.evaluate(() => window.dispatchEvent(new StorageEvent("storage", { key: "wt.workspaces.changed", newValue: "1" })));
-  ok(await until(page, (id) => !!document.querySelector(`[data-testid=ws-ov-idea][data-idea='${id}']`) && !document.querySelector("[data-testid=ws-doc-ideas]").classList.contains("none"), JELLY), `${tag} the Ideas window's word brings it, on the Overview and the chip`);
+  ok(await until(page, (id) => !!document.querySelector(`[data-testid=ws-ov-idea][data-idea='${id}']`) && /Ideas\s*1/.test(document.querySelector("[data-testid=ws-tab][data-tab=ideas]")?.textContent ?? ""), JELLY), `${tag} the Ideas window's word brings it, on the Overview and the tab's count`);
   await call(page, "workspace_unlink_idea", { id: ws, idea: JELLY });
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   ok(await until(page, () => /None linked/.test(document.querySelector("[data-testid=ws-ov-card-ideas]")?.textContent ?? "")), `${tag} and so does coming to the front`);
@@ -476,15 +478,6 @@ async function layout(page, tag, name) {
     ok(cols.room >= 900 ? cols.beside : cols.under, `${tag} ${w}px (${cols.room} of room): ${cols.room >= 900 ? "two columns" : "one column, memory last"}`);
     if (SHOTS) await page.screenshot({ path: `${SHOTS}/wsv-overview-${w}-${name}.png` });
   }
-  // ── the narrowest nav ──
-  await page.setViewportSize({ width: 1440, height: 900 });
-  for (const [nav, icons] of [[300, true], [220, false]]) {
-    await page.evaluate((n) => { const s = JSON.parse(sessionStorage.getItem("wt-mock-ui-state")); sessionStorage.setItem("wt-mock-ui-state", JSON.stringify({ ...s, nav_width: n })); }, nav);
-    await page.reload();
-    await page.waitForSelector("[data-testid=ws-docs]");
-    const r = await page.evaluate(() => { const c = document.querySelector("[data-testid=ws-docs]"); const bs = [...c.querySelectorAll("button")]; return { n: bs.length, tops: new Set(bs.map((b) => Math.round(b.getBoundingClientRect().top))).size, icons: bs.some((b) => b.querySelector(".wsf-chip-i").getBoundingClientRect().width > 0), out: bs.some((b) => b.getBoundingClientRect().right > c.getBoundingClientRect().right), h: c.getBoundingClientRect().height, w: document.querySelector(".nav").getBoundingClientRect().width }; });
-    ok(r.n === 3 && r.tops === 1 && r.icons === icons && !r.out, `${tag} a ${nav}px nav: the chips are one row, ${icons ? "with" : "without"} icons (${JSON.stringify(r)})`);
-  }
 }
 
 async function themes(page, tag, name) {
@@ -506,7 +499,7 @@ async function themes(page, tag, name) {
         const bgOf = (el) => { const st = []; for (let e = el; e; e = e.parentElement) { const c = parse(getComputedStyle(e).backgroundColor); if (c[3] > 0) st.push(c); if (c[3] >= 1) break; } let acc = [255, 255, 255, 1]; for (const c of st.reverse()) acc = over(c, acc); return acc; };
         const lum = (c) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); };
         const ratio = (el) => { const bg = bgOf(el); const [a, b] = [lum(over(parse(getComputedStyle(el).color), bg)), lum(bg)].sort((p, q) => q - p); return (a + 0.05) / (b + 0.05); };
-        return [...document.querySelectorAll(".wsf-tab, .wsf-chip, .wsf-name-t, .wsf-counts, .wsf-card-name, .wsf-attn-t, .wsf-more, .wsf-link, .ws-ov-none, .ws-ov-name, .ws-ov-state, .wsf-idea-open, .wsf-side-line, [data-testid=ws-frame] .ctrl:not(:disabled), .wsf-empty p")]
+        return [...document.querySelectorAll(".wsf-tab, .wsf-name-t, .wsf-counts, .wsf-card-name, .wsf-attn-t, .wsf-more, .wsf-link, .ws-ov-none, .ws-ov-name, .ws-ov-state, .wsf-idea-open, .wsf-side-line, [data-testid=ws-frame] .ctrl:not(:disabled), .wsf-empty p")]
           .filter((e) => e.textContent.trim() && e.getBoundingClientRect().width).map((e) => [e.className + ": " + e.textContent.trim().slice(0, 20), ratio(e)]).filter(([, r]) => r < 4.5);
       });
       ok(low.length === 0, `${tag} ${theme} ${t}: its words read ≥ 4.5:1${low.length ? `: ${low.map(([a, r]) => `${a} ${r.toFixed(2)}`).join("; ")}` : ""}`);
