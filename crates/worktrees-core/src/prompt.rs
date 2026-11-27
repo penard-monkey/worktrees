@@ -4103,6 +4103,21 @@ mod tests {
             assert_eq!(claude(screen), None, "{name}");
             assert_eq!(composer_empty("claude", screen), Some(empty), "2.1.314 {name}");
         }
+        // The owner's (main) on 2026-11-26 (2.1.331, a screenshot, derived:
+        // no capture of a live session was taken): busy, an update notice on
+        // the row above the box, auto mode and three agents in the status
+        // row. Still an empty composer under no modal, and a running turn.
+        let busy = claude314!("composer-busy-empty.e.txt");
+        let rule = busy.lines().position(|l| l.contains("── wtap-probe ─")).unwrap();
+        let mut rows: Vec<String> = busy.lines().map(str::to_string).collect();
+        rows.insert(rule, format!("{}\u{1b}[38;2;78;186;101m✔ Update installed · /restart to apply\u{1b}[39m", " ".repeat(60)));
+        let last = rows.len() - 1;
+        rows[last] = rows[last].replace("manual mode on", "⏵⏵ auto mode on (shift+tab to cycle)").replace("1 agent", "3 agents");
+        let owner = rows.join("\n");
+        assert!(owner.contains("Update installed") && owner.contains("3 agents"));
+        assert_eq!(claude(&owner), None, "the owner's busy screen");
+        assert_eq!(composer_empty("claude", &owner), Some(true), "the owner's busy screen");
+        assert_eq!(turn_shown("claude", &owner), Some(TurnShown::Running), "the owner's busy screen shows its turn running");
         // A history that quotes a whole modal, under a live composer.
         let quoted = format!("{}\n{}", claude_fx!("permission-bash.txt"), claude_fx!("composer-empty.e.txt"));
         assert_eq!(claude(&quoted), None);
