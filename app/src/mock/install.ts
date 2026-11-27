@@ -504,6 +504,11 @@ const mockDiskUsage = (repo: string) => {
   const unique = places.reduce((a, p) => a + p.own.build + p.own.deps + p.own.source + p.own.git, 0) + 1.5e9;
   return { root: repo, scanned_epoch: Math.floor(Date.now() / 1000), scan_ms: 2400, places, unique, volume: { free: 741e9, total: 2.0e12, snapshots: 4 } };
 };
+// The engine keeps a project's scan until a `refresh` or a delete
+// (`diskusage::project_usage`, `forget`), and so does the mock: what the page
+// holds can then go stale, which `__mock.diskAge` / `diskRemovePlace` /
+// `diskAddPlace` drive.
+const mockDiskScans = new Map<string, ReturnType<typeof mockDiskUsage>>();
 const mockDiskTree = (repo: string, slug: string) => {
   const pv = ws.projects.find((p) => p.root === repo);
   const pl = pv?.snapshot?.places.find((p) => p.slug === slug);
@@ -3346,9 +3351,14 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     // ── named workspaces (core `workspaces`, api `workspaces.rs`) ──
     // ── disk usage (api `disk.rs`) ──
     case "disk_usage": {
-      if (args.cached) return null;
+      const repo = String(args.repo);
+      if (args.cached) return mockDiskScans.get(repo) ?? null;
+      if (!args.refresh && mockDiskScans.has(repo)) return mockDiskScans.get(repo);
       await mockDiskSlow();
-      return mockDiskUsage(String(args.repo));
+      console.info("[disk-scan]", repo, args.refresh ? "refresh" : "first");
+      const u = mockDiskUsage(repo);
+      mockDiskScans.set(repo, u);
+      return u;
     }
     case "disk_place_tree":
       await mockDiskSlow();
@@ -3359,7 +3369,9 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       if (!path || path.startsWith("/") || path.split("/").includes("..")) throw `not a path inside the place: "${path}"`;
       if (first === ".git") throw "git's own folder is never deleted here";
       if (first === "src") throw `git tracks files in ${path}; change them with git, not here`;
+      if (!findProject(args.repo)?.snapshot?.places.some((p) => p.slug === args.slug)) throw `${path} is not there any more; rescan`;
       mockDiskGone.add(`${args.repo}|${args.slug}|${first}`);
+      mockDiskScans.delete(String(args.repo));
       return { path, bytes: 4.2e9, files: 21000, dir: true };
     }
     case "workspaces_list":
@@ -7520,6 +7532,30 @@ let mockNotifyGranted = new URLSearchParams(location.search).get("notify") === "
 };
 (window as any).__mock = {
   ...guestHelpers,
+  // ── disk: what happens after a scan the engine keeps ──
+  /** Every kept scan, `secs` older. */
+  diskAge(secs: number) { for (const u of mockDiskScans.values()) u.scanned_epoch -= secs; },
+  /** A place goes, as `remove_place` would, but nothing rescans. */
+  diskRemovePlace(slug: string, repo?: string) {
+    const pv = repo ? findProject(repo) : ws.projects.find((p) => p.snapshot?.places.some((x) => x.slug === slug));
+    if (pv?.snapshot) pv.snapshot.places = pv.snapshot.places.filter((p) => p.slug !== slug);
+    emitEvent("places:changed", {});
+    return pv?.root ?? null;
+  },
+  /** A place appears, as `new_place` would, but nothing rescans. */
+  diskAddPlace(slug: string, repo?: string) {
+    const pv = repo ? findProject(repo) : ws.projects.find((p) => p.ok && p.snapshot);
+    if (!pv?.snapshot || pv.snapshot.places.some((p) => p.slug === slug)) return;
+    pv.snapshot.places.push({
+      slug, path: `${repo}/.worktrees/${slug}`, is_main: false, registered: true,
+      branch: slug, detached: false, dirty: false, dirty_files: 0,
+      ahead: 0, behind: 0, last_commit_subject: "wip", last_commit_epoch: now(),
+      tmux_session: { name: sessionName(pv.snapshot.prefix, slug), up: false },
+      agent_sessions: agentSessions(sessionName(pv.snapshot.prefix, slug), null),
+      claude_session_present: false, declared: {}, lifecycle_effective: "active",
+    } as any);
+    emitEvent("places:changed", {});
+  },
   // ── a workspace's memory: what an agent does to it, and what the page sent ──
   memoryEdit: (id: string, path: string, text: string | null) => mockMemory.edit(id, path, text),
   memoryWrites: () => mockMemory.writes(),

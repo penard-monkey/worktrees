@@ -15,6 +15,10 @@
 //   3. THE CLEANUP. Only build output is offered (never dependencies, git or
 //      source), and a place is ticked by default only when no agent works in
 //      it and it has been idle IDLE_DAYS.
+//   6. STALENESS. A kept scan is compared with the places that exist now, by
+//      name and nothing else: a place removed after it is named and still
+//      counted, one added is named and not counted, a project with no scan
+//      is said, and the cleanup never offers a removed place.
 //
 // Same slice-the-real-source shape as offers-check.mjs: it evaluates
 // `diskmodel.ts` itself, so it tests the edit and not a paraphrase.
@@ -141,8 +145,7 @@ const m = await import(`data:text/javascript;base64,${Buffer.from(js).toString("
   else ok("sizes in decimal units, as Finder says them");
 }
 
-if (bad) { console.error(`\n${bad} failure(s)`); process.exit(1); }
-// ── 4. the pick ────────────────────────────────────────────────────────────
+// ── 5. the pick ────────────────────────────────────────────────────────────
 // A treemap pick is kept as a PATH (it is part of the history location), so
 // Back must find the node again in whatever tree is drawn, or say it is gone.
 {
@@ -159,4 +162,37 @@ if (bad) { console.error(`\n${bad} failure(s)`); process.exit(1); }
   else ok("findPath: a path that is gone (deleted, rescanned away) answers null");
 }
 
+// ── 6. staleness ───────────────────────────────────────────────────────────
+{
+  const pl = (slug) => ({ slug, path: `/r/${slug}`, is_main: slug === "(main)", own: { build: 2e9, deps: 0, source: 0, git: 0 }, shared: 0, alloc: 2e9, files: 1, errors: 0,
+    cleanable: [{ path: "target", cat: "build", own: 2e9, shared: 0, files: 1, id: "1:2" }] });
+  const u = { root: "/r", scanned_epoch: 1000, scan_ms: 1, places: [pl("(main)"), pl("feat-x"), pl("keep")], unique: 0, volume: { free: 0, total: 0, snapshots: null } };
+  const same = m.staleOf(["/r"], { "/r": u }, () => [{ slug: "(main)" }, { slug: "feat-x" }, { slug: "keep" }]);
+  if (same.gone.length || same.added.length || same.unscanned.length || m.staleWords(same, (r) => r).length) fail("a scan that still matches the places reads as stale");
+  else ok("a scan whose places all still exist says nothing");
+  const live = { "/r": [{ slug: "(main)" }, { slug: "keep" }, { slug: "feat-y" }] };
+  const st = m.staleOf(["/r", "/q"], { "/r": u }, (r) => live[r] ?? null);
+  const w = m.staleWords(st, (r) => (r === "/q" ? "q" : r)).join(" ");
+  const want = "feat-x was removed after this scan. These numbers still include it. feat-y was added after this scan and is not counted. q has not been scanned and is not counted.";
+  if (w !== want) fail(`notice: ${JSON.stringify(w)}, want ${JSON.stringify(want)}`);
+  else ok("a removed place, an added place and an unscanned project are each said once");
+  if (!m.isGone(st, "/r", "feat-x") || m.isGone(st, "/r", "keep")) fail("isGone marks the wrong rows");
+  else ok("only the removed place's row is marked");
+  const two = m.staleWords(m.staleOf(["/r"], { "/r": u }, () => [{ slug: "(main)" }, { slug: "a" }, { slug: "b" }]), (r) => r).join(" ");
+  if (two !== "2 places were removed after this scan. These numbers still include them. 2 places were added after this scan and are not counted.") fail(`counts: ${two}`);
+  else ok("more than one is counted, not listed");
+  if (/[—–]/.test(w + two)) fail("the notice carries a dash");
+  const rows = m.bulkRows({ "/r": u }, { "/r": "r" }, () => ({ last: 0, busy: false }), 100e6, (r, s) => m.isGone(st, r, s)).map((r) => r.slug).join(",");
+  if (rows.includes("feat-x")) fail(`cleanup offers a removed place: ${rows}`);
+  else ok("cleanup never offers a place removed after the scan");
+  const ages = [[30, "just now"], [60, "1 minute ago"], [5 * 60, "5 minutes ago"], [3600, "1 hour ago"], [3 * 86400, "3 days ago"]];
+  const wrong = ages.filter(([d, s]) => m.scannedAgo(10_000_000 + d, 10_000_000) !== s);
+  if (wrong.length) fail(`scannedAgo: ${wrong.map(([d, s]) => `${d}s → ${m.scannedAgo(10_000_000 + d, 10_000_000)}, want ${s}`).join("; ")}`);
+  else ok("a scan's age reads in minutes, hours and days");
+  const mixed = m.scansAgo(1000 + 3 * 86400, [u, { ...u, scanned_epoch: 1000 + 3 * 86400 }]);
+  if (mixed !== "scanned 3 days ago to just now") fail(`scansAgo over two scans: ${mixed}`);
+  else ok("several scans of different ages say the oldest and the newest");
+}
+
+if (bad) { console.error(`\n${bad} failure(s)`); process.exit(1); }
 console.log("\nall disk checks passed");

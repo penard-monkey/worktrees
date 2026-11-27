@@ -39,8 +39,9 @@ pub fn disk_place_tree(_ctx: &Ctx, repo: String, slug: String) -> Result<PlaceTr
 }
 
 /// Delete one path git ignores from a place, permanently (`delete_refusal`
-/// has the rules). `scanned` is the scan's identity of the path (`Node::id`): a
-/// path swapped since the scan is refused.
+/// has the rules). `scanned` is the scan's identity of the path (`Node::id`,
+/// `diskusage::Ident`): a path swapped since the scan is refused, even when the
+/// new folder got the old inode number back.
 pub fn disk_delete(
     _ctx: &Ctx,
     repo: String,
@@ -50,7 +51,9 @@ pub fn disk_delete(
 ) -> Result<Deleted, String> {
     let (project, root, is_main) = place(&repo, &slug)?;
     let expect = match scanned.as_deref() {
-        Some(s) => Some(diskusage::parse_id(s).ok_or_else(|| format!("not a scan identity: {s}"))?),
+        // A two-part id (`<dev>:<ino>`, from before the time was recorded)
+        // cannot tell a replaced folder from the scanned one: refused.
+        Some(s) => Some(diskusage::parse_id(s).ok_or_else(|| format!("{path} was scanned by an older worktrees or the scan's identity is unreadable ({s}); rescan"))?),
         None => None,
     };
     let r = diskusage::delete_in_place(&project.main_root, &root, is_main, &path, expect);
