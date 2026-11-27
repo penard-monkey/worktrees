@@ -294,7 +294,7 @@ impl WsMode {
             ),
             tool(
                 "plan_read",
-                "The workspace's plan, read whole: its text, its mtime_ms (plan_write's expected_mtime), its \
+                "The workspace's plan, read whole: its text, its rev (plan_write's expected_rev), its \
                  projects and its work items, each with the line plan_start_work takes. Says so when the \
                  workspace has no plan.",
                 obj(json!({}), &[]),
@@ -428,14 +428,15 @@ impl WsMode {
             tool(
                 "plan_write",
                 "Replace the workspace's plan's whole text (to edit an item, a section, anything). Call \
-                 plan_read first and pass its mtime_ms: a plan saved since is refused, never written over. The \
+                 plan_read first and pass its rev: a plan saved since is refused, never written over. The \
                  old text is kept in the plan's history. The frontmatter stays as read.",
                 obj(
                     json!({
                         "content": { "type": "string", "description": "The plan's whole new text, frontmatter included." },
-                        "expected_mtime": { "type": "integer", "description": "plan_read's mtime_ms." }
+                        "expected_rev": { "type": "string", "description": "plan_read's rev: the text this is written against." },
+                        "expected_mtime": { "type": "integer", "description": "The older form: plan_read's mtime_ms. Use expected_rev." }
                     }),
-                    &["content", "expected_mtime"],
+                    &["content"],
                 ),
                 false,
                 false,
@@ -488,8 +489,8 @@ impl WsMode {
                 "REPLACE the whole text of an idea this chat made, or one linked to the workspace. Call \
                  idea_read first and pass its mtime_ms; the old text is kept in its history.",
                 obj(
-                    json!({ "id": { "type": "string" }, "content": { "type": "string" }, "expected_mtime": { "type": "integer" } }),
-                    &["id", "content", "expected_mtime"],
+                    json!({ "id": { "type": "string" }, "content": { "type": "string" }, "expected_rev": { "type": "string", "description": "idea_read's rev." }, "expected_mtime": { "type": "integer", "description": "The older form: idea_read's mtime_ms." } }),
+                    &["id", "content"],
                 ),
                 false,
                 false,
@@ -736,6 +737,7 @@ impl WsMode {
             "id": p.doc.idea.id,
             "title": p.doc.idea.title,
             "mtime_ms": p.doc.idea.mtime_ms,
+            "rev": p.doc.idea.rev,
             "content": p.doc.content,
             "projects": p.sections.projects,
             "work": p.sections.work,
@@ -1056,17 +1058,15 @@ impl WsMode {
     fn plan_write(&self, w: &Workspace, a: &Value, ideas_dir: &Path) -> Result<Value, String> {
         let plan = w.plan.as_deref().ok_or("this workspace has no plan: make one with plan_make")?;
         let content = super::idea_arg(a, "content")?;
-        let Some(mtime) = a.get("expected_mtime").and_then(|v| v.as_u64()) else {
-            return Err("expected_mtime is required: the mtime_ms plan_read gave. Read the plan first.".into());
-        };
+        let (mtime, rev) = super::seen_arg(a, "plan_read")?;
         if ideas::Kind::of(content) != ideas::Kind::Plan {
             return Err("the text is not a plan any more (its frontmatter lost `plan_of:`): keep the frontmatter as read".into());
         }
         super::idea_fits(content)?;
         let live = ideas::list_at(ideas_dir)?.resolve(plan)?.id.clone().unwrap_or_default();
-        let saved = ideas::write_kept_at(ideas_dir, &live, content, Some(mtime))?;
+        let saved = ideas::write_rev_at(ideas_dir, &live, content, mtime, rev.as_deref(), true)?;
         let problems = plans::read(content).problems;
-        Ok(json!({ "plan": live, "mtime_ms": saved.mtime_ms, "problems": problems, "note": "Written; the old text is in the plan's history." }))
+        Ok(json!({ "plan": live, "mtime_ms": saved.mtime_ms, "rev": saved.rev, "problems": problems, "note": "Written; the old text is in the plan's history." }))
     }
 
     fn plan_start(&self, w: &Workspace, c: &Chat, a: &Value, ideas_dir: &Path) -> Result<Value, String> {

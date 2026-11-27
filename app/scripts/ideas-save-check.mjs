@@ -70,9 +70,14 @@ const { Session, SAVE_PAUSE_MS } = M;
   };
   const ULID = "01JC8Z4K3M9QX2T7VBN5R6WYHD";
   const fill = (lit) => lit.replace(/\{[a-z_]*(?::\?)?\}/g, ULID);
+  // The stale sentence is one const, ERR_STALE, which check_mtime and the
+  // text-checked save (`write_checked_at`, by `rev`) both answer with.
   const cm = fnBody("check_mtime");
-  const staleLits = errs(cm.body);
-  check(cm.n === 1 && staleLits.length === 1, `the stale-save sentence is found once, in fn check_mtime (fns: ${cm.n}, Errs: ${staleLits.length})`);
+  const consts = [...live.matchAll(/\nconst ERR_STALE: &str = "((?:[^"\\]|\\.)*)";/g)].map((m) => m[1]);
+  const staleLits = /Err\(ERR_STALE\.into\(\)\)/.test(cm.body) ? consts : errs(cm.body);
+  check(cm.n === 1 && staleLits.length === 1, `the stale-save sentence is found once, as fn check_mtime's (fns: ${cm.n}, found: ${staleLits.length})`);
+  const wc = fnBody("write_checked_at");
+  check(wc.n === 1 && (wc.body.match(/Err\(ERR_STALE\.into\(\)\)/g) ?? []).length >= 2, "a save checked by its text is refused in the same words, and so is one the re-read catches");
   const rs = fnBody("exact");
   const rsLits = errs(rs.body);
   // exact's LAST Err is the one for an id no file carries (every lookup,

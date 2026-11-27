@@ -1587,8 +1587,9 @@ impl Server {
                 "idea_write",
                 "REPLACE the whole text of one of the user's ideas. Call idea_read first: \
                  `content` must be the full document, frontmatter and its `id` line kept, and \
-                 expected_mtime is the mtime_ms that read gave; refused without it, or when the \
-                 idea changed since. Only from (main): refused in any other place. An idea is the \
+                 expected_rev is the `rev` that read gave (an older client's expected_mtime, the \
+                 read's mtime_ms, is still taken); refused without one, or when the idea changed \
+                 since, even within the same millisecond. Only from (main): refused in any other place. An idea is the \
                  user's own document: rewrite it only when they asked for that, keep what they \
                  did not ask you to change, and say in the text that an agent rewrote it. The text as it was is copied to the idea's \
                  history first. The first heading names the file, so a new heading renames it.",
@@ -1597,9 +1598,10 @@ impl Server {
                     "properties": {
                         "id": { "type": "string", "description": "The idea's id, from ideas_list." },
                         "content": { "type": "string", "description": "The whole new document, frontmatter included." },
-                        "expected_mtime": { "type": "integer", "description": "The mtime_ms idea_read returned." }
+                        "expected_rev": { "type": "string", "description": "The rev idea_read returned: the text this is written against." },
+                        "expected_mtime": { "type": "integer", "description": "The older form: the mtime_ms idea_read returned. Use expected_rev." }
                     },
-                    "required": ["id", "content", "expected_mtime"],
+                    "required": ["id", "content"],
                     "additionalProperties": false
                 }),
                 false,
@@ -3882,17 +3884,33 @@ fn idea_append(dir: &std::path::Path, a: &serde_json::Value) -> Result<serde_jso
     let d = ideas::read_at(dir, id)?;
     let content = idea_joined(&d.content, text);
     idea_fits(&content)?;
-    Ok(idea_row(&ideas::write_kept_at(dir, id, &content, Some(d.idea.mtime_ms))?))
+    // Against the text this read: a save in the same millisecond is seen.
+    Ok(idea_row(&ideas::write_rev_at(dir, id, &content, None, d.idea.rev.as_deref(), true)?))
 }
 
 fn idea_write(dir: &std::path::Path, a: &serde_json::Value) -> Result<serde_json::Value, String> {
     let id = idea_arg(a, "id")?.trim();
     let content = idea_arg(a, "content")?;
-    let Some(mtime) = a.get("expected_mtime").and_then(|v| v.as_u64()) else {
-        return Err("expected_mtime is required: the mtime_ms idea_read gave (an integer). Read the idea first.".into());
-    };
+    let (mtime, rev) = seen_arg(a, "idea_read")?;
     idea_fits(content)?;
-    Ok(idea_row(&ideas::write_kept_at(dir, id, content, Some(mtime))?))
+    Ok(idea_row(&ideas::write_rev_at(dir, id, content, mtime, rev.as_deref(), true)?))
+}
+
+/// What a whole-text write was made against: `expected_rev` (the read's
+/// `rev`, which sees a change in the same millisecond), else an older
+/// client's `expected_mtime`; one of the two is required. `read` names the
+/// tool that gives them.
+fn seen_arg(a: &serde_json::Value, read: &str) -> Result<(Option<u64>, Option<String>), String> {
+    let rev = match a.get("expected_rev") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(r)) if !r.trim().is_empty() => Some(r.trim().to_string()),
+        Some(_) => return Err(format!("expected_rev must be the rev {read} gave (a string)")),
+    };
+    let mtime = a.get("expected_mtime").and_then(|v| v.as_u64());
+    if rev.is_none() && mtime.is_none() {
+        return Err(format!("expected_rev is required: the rev {read} gave. Read it first."));
+    }
+    Ok((mtime, rev))
 }
 
 fn text_ok(body: &str) -> serde_json::Value {
@@ -6644,6 +6662,37 @@ mod tests {
         assert_eq!(call(&mut s, "forget", serde_json::json!({ "what": "x", "files": ["../../etc"] }))["isError"], serde_json::json!(true));
     }
 
+    /// A chat's plan_write and idea_write are checked by the TEXT they were
+    /// made against (`rev`), so a save that lands in the same millisecond as
+    /// the chat's read is refused, not written over; neither form given is
+    /// refused, and an older client's expected_mtime still works.
+    #[test]
+    fn a_chats_whole_text_writes_see_a_save_in_the_same_millisecond() {
+        let f = ws_fix("ws-same-ms");
+        let mut s = ws_server(&f, Some(&f.conv), true);
+        let read = body(&call(&mut s, "plan_read", serde_json::json!({})));
+        let (rev, mtime) = (read["rev"].as_str().unwrap().to_string(), read["mtime_ms"].as_u64().unwrap());
+        let doc = ideas::read_at(&f.ideas, &f.plan).unwrap();
+        let path = f.ideas.join(&doc.idea.file);
+        let theirs = doc.content.replace("Do it.", "Do it their way.");
+        std::fs::write(&path, &theirs).unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_millis(mtime)).unwrap();
+        let ours = doc.content.replace("Do it.", "Do it our way.");
+        let r = call(&mut s, "plan_write", serde_json::json!({ "content": ours, "expected_rev": rev }));
+        assert!(r["isError"] == serde_json::json!(true) && says(&r).contains("changed on disk"), "{}", says(&r));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), theirs, "theirs stands");
+        let r = call(&mut s, "plan_write", serde_json::json!({ "content": ours }));
+        assert!(says(&r).contains("expected_rev is required"), "{}", says(&r));
+        let r = call(&mut s, "plan_write", serde_json::json!({ "content": ours, "expected_mtime": mtime }));
+        assert_eq!(r["isError"], serde_json::json!(false), "the older form, as before (it cannot see the same millisecond): {}", says(&r));
+        let idea = body(&call(&mut s, "idea_create", serde_json::json!({ "title": "Mine" })));
+        let id = idea["id"].as_str().unwrap().to_string();
+        let d = body(&call(&mut s, "idea_read", serde_json::json!({ "id": id })));
+        let r = call(&mut s, "idea_write", serde_json::json!({ "id": id, "content": format!("{}\nmore\n", d["content"].as_str().unwrap()), "expected_rev": d["rev"] }));
+        assert_eq!(r["isError"], serde_json::json!(false), "{}", says(&r));
+        assert!(body(&r)["rev"].is_string(), "a save says its new text's rev");
+    }
+
     fn ideas_server(sc: &Scratch, here: &std::path::Path, mutations: bool) -> Server {
         Server { ideas_dir: sc.base.join("ideas"), ..server_in(&sc.root, here, mutations) }
     }
@@ -6882,10 +6931,13 @@ mod tests {
         let before = idea_files(&sc);
         for bad in [serde_json::Value::Null, serde_json::json!("soon"), serde_json::json!(-1), serde_json::json!(1.5)] {
             let r = call(&mut s, "idea_write", serde_json::json!({ "id": id, "content": new, "expected_mtime": bad }));
-            assert!(text(&r).contains("expected_mtime is required"), "{bad}: {}", text(&r));
+            // Not an mtime, and no rev: refused, naming the form to use.
+            assert!(text(&r).contains("expected_rev is required"), "{bad}: {}", text(&r));
         }
         let r = call(&mut s, "idea_write", serde_json::json!({ "id": id, "content": new }));
-        assert!(text(&r).contains("expected_mtime is required"), "{}", text(&r));
+        assert!(text(&r).contains("expected_rev is required"), "{}", text(&r));
+        let r = call(&mut s, "idea_write", serde_json::json!({ "id": id, "content": new, "expected_rev": 7 }));
+        assert!(text(&r).contains("expected_rev must be"), "{}", text(&r));
         let m = d.idea.mtime_ms;
         let r = call(&mut s, "idea_write", serde_json::json!({ "id": id, "content": new, "expected_mtime": m - 1 }));
         assert!(text(&r).contains("changed on disk"), "{}", text(&r));
