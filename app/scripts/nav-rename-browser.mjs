@@ -219,6 +219,24 @@ async function workspaces(browser, tag) {
   await page.keyboard.press("Enter");
   ok(await until(page, () => [...document.querySelectorAll("[data-testid=ws-name]")].some((n) => n.textContent === "Everything here")), `${tag} …Enter saves it`);
 
+  // The workspace's dock Terminal (#721): F2 typed into its shell is the
+  // shell's, and a chat row's menu still renames beside it.
+  await page.keyboard.press("Meta+j");
+  const term = page.locator("[data-testid=ws-dock] .xterm-helper-textarea").first();
+  ok(await term.waitFor({ timeout: 6000 }).then(() => true, () => false), `${tag} ⌘J opens the workspace's Terminal`);
+  await term.focus();
+  await page.keyboard.press("F2");
+  await page.waitForTimeout(200);
+  ok(await page.locator("[data-testid=ws-name-input], [data-testid=ws-chat-row-name-input], [data-testid=row-name-input]").count() === 0, `${tag} F2 in the workspace's terminal renames nothing`);
+  const crow = page.locator("[data-testid=ws-chat-row]").first();
+  const ctitle = ((await crow.locator(".wsc-title").textContent()) ?? "").trim();
+  await crow.click({ button: "right" });
+  await page.locator("[data-testid=ws-chat-row-rename]").click();
+  ok(await fieldReady(page, ctitle), `${tag} with the terminal open, a chat row's Rename… still opens its field`);
+  await page.keyboard.press("Escape");
+  ok(await until(page, () => !document.querySelector("[data-testid=ws-chat-row-name-input]")), `${tag} …and Escape closes it, not the terminal's`);
+  ok(await page.locator("[data-testid=ws-dock] .xterm").count() > 0, `${tag} …and the terminal is still there`);
+
   ok(errors.length === 0, `${tag} no page errors ${errors.join(" | ")}`);
   await page.context().close();
 }
