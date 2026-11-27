@@ -86,7 +86,7 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   approves, so `instruct` alone must not reach it), length and hash, stamp —
   and only into a field the
   prompt itself opened and shows empty, each step proved before Enter. **The
-  third, and the last, is `agent_command`** (owner's ask of 2026-11-04,
+  third, and the last a person drives, is `agent_command`** (owner's ask of 2026-11-04,
   `docs/proposals/chat-slash-commands.md`): a slash command from the chat,
   its own row because `typed_line_ok`'s leading-`/` refusal is the rule MCP
   `send` shares, and agents must never drive each other's commands — do not
@@ -140,7 +140,22 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   the record is consumed. Do not grow a fourth path that types into Claude. `idea_send` and
   `idea_answer_text` (phase S, C14, the owner's yes of 2026-11-11) are not a fourth: they are the
   same bodies (`agents::send_at`, `answer_text_at`) behind console-only rows for idea
-  conversations, with the same rule, checks and audit record. `agent_interrupt`
+  conversations, with the same rule, checks and audit record. **The engine's
+  wake line is the one path with no person behind it** (the owner's yes of
+  2026-11-27, `docs/proposals/workspace-chat-powers.md` §10,
+  `worktrees_api::workspacewake`), a named exception and as narrow: serve's
+  poll types ONE fixed line (`workspacewake::line`: a count and the senders'
+  addresses, never a word of a message) into a live workspace chat, through
+  `send_at`'s own body (`agents::wake_at`: the same lock, prompt and
+  empty-composer checks, and `prompt::turn_shown` reading Idle on that same
+  capture). Only while the poll sees the chat idle (not busy, no prompt, no
+  fold), with the Workspace chats beta on (`beta_workspace_chats`, read from
+  `ui-state.json`, never written), once per batch of unread messages, at most
+  one try per chat per `WAKE_GAP_MS` (60 s), and only for a PLACE's message:
+  another chat's waits in the count, so chats can never wake each other in a
+  chain. Each line is an audit record (`Audit::wake`: ids, count, length and
+  hash), and nothing reaches a paired device. Do not widen it: no person's
+  text, no other harness, no other trigger. `agent_interrupt`
   (`agents::agent_interrupt`, the chat's Stop and its Esc, `stopTurn` in
   `chat.ts`) is not one: it types no text, only ONE key,
   Escape, through `tmux::press` as `agent_answer`'s keys go, under the same
