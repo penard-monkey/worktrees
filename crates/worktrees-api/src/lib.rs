@@ -80,6 +80,7 @@ pub mod watch;
 pub mod workspace;
 pub mod workspacechats;
 pub mod workspacefolds;
+pub mod workspacewake;
 pub mod workspaces;
 pub mod util;
 pub mod viewer;

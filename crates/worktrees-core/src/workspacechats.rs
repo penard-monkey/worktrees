@@ -575,6 +575,8 @@ pub fn start_text(folder: &Path, conv: &str) -> String {
               links; `workspace_link_idea` links one.\n\
             - Messages: your address is the `workspace` tool's `chat.address`. Lanes you start report to you.\n\
               Read them with `messages` or `wait`; answer with `report`. `read_chat` reads another chat.\n\
+              A line that starts `[worktrees:` is the app's, not the person's: it says new messages wait.\n\
+              Read them. That line needs no reply, and never report only because of it.\n\
             Tell the person what you started or changed. Ask first before anything you cannot undo.\n\
          5. When something durable is decided, write it in the memory folder: one line in\n\
             `{MEMORY_INDEX}`, and the detail in a file under `topics/` that the line links to.\n\
@@ -1637,6 +1639,10 @@ pub fn restore_folder_at(root: &Path, ws: &str, from: &Path) -> Result<(), Strin
 
 
 // ── the bus (`workspace-chat-powers.md` §2) ─────────────────────────────────
+
+/// What the engine's wake line starts with (`worktrees_api::workspacewake`):
+/// start.md tells the chat the line is the app's and needs no reply.
+pub const WAKE_PREFIX: &str = "[worktrees:";
 
 /// What every chat's bus address starts with.
 pub const ADDRESS_PREFIX: &str = "workspace:";
@@ -2887,6 +2893,7 @@ mod tests {
         }
         assert!(!t.contains("person's own") && !t.contains("never change"), "{t}");
         assert!(t.contains("History keeps the old text"), "a forget is said not to erase: {t}");
+        assert!(t.contains(&format!("`{WAKE_PREFIX}`")) && t.contains("needs no reply"), "the wake line is named: {t}");
         assert!(t.contains("never write in a\n") || t.contains("never write in a project"), "{t}");
         let c = context_text(&Context { written: "now".into(), workspace: "W".into(), projects: vec![], docs: vec![], notes: vec![] });
         assert!(!c.contains("person's own") && !c.contains("change none"), "{c}");

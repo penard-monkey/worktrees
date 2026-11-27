@@ -7,11 +7,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ### Added
 
+- **Rename a lane, a workspace chat or a workspace right in the sidebar.** Right-click its row and pick **Rename…**, or press F2 to rename the lane, chat or workspace on screen. The row turns into a field with the name selected. Enter or a click elsewhere saves, Escape cancels. An empty name returns a lane to its folder name and leaves a chat's or workspace's name as it was. Only the name you see changes: the lane's folder, branch and session, and the chat's address, stay the same. A click on a row still selects it at once, and a double-click on a lane still opens it. A double-click on a workspace's name no longer renames it: renaming is always the menu or F2. The chat's own header saves on a click elsewhere too now, where it used to drop what you typed.
 - **A workspace's view has a terminal.** With a workspace open (its chats, memory or overview, no place selected), the Terminal button in the right rail now works: its shells start in your home folder, and a new tab starts there too. Each workspace has its own tabs, and they are remembered like a place's: their names, the tab in front, the folder each was last in, its output and its command history all come back after a restart. Opening or closing the terminal in a workspace leaves every place's panels as they were. Files, Docs and Plan stay a place's. Removing a workspace closes its shells and forgets what they kept. These shells run on the computer worktrees runs on, so a paired device cannot open one.
+- A workspace chat that sits idle now hears a lane's report. When a report arrives, the app types one line into the chat: how many messages wait and who sent them, never their words. It does this only while the chat is idle, with nothing typed in its box and no question or fold up. It types once per batch and at most once a minute. A message from another chat never wakes it, so two chats cannot keep waking each other. Each line is kept in the audit log. Part of the Workspace chats beta.
 
 ### Changed
 
 - **Kimi lanes ask only when it matters.** Kimi lanes now start in Kimi's Ask When Needed mode: routine edits and commands run, and Kimi still asks for `rm -rf`, power-off and disk commands, `.git` internals, secret files, questions and plans. Choose it in **Settings → Agent policy → Kimi permissions**: Always Ask (Kimi's own default, which asked before every command), Ask When Needed, or Never Ask, which asks you to confirm. It applies to the next Kimi launch, resume included. A resumed conversation that Kimi left in another mode keeps it under Always Ask, because Kimi has no flag for Always Ask; the launch and `worktrees doctor --kimi` say so. The presets set it too: Cautious is Always Ask, Balanced Ask When Needed, Autonomous Never Ask. Only this computer's Settings changes it: never a repo, an agent or a paired device. `doctor --kimi` and `place_status` say which mode a lane is in. Kimi has no sandbox in any mode.
+
+### Fixed
+
+- **A Kimi lane that finished no longer shows as working.** Kimi Code 2.8 writes the end of a turn differently, and worktrees kept reading a finished Kimi lane as busy: a green dot with no done ring or age in the sidebar, `busy` from `place_status`, and a `wait` that never returned. It now reads both the old and the new log, so a Kimi lane is done when its turn ends, dated by Kimi's own record, and a turn that a background task's notice continues still counts as working.
+
+- **A long Kimi session shows its model again.** With Kimi Code 2.8, a Kimi lane whose log had grown past a few hundred kilobytes showed no model in the sidebar, the chat or `place_status`. worktrees now reads the model the session started on from the start of the log, once per session, and a `/model` switch made later still wins.
+
+- **`worktrees ls` shows a Kimi or Codex lane as open.** A lane whose agent runs in its own `~agent~kimi` or `~agent~codex` session, with no other session, showed `○` in the TMUX column while `ls --json` said its session was up. The column now uses the same rule as `--json`: `●` when the place has a session open, whichever it is.
 
 ## [0.55.0] - 2026-11-27
 

@@ -235,7 +235,8 @@ fn ty(v: &serde_json::Value) -> &str {
 }
 
 /// The newest turn among `lines` (oldest first), or `None` when they hold no
-/// event at all. A tail with events but no turn boundary is a turn that began
+/// event at all. Reads kimi 2.2.0's records and 2.8.1's, which dropped the
+/// `agent.turn.*` pair (fixtures under `kimi-wire/<version>/`). A tail with events but no turn boundary is a turn that began
 /// before the tail did — an ended turn always has its end within reach, since
 /// only a handful of bookkeeping records follow `agent.turn.ended`.
 pub fn wire_turn(lines: &[String]) -> Option<KimiTurn> {
@@ -253,6 +254,21 @@ pub fn wire_turn(lines: &[String]) -> Option<KimiTurn> {
                     open = true;
                 }
             }
+            // 2.2.0 writes `agent.turn.ended` (`outcome`) and then
+            // `turn.ended` (`reason`); 2.8.1 writes only the second, so it is
+            // the one read, and the first is met only in a tail cut between
+            // the two. `continuation: "turn"` (2.8.1) chains the next turn —
+            // a background task's notification — a millisecond later: not
+            // done, busy.
+            "turn.ended" => {
+                let at = v.get("time").and_then(|t| t.as_i64()).map(|ms| ms / 1000);
+                return Some(match v.get("reason").and_then(|o| o.as_str()) {
+                    _ if open => KimiTurn::Waiting,
+                    Some("completed") if v.get("continuation").and_then(|c| c.as_str()) == Some("turn") => KimiTurn::Busy,
+                    Some("completed") => KimiTurn::Done { at },
+                    _ => KimiTurn::Aborted,
+                });
+            }
             "agent.turn.ended" => {
                 return Some(match v.get("outcome").and_then(|o| o.as_str()) {
                     Some("done") if !open => KimiTurn::Done { at: v.get("time").and_then(|t| t.as_i64()).map(|ms| ms / 1000) },
@@ -260,7 +276,9 @@ pub fn wire_turn(lines: &[String]) -> Option<KimiTurn> {
                     _ => KimiTurn::Aborted,
                 });
             }
-            "agent.turn.started" => return Some(if open { KimiTurn::Waiting } else { KimiTurn::Busy }),
+            // A turn's first record: `agent.turn.started` on 2.2.0, where
+            // `turn.prompt` follows it; `turn.prompt` alone on 2.8.1.
+            "agent.turn.started" | "turn.prompt" => return Some(if open { KimiTurn::Waiting } else { KimiTurn::Busy }),
             _ => {}
         }
     }
@@ -498,9 +516,66 @@ pub fn session_tail(path: &Path) -> (Option<String>, Option<KimiTurn>) {
     }
     let prev = cache.get(path).map(|(_, i)| i.clone()).unwrap_or_default();
     let lines = activity::tail_lines_checked(path, activity::ROLLOUT_TAIL_BYTES).unwrap_or_default();
-    let info = TailInfo { model: wire_model(&lines).or(prev.model), turn: wire_turn(&lines).or(prev.turn) };
+    let model = wire_model(&lines).or(prev.model).or_else(|| head_model(path));
+    let info = TailInfo { model, turn: wire_turn(&lines).or(prev.turn) };
     cache.insert(path.to_path_buf(), (len, info.clone()));
     (info.model, info.turn)
+}
+
+/// How far into a wire log the head read goes before it gives up: the
+/// session's records before its first turn, `profile.bind` among them, whose
+/// system prompt alone was ~200 KB on 2.8.1.
+const HEAD_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+static KIMI_HEAD: Mutex<Option<HashMap<PathBuf, Option<String>>>> = Mutex::new(None);
+
+/// The model a session STARTED on, from the records before its first turn
+/// (`profile.bind`, or a switch made before the first message). The tail
+/// cannot be trusted for it: 2.8.1 writes no `llm.request`, so in any log
+/// past `ROLLOUT_TAIL_BYTES` the alias's only record is out of reach, and
+/// every surface showed no model. Read once per log and kept, because the
+/// head of an append-only file never changes; a head with no turn yet (kimi
+/// still writing it) is not kept, so the next poll looks again.
+fn head_model(path: &Path) -> Option<String> {
+    let mut guard = KIMI_HEAD.lock().unwrap_or_else(|e| e.into_inner());
+    let cache = guard.get_or_insert_with(HashMap::new);
+    if let Some(m) = cache.get(path) {
+        return m.clone();
+    }
+    let (model, settled) = read_head_model(path);
+    if settled || model.is_some() {
+        cache.insert(path.to_path_buf(), model.clone());
+    }
+    model
+}
+
+/// (the head's model, whether the head is complete): streamed a line at a
+/// time, stopping at the first turn or `HEAD_MAX_BYTES`, keeping only the
+/// lines that name a `modelAlias`.
+fn read_head_model(path: &Path) -> (Option<String>, bool) {
+    use std::io::{BufRead, Read};
+    let Ok(f) = std::fs::File::open(path) else { return (None, false) };
+    let mut r = std::io::BufReader::new(f).take(HEAD_MAX_BYTES);
+    let mut named = Vec::new();
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match r.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => return (wire_model(&named), r.limit() == 0),
+            Ok(_) => {}
+        }
+        if buf.last() != Some(&b'\n') {
+            // A line kimi is still writing.
+            return (wire_model(&named), r.limit() == 0);
+        }
+        let line = String::from_utf8_lossy(&buf);
+        if line.contains("\"turn.prompt\"") || line.contains("\"agent.turn.started\"") {
+            return (wire_model(&named), true);
+        }
+        if line.contains("\"modelAlias\"") {
+            named.push(line.trim_end().to_string());
+        }
+    }
 }
 
 fn tail(path: &Path) -> Vec<String> {
@@ -755,8 +830,12 @@ pub struct LaneFile {
 }
 
 pub fn lane_file(path: &str) -> Option<LaneFile> {
-    let s = current_session(path)?;
-    let wire = s.wire();
+    lane_file_at(current_session(path)?.wire())
+}
+
+/// `lane_file` for a known wire log, so a test reads a fixture's bytes the
+/// way the poll reads a lane's.
+pub fn lane_file_at(wire: PathBuf) -> Option<LaneFile> {
     let len = std::fs::metadata(&wire).ok()?.len();
     let (model, turn) = session_tail(&wire);
     Some(LaneFile { path: wire, len, model, turn })
@@ -1194,6 +1273,90 @@ mod tests {
         // A tail that starts mid-turn, with no boundary in it, is a running turn.
         assert_eq!(wire_turn(&lines(r#"{"type":"llm.request","modelAlias":"m"}"#)), Some(KimiTurn::Busy));
         assert_eq!(wire_turn(&[]), None);
+    }
+
+    /// kimi 2.8.1 writes no `agent.turn.started` / `agent.turn.ended`: a turn
+    /// opens with `turn.prompt` and closes with `turn.ended` (`reason`), and a
+    /// background task's notification is a turn of its own, chained with
+    /// `continuation: "turn"`. Read on 2.2.0's records alone, a finished 2.8.1
+    /// lane stayed busy on every surface (the owner's `design-simplify-kimi`,
+    /// 2026-11-27). The fixture is that lane's log, cut to events and times.
+    #[test]
+    fn a_2_8_1_turn_reads_from_its_own_records() {
+        let w = lines(&fixture("kimi-wire/2.8.1/background-tasks.jsonl"));
+        assert!(!w.iter().any(|l| l.contains("\"agent.turn.")), "the fixture is 2.8.1's shape");
+        // The whole log: the last turn finished, dated by its `turn.ended`.
+        assert_eq!(wire_turn(&w), Some(KimiTurn::Done { at: Some(1795813984) }));
+        // Its approval, open, is waiting; answered "for this session", busy.
+        let req = w.iter().position(|l| l.contains("\"interaction.request\"")).unwrap();
+        assert_eq!(wire_turn(&w[..=req]), Some(KimiTurn::Waiting));
+        let answered = w.iter().position(|l| l.contains("\"interaction.resolved\"")).unwrap();
+        assert_eq!(wire_turn(&w[..=answered]), Some(KimiTurn::Busy));
+        // A turn that a notification continues is not done: the next one is
+        // already on its way (the two records are a millisecond apart).
+        let chained = w.iter().position(|l| l.contains("\"continuation\":\"turn\"")).unwrap();
+        assert_eq!(wire_turn(&w[..=chained]), Some(KimiTurn::Busy));
+        // The notification's turn started: busy until its own end.
+        assert_eq!(wire_turn(&w[..=chained + 3]), Some(KimiTurn::Busy));
+        // Any other reason ended the turn without finishing it.
+        let esc = r#"{"type":"turn.prompt","turnId":0,"time":1000}
+{"type":"turn.ended","turnId":0,"reason":"cancelled","continuation":"none","time":2000}"#;
+        assert_eq!(wire_turn(&lines(esc)), Some(KimiTurn::Aborted));
+    }
+
+    /// A long 2.8.1 session's log, shaped like the owner's lane's: the alias's
+    /// only record is `profile.bind`, the log's head, its system prompt ~200 KB,
+    /// with more than a tail's worth of records after it (2.8.1 writes no
+    /// `llm.request`). The label came back null until the head was read.
+    fn long_2_8_1_log(dir: &Path, after: &[&str]) -> PathBuf {
+        let fx = fixture("kimi-wire/2.8.1/background-tasks.jsonl");
+        let mut out = String::new();
+        for l in fx.lines() {
+            if l.contains("\"profile.bind\"") {
+                out.push_str(&l.replace("<scrubbed>", &"x".repeat(200_000)));
+            } else {
+                out.push_str(l);
+            }
+            out.push('\n');
+            if l.contains("\"turn.prompt\"") && l.contains("\"turnId\":0") {
+                // The first turn's tool output: enough to push the head out.
+                let filler = r#"{"type":"context.append_loop_event","agentId":"main","event":{"type":"tool.result","output":"PAD"},"time":1795812248400}"#
+                    .replace("PAD", &"y".repeat(1000));
+                for _ in 0..(activity::ROLLOUT_TAIL_BYTES as usize / 1000 + 50) {
+                    out.push_str(&filler);
+                    out.push('\n');
+                }
+            }
+        }
+        for l in after {
+            out.push_str(l);
+            out.push('\n');
+        }
+        let p = dir.join("wire.jsonl");
+        std::fs::write(&p, out).unwrap();
+        p
+    }
+
+    #[test]
+    fn a_long_2_8_1_session_names_its_model_from_the_head() {
+        let t = std::env::temp_dir().join(format!("wt-kimi-head-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        std::fs::create_dir_all(&t).unwrap();
+        let wire = long_2_8_1_log(&t, &[]);
+        let tail = tail(&wire);
+        assert!(!tail.iter().any(|l| l.contains("\"profile.bind\"")), "the alias is outside the tail");
+        let (model, turn) = session_tail(&wire);
+        assert_eq!(model.as_deref(), Some("kimi-code/k3.1-pro"));
+        assert_eq!(turn, Some(KimiTurn::Done { at: Some(1795813984) }));
+        // A `/model` switch later in the session wins over the head's start.
+        let switched = t.join("switched");
+        std::fs::create_dir_all(&switched).unwrap();
+        let wire = long_2_8_1_log(
+            &switched,
+            &[r#"{"type":"config.update","agentId":"main","modelAlias":"kimi-code/k3-turbo","time":1795813990000}"#],
+        );
+        assert_eq!(session_tail(&wire).0.as_deref(), Some("kimi-code/k3-turbo"));
+        let _ = std::fs::remove_dir_all(&t);
     }
 
     #[test]

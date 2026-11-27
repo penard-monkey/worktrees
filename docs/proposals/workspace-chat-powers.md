@@ -229,7 +229,7 @@ link alone is still no change there, and any other difference still is. New
 chats see a linked idea in their `context.md`; a running one sees it in
 `workspace`.
 
-## 10. A report waking an idle chat: a proposal, not built
+## 10. A report waking an idle chat
 
 **What was seen.** A lane's report reached the chat's inbox, and the chat
 heard it only because it was told to `wait`. An idle chat does not look.
@@ -259,3 +259,41 @@ behind the act. The least invasive form:
 - Off by default behind its own beta checkbox, or on in Workspace chats' beta:
   the owner's choice.
 
+**Decided (the owner's yes, 2026-11-27) and built after v0.55.0**
+(`worktrees_api::workspacewake`, `agents::wake_at`, serve's `Audit::wake`):
+
+- The line is `[worktrees: 2 new messages for this chat, from
+  worktrees:kid. Read them with the messages tool. The engine typed this
+  line; it needs no reply.]`. A count and up to three senders' addresses
+  ("and N more" past that; an address with any other character than
+  letters, digits and `._:/()@~+-` is "a place"). No message text, ever.
+  start.md tells the chat that a line starting `[worktrees:` is the app's
+  and needs no reply, and that it never reports only because of one.
+- `agents::wake_at` is `send_at`'s body with one more check on the same
+  fresh capture under the chat's lock: `prompt::turn_shown` must read Idle.
+  So a turn that began between the poll's look and the paste gets nothing
+  (refused, no paste). A turn that begins after that capture, during the
+  paste, is Claude's to queue, as with any send: the line is harmless there.
+- The poll's own view decides first: a chat busy, at a prompt (the
+  folder-trust question included), or folding is not even captured. A chat
+  whose Claude has not started is refused by `send_at`'s own words.
+- Under the Workspace chats beta: `beta_workspace_chats` in the app's
+  `ui-state.json`, read only. No checkbox of its own.
+- Once per batch: the poll remembers which unread messages a typed line
+  counted, and a message already counted never wakes the chat again. A
+  message the chat has read is forgotten. The memory is the poll's, so a
+  restart may wake a chat once more for a batch.
+- At most one try per chat per minute (`WAKE_GAP_MS`), typed or refused. Two
+  batches a second apart are one line; the second waits for the gap and
+  goes only if the chat has not read it by then. A draft or a running turn
+  is looked at once a minute at most, not every tick.
+- Only a place's message wakes a chat. Another chat's message waits in the
+  count and is named in the next line a place's message causes. The engine
+  wakes nothing but chats, and a chat can only be woken by a place, so no
+  chain of wakes can start between chats.
+- Each line typed is an audit record (`kind: wake`): the workspace and chat
+  ids, `woke` or `stopped`, the count, and the line's length and SHA-256.
+  Never the line, since it names senders. Nothing is sent to a paired device.
+- Not built: the chat view shows the line as a turn of the person's, as it
+  does any typed line. Marking it as the engine's (as a start or a fold's
+  opener is) is a follow-up.

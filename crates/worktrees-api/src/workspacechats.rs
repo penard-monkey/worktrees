@@ -436,6 +436,13 @@ pub fn workspace_send(ctx: &Ctx, id: String, conv: String, text: String) -> Resu
     Ok(v)
 }
 
+/// The engine's wake line into the chat's own session (`workspacewake`):
+/// `agents::wake_at`, which is `workspace_send`'s body plus an idle check.
+/// No person acted, so the chat's `last_activity` is not stamped.
+pub(crate) fn workspace_wake(ctx: &Ctx, id: &str, conv: &str, line: String) -> Result<Value, String> {
+    agents::wake_at(ctx, &locus(ctx, id, conv)?, chats::session_name(conv), line)
+}
+
 pub fn workspace_interrupt(ctx: &Ctx, id: String, conv: String) -> Result<Value, String> {
     agents::interrupt_at(ctx, &locus(ctx, &id, &conv)?)
 }
