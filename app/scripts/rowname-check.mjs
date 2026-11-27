@@ -62,7 +62,7 @@ has(app, "laneField(repo, p, false)", "a lane's row can hold the field");
 has(app, "isRenameKey(e, inField)", "F2 reaches the rule");
 has(app, "laneChange(typed, p.declared?.title, p.slug)", "a lane's field saves by laneChange");
 has(app, "namedChange(typed, current)", "a chat row's field saves by namedChange");
-has(chat, 'data-testid="ws-chat-row-rename" data-track="workspace.chat.row.rename"', "a chat row's right-click menu has Rename");
+if (!/data-testid="ws-chat-row-rename"[^>]*data-track="workspace\.chat\.row\.rename"/.test(chat)) fail("a chat row's right-click menu has Rename, with a literal usage key");
 has(chat, "namedChange(t, c.title)", "the chat header's field saves by namedChange");
 // A renamed lane keeps its slug, branch and session: the only engine call is set_title.
 const save = app.slice(app.indexOf("const laneField ="), app.indexOf("const laneField =") + 900);
