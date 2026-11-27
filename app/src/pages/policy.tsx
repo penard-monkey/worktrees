@@ -4,12 +4,12 @@
 // JSON), shared by every window and applied to every lane it launches.
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { invoke, notGranted } from "../ipc";
-import type { CodexPermissions, PiProjectTrust } from "../settings";
+import type { CodexPermissions, KimiPermissions, PiProjectTrust } from "../settings";
 import { SECTION } from "../settingsMap";
 import type { GuidanceStatus } from "../GuidancePanel";
 import type { CrossProjectStatus } from "../CrossProjectPanel";
 import {
-  PRESET_KEYS, PRESET_KEY_LABEL, PRESET_KEY_SECTION, presetWords, setsFullAccess, type PresetKey, type PresetStatus,
+  PRESET_KEYS, PRESET_KEY_LABEL, PRESET_KEY_SECTION, presetWords, setsFullAccess, setsNeverAsk, type PolicyPreset, type PresetKey, type PresetStatus,
 } from "../presets";
 import { GuardSection } from "../GuidancePanel";
 import { PiTrustSection, usePiStatus } from "../PiPanel";
@@ -117,6 +117,79 @@ function CodexPermissionsSection({ onFail, onMirror }: { onFail: (e: unknown) =>
   );
 }
 
+/** The line a Never Ask click must be confirmed against, as Full access is. */
+export const NEVER_ASK_CONFIRM = "Never Ask: every Kimi lane this computer launches runs every command without asking, with no sandbox.";
+
+/** Agent policy → Kimi permissions: kimi's own three modes, HOST policy like
+ *  Codex's (`host-policy.json`), read back after every set, newest read wins.
+ *  Born on the host: no copy in this client's settings. */
+function KimiPermissionsSection({ onFail }: { onFail: (e: unknown) => void }) {
+  const [mode, setMode] = useState<KimiPermissions | null>(null);
+  const [origin, setOrigin] = useState<Origin | null>(null);
+  const seq = useRef(0);
+  const arm = useArmed<"never-ask">();
+  const readHost = useCallback(() => {
+    const n = ++seq.current;
+    invoke<{ value: KimiPermissions } & Origin>("get_kimi_permissions")
+      .then((r) => {
+        if (seq.current !== n) return;
+        setMode(r.value);
+        setOrigin({ source: r.source, env: r.env });
+      })
+      .catch((e) => onFail(`Kimi permissions: ${String(e)}`));
+  }, [onFail]);
+  useEffect(() => {
+    readHost();
+    return () => { seq.current++; };
+  }, [readHost]);
+  const set = (next: KimiPermissions) => {
+    const prev = mode;
+    const n = ++seq.current;
+    setMode(next);
+    invoke("set_kimi_permissions", { mode: next }).then(() => readHost(), (e) => {
+      if (seq.current === n) setMode(prev);
+      onFail(`Kimi permissions: ${String(e)}`);
+      readHost();
+    });
+  };
+  const pick = (next: KimiPermissions) => {
+    if (next === mode) return;
+    if (next === "never-ask") { arm.confirm("never-ask", () => set("never-ask")); return; }
+    arm.disarm();
+    set(next);
+  };
+  return (
+    <section className="setting">
+      <label>Kimi permissions</label>
+      <div className="seg seg-plain" data-testid="kimi-permissions">
+        {([
+          ["ask", "Always Ask"],
+          ["ask-when-needed", "Ask When Needed"],
+          ["never-ask", "Never Ask"],
+        ] as const).map(([m, label]) => (
+          <button key={m} className={(mode === m ? "on" : "") + (m === "never-ask" && arm.armed ? " armed" : "")} disabled={mode === null}
+            data-testid={`kimi-permissions-${m}`} onClick={() => pick(m)}>
+            {m === "never-ask" && arm.armed ? "Confirm never ask" : label}
+          </button>
+        ))}
+      </div>
+      {arm.armed && <div className="hint confirm-line" data-testid="kimi-never-confirm">{NEVER_ASK_CONFIRM} Click again to confirm.</div>}
+      {([
+        ["ask", "Always Ask", "Kimi asks before every command that is not read-only. It edits files in the place without asking."],
+        ["ask-when-needed", "Ask When Needed", "routine edits and commands run. Kimi still asks for rm -rf, power-off and disk commands, .git internals, secret files, questions and plans."],
+        ["never-ask", "Never Ask", "everything runs; only a plan in plan mode waits for you."],
+      ] as const).map(([m, label, line]) => (
+        <div className="hint" key={m}>
+          {mode === m ? <b>{label}:</b> : `${label}:`} {line}
+        </div>
+      ))}
+      <div className="hint">Kimi has no sandbox, in any mode. Its file tools refuse .env and keys in every mode.</div>
+      <EnvLine origin={origin} outranks="control" />
+      <div className="hint">Applies to the next Kimi launch. A resumed conversation keeps the mode it had; Always Ask reaches it only in a new conversation.</div>
+    </section>
+  );
+}
+
 // ── the preset (§5) ─────────────────────────────────────────────────────────
 
 /** The one call that applies a preset — the user's act alone: every reference
@@ -160,7 +233,7 @@ function PresetSection({ st, onApplied, onFail }: {
     const p = st?.presets.find((x) => x.name === name);
     if (!st || (st.name === name && st.modified.length === 0 && st.applied?.name === name)) return;
     // Full access asks first, here as on its own button (§9 Q4).
-    if (setsFullAccess(p) && st.current.codex_access !== "full") { arm.confirm(name, () => void run(name, null)); return; }
+    if (widens(p, st)) { arm.confirm(name, () => void run(name, null)); return; }
     arm.disarm();
     void run(name, null);
   };
@@ -181,8 +254,8 @@ function PresetSection({ st, onApplied, onFail }: {
           disabled={!st || busy || st.name === "custom" || st.modified.length === 0} title="Keep these values, under no preset's name"
           onClick={() => void run("custom", null)}>Custom</button>
       </div>
-      {armedP && <div className="hint confirm-line" data-testid="preset-full-confirm">
-        {armedP.label} sets Codex permissions to Full access. {FULL_ACCESS_CONFIRM} Click again to confirm.
+      {armedP && st && <div className="hint confirm-line" data-testid="preset-full-confirm">
+        {armedP.label} {widenWords(armedP, st)} Click again to confirm.
       </div>}
       {!st ? <div className="hint">Checking…</div> : <>
         <div className="hint" data-testid="preset-summary">
@@ -201,7 +274,7 @@ function PresetSection({ st, onApplied, onFail }: {
             <span>)</span>
             <span className="preset-acts">
               <button type="button" className="ctrl sm" data-testid="preset-reset" disabled={busy}
-                onClick={() => (setsFullAccess(cur) && st.current.codex_access !== "full" ? arm.confirm(cur.name, () => void run(cur.name, null)) : void run(cur.name, null))}>
+                onClick={() => (widens(cur, st) ? arm.confirm(cur.name, () => void run(cur.name, null)) : void run(cur.name, null))}>
                 Reset to {cur.label}
               </button>
               <button type="button" className="ctrl sm" data-testid="preset-keep" disabled={busy} onClick={() => void run("custom", null)}>Keep as custom</button>
@@ -238,6 +311,20 @@ function PresetSection({ st, onApplied, onFail }: {
   );
 }
 
+/** Does applying `p` widen an agent past a confirm-gated step it is not on
+ *  now (Codex Full access, Kimi Never Ask)? Then Apply asks first. */
+function widens(p: PolicyPreset | undefined, st: PresetStatus): boolean {
+  return (setsFullAccess(p) && st.current.codex_access !== "full") || (setsNeverAsk(p) && st.current.kimi_access !== "never-ask");
+}
+
+/** What the confirm line says `p` would widen. */
+function widenWords(p: PolicyPreset, st: PresetStatus): string {
+  const parts: string[] = [];
+  if (setsFullAccess(p) && st.current.codex_access !== "full") parts.push(`sets Codex permissions to Full access. ${FULL_ACCESS_CONFIRM}`);
+  if (setsNeverAsk(p) && st.current.kimi_access !== "never-ask") parts.push(`${parts.length ? "It also sets" : "sets"} Kimi permissions to Never Ask. ${NEVER_ASK_CONFIRM}`);
+  return parts.join(" ");
+}
+
 /** Under a control whose value is not its preset's: the way back to that one
  *  value (§5.3, PrusaSlicer's back arrow). Drawn only where it can act — a
  *  paired device may not apply a preset. */
@@ -259,12 +346,12 @@ function BackToPreset({ k, st, onApplied, onFail }: {
     catch (e) { onFail(`Policy preset: ${String(e)}`); }
     finally { setBusy(false); }
   };
-  const full = k === "codex_access" && p.values.codex_access === "full";
+  const full = (k === "codex_access" && p.values.codex_access === "full") || (k === "kimi_access" && p.values.kimi_access === "never-ask");
   return (
     <div className="preset-back" data-testid={`preset-back-${k}`}>
       <button type="button" className="mcp-dismiss" disabled={busy}
         onClick={() => (full ? arm.confirm("back", () => void restore()) : void restore())}>
-        {arm.armed ? `Confirm: ${FULL_ACCESS_CONFIRM}` : `↶ Back to ${p.label} (${presetWords(k, p.values)})`}
+        {arm.armed ? `Confirm: ${k === "kimi_access" ? NEVER_ASK_CONFIRM : FULL_ACCESS_CONFIRM}` : `↶ Back to ${p.label} (${presetWords(k, p.values)})`}
       </button>
     </div>
   );
@@ -308,6 +395,11 @@ export function PolicyPage() {
     <Sec id="codex-permissions">
       {backTo("codex_access")}
       <CodexPermissionsSection onFail={onFail} onMirror={(m) => { if (settings.codex_permissions !== m) onChange({ codex_permissions: m }); }} />
+    </Sec>
+
+    <Sec id="kimi-permissions">
+      {backTo("kimi_access")}
+      <KimiPermissionsSection onFail={onFail} />
     </Sec>
 
     <Sec id="main-guard">

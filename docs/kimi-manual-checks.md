@@ -22,6 +22,7 @@ screens and the session layout are pinned by fixtures to one version:
 | wire log: a message queued behind a turn | 2.2.0 | `…/kimi-wire/2.2.0/queued.jsonl` |
 | wire log: turns for the chat (text, tools, approvals, a question, an Esc) | 2.2.0 | `…/kimi-wire/2.2.0/transcript.jsonl` |
 | screens: idle, typed, busy-typed, busy-queued, trust, approval, question | 2.2.0 | `…/kimi-screen/2.2.0/` |
+| screens by permission mode: Ask When Needed idle, its dangerous-command approval, a resume, Always Ask's approval, Never Ask idle | 2.8.1 | `…/kimi-screen/2.8.1/` (its README) |
 
 The wire fixtures keep only the record types the reader uses, scrubbed of
 kimi's system prompt and every reply; the prompts in them are the probe's own.
@@ -159,6 +160,20 @@ wt open lane1 --ai kimi -r --no-attach --no-spare
 - [x] With no session for the place, `-r` launches fresh (never `-c`, which picks the newest session for the DIRECTORY, a removed place's included).
 - [x] `-S` with an id kimi does not have: `Session "…" not found`, exit 1, nothing created (why the id is resolved, never guessed).
 
+## 5b. Permission mode (2.8.1, 2026-11-27)
+
+Settings → Agent policy → Kimi permissions (host policy `kimi_permissions`,
+then `$WORKTREES_KIMI_PERMISSIONS`, then `kimi_permissions` in config.toml,
+then Ask When Needed). Findings and the "risky" table:
+`docs/proposals/harness-permission-modes.md`.
+
+- [x] Ask When Needed launches `kimi --yolo …`, Never Ask `kimi --auto …`, Always Ask adds nothing; a resume is `kimi --yolo -S '<id>'`. kimi's status row starts with `Ask When Needed` / `Never Ask` and names nothing in Always Ask.
+- [x] Ask When Needed still asks for `rm -rf` inside the place ("Dangerous: recursive delete"), not for a commit, network, an edit or a write outside the place. Always Ask asks for `touch`. The file tools refuse `.env` in every mode.
+- [x] The opener's empty-composer wait and the approval-as-modal read work on every mode's screen (`kimi_2_8_1_screens_read_in_either_permission_mode`). Not yet driven end to end through `worktrees new --brief`.
+- [x] A resume keeps the conversation's mode: `kimi -S <id>` with no flag comes back in the mode it was last in, and kimi has no flag or variable for Always Ask. So under Always Ask a launch that may resume warns, and `doctor --kimi` warns, when the place's conversation is in another mode.
+- [x] `/permission` and `/yolo` change the session only: `config.toml` and `tui.toml` unchanged (md5). Shift+Tab is plan mode.
+- [ ] Never Ask, by hand, in a scratch repo with nothing of yours in it: a question is refused to the agent ("decide and continue"), and only a plan in plan mode waits.
+
 ## 6. Model label
 
 - [x] `place_status`'s kimi row carries the alias (`kimi-code/…`).
@@ -194,6 +209,7 @@ wt open lane1 --ai kimi --no-attach --no-spare   # after a close
 ## 9. doctor
 
 - [ ] `sessions_missed` is 0 for every place (`doctor --kimi --json`): kimi's workspace-dir naming still matches `kimi::slug`.
+- [x] `worktrees doctor --kimi` says the permission mode and what decided it (`perms Ask When Needed (--yolo), from the default`), and `--json` has it under `permissions`.
 - [x] `worktrees doctor --kimi` lists the aliases from kimi's config with kimi's default marked, the trust posture, the MCP state and the last opener line — and nothing else from that config file.
 
 ## 9b. Plan usage (`kimi_usage`)

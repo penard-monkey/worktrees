@@ -4,8 +4,11 @@ title: "Codex and Kimi lanes that do not stop at every prompt"
 
 # Codex and Kimi lanes that do not stop at every prompt
 
-Status: Phase 1 (research) done, 2026-11-27. Phase 2 waits on the owner's
-answers at the end.
+Status: built, 2026-11-27. The owner's answers: Kimi on Ask When Needed, and
+it is the DEFAULT (not Always Ask as proposed); Codex on this host to
+Auto-review (his own click in Settings); build the Kimi row; Autonomous sets
+Never Ask. Cautious is Always Ask, Balanced (the shipped defaults) Ask When
+Needed. `codex_permissions` joined `USER_ONLY_KEYS` beside `kimi_permissions`.
 
 The ask (owner, 2026-11-27): a Codex lane and a Kimi lane each stopped at a
 prompt at once. "Is there any way to make them work like claude?" His Claude
@@ -159,6 +162,7 @@ Stored and guarded like `codex_permissions`:
   Never Ask. A preset bump (`VERSION`) because a preset's meaning changes.
 
 **Default: unchanged, Always Ask.** Nothing loosens without the owner's act.
+(Overruled by the owner: the default is Ask When Needed.)
 
 **The resume caveat has to be said where it is set**: "Applies to the next
 Kimi launch. A resumed conversation keeps the mode it had; tightening reaches

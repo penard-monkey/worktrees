@@ -201,6 +201,11 @@ export function withAgentView(s: Settings, key: string, view: AgentView, provide
 // `Settings` carries a copy of each for OLDER builds only (end of the type).
 export const CODEX_PERMISSIONS = ["ask", "auto-review", "full"] as const;
 export type CodexPermissions = (typeof CODEX_PERMISSIONS)[number];
+// Settings → Agent policy → Kimi permissions: kimi's three modes, the strings
+// `worktrees_core::kimi::Permissions::parse` accepts. HOST policy too, born
+// there: unlike Codex's it has no copy in `Settings` (no older build reads it).
+export const KIMI_PERMISSIONS = ["ask", "ask-when-needed", "never-ask"] as const;
+export type KimiPermissions = (typeof KIMI_PERMISSIONS)[number];
 export const PI_PROJECT_TRUST = ["never", "ask"] as const;
 export type PiProjectTrust = (typeof PI_PROJECT_TRUST)[number];
 

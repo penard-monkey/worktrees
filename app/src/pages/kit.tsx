@@ -9,7 +9,7 @@
 import { createContext, useContext, useEffect, type ReactNode } from "react";
 import { notGranted } from "../ipc";
 import { GrantLine, GrantNote } from "../GrantNote";
-import type { Settings, UpdateInfo, CodexPermissions } from "../settings";
+import type { Settings, UpdateInfo, CodexPermissions, KimiPermissions } from "../settings";
 import type { McpStatus } from "../McpPanel";
 import type { CodexMcpStatus } from "../CodexMcpPanel";
 import type { PiMcpStatus } from "../PiMcpPanel";
@@ -104,6 +104,7 @@ export type SheetProps = {
  *  Each is absent until read, and stays absent where this window may not ask. */
 export type HostSnap = {
   codexPermissions?: CodexPermissions;
+  kimiPermissions?: KimiPermissions;
   fetchInterval?: number;
   termHistory?: { persist_scrollback: boolean; per_tab_history: boolean };
   quota?: QuotaSettings;

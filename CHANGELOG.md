@@ -9,6 +9,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 - **A workspace's view has a terminal.** With a workspace open (its chats, memory or overview, no place selected), the Terminal button in the right rail now works: its shells start in your home folder, and a new tab starts there too. Each workspace has its own tabs, and they are remembered like a place's: their names, the tab in front, the folder each was last in, its output and its command history all come back after a restart. Opening or closing the terminal in a workspace leaves every place's panels as they were. Files, Docs and Plan stay a place's. Removing a workspace closes its shells and forgets what they kept. These shells run on the computer worktrees runs on, so a paired device cannot open one.
 
+### Changed
+
+- **Kimi lanes ask only when it matters.** Kimi lanes now start in Kimi's Ask When Needed mode: routine edits and commands run, and Kimi still asks for `rm -rf`, power-off and disk commands, `.git` internals, secret files, questions and plans. Choose it in **Settings → Agent policy → Kimi permissions**: Always Ask (Kimi's own default, which asked before every command), Ask When Needed, or Never Ask, which asks you to confirm. It applies to the next Kimi launch, resume included. A resumed conversation that Kimi left in another mode keeps it under Always Ask, because Kimi has no flag for Always Ask; the launch and `worktrees doctor --kimi` say so. The presets set it too: Cautious is Always Ask, Balanced Ask When Needed, Autonomous Never Ask. Only this computer's Settings changes it: never a repo, an agent or a paired device. `doctor --kimi` and `place_status` say which mode a lane is in. Kimi has no sandbox in any mode.
+
 ## [0.55.0] - 2026-11-27
 
 ### Added

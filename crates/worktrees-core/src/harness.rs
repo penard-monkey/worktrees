@@ -872,6 +872,12 @@ impl Adapter for Kimi {
         crate::trust::kimi_launch_trust(wt).env.map(|(k, v)| vec![(k.to_string(), v.to_string())]).unwrap_or_default()
     }
 
+    /// The permission mode (`kimi::permissions`): `--yolo`, `--auto` or
+    /// nothing, on every launch, resume included.
+    fn place_flags(&self, _wt: &str) -> Vec<String> {
+        crate::kimi::permission_flags(crate::kimi::permissions())
+    }
+
     fn launch_args(&self, launch: &AiLaunch, _session: &str) -> LaunchArgs {
         let mut head = launch.place_flags.clone();
         head.extend(model_words(self.provider(), launch));
@@ -954,6 +960,12 @@ impl Adapter for Kimi {
                     "last_done": x.last_done,
                     "model": self.running_model("", path),
                     "opener": opener,
+                    // The mode the place's conversation is IN (its wire log's
+                    // newest `permission.set_mode`), which a resume keeps
+                    // whatever the host's setting says now.
+                    "permissions": crate::kimi::current_session(path)
+                        .and_then(|s| crate::kimi::session_mode(&s.wire()))
+                        .map(crate::kimi::Permissions::as_str),
                 })
             })
             .into_iter()
@@ -1582,6 +1594,30 @@ mod tests {
         assert!(KIMI.exact_resume());
         assert_eq!(KIMI.resume_display(), "-S <per place session>");
         assert_eq!(KIMI.provider().name_arg, None);
+    }
+
+    /// The permission mode rides every kimi launch as one flag, resume
+    /// included (kimi takes `--yolo` with `-S <id>`; measured on 2.8.1), and
+    /// Always Ask adds nothing because kimi has no flag for it.
+    #[test]
+    fn a_kimi_launch_carries_its_permission_mode() {
+        use crate::kimi::Permissions;
+        let with = |p: Option<Permissions>, resume: bool| {
+            crate::kimi::set_permissions_override(p);
+            let mut l = AiLaunch::plain("kimi");
+            l.place_flags = KIMI.place_flags("/w");
+            if resume {
+                l.resume = true;
+                l.resume_id = Some("session_c8ce7b2e-8f8a-4cd2-88e8-c0ca9bbbbf5e".into());
+                kimi_prepare_in(&mut l, Ok(()), || None).unwrap();
+            }
+            l.launch_cmd("p-feat~agent~kimi")
+        };
+        assert_eq!(with(Some(Permissions::AskWhenNeeded), false), "kimi --yolo");
+        assert_eq!(with(Some(Permissions::NeverAsk), false), "kimi --auto");
+        assert_eq!(with(Some(Permissions::Ask), false), "kimi");
+        assert_eq!(with(Some(Permissions::AskWhenNeeded), true), "kimi --yolo -S 'session_c8ce7b2e-8f8a-4cd2-88e8-c0ca9bbbbf5e'");
+        crate::kimi::set_permissions_override(None);
     }
 
     fn kimi_info(json: &str) -> crate::kimi_usage::Info {

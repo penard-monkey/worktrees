@@ -5,6 +5,9 @@ import { KimiInstallSection, KimiMcpSection, KimiModelsSection, useKimiStatus } 
 import { presetDefaults } from "../presets";
 import { Page, Pointer, Sec, useSheet } from "./kit";
 
+/** kimi's own names for its three modes, as its status row draws them. */
+export const KIMI_PERMISSION_WORDS = { ask: "Always Ask", "ask-when-needed": "Ask When Needed", "never-ask": "Never Ask" } as const;
+
 export function KimiPage() {
   const { settings, repo, onChange, onReport, onKimiMcpChanged, kimiMcpOfferPending, onSilenceKimiMcpOffer, snap } = useSheet();
   const kimi = useKimiStatus(repo || null, onReport);
@@ -23,6 +26,9 @@ export function KimiPage() {
       <KimiModelsSection settings={settings} status={kimi.status} onChange={onChange} onReport={onReport} />
     </Sec>
     <Sec id="kimi-policy">
+      <Pointer to="kimi-permissions" label="Agent policy">
+        Permissions: <b>{snap.kimiPermissions ? KIMI_PERMISSION_WORDS[snap.kimiPermissions] : "…"}</b>
+      </Pointer>
       <Pointer to="kimi-trust" label="Agent policy">
         Folder trust: <b>{!kimi.status ? "…" : allowed === 0 ? "kimi asks in every place" : `${allowed} allowed repo${allowed === 1 ? "" : "s"}`}</b>
       </Pointer>

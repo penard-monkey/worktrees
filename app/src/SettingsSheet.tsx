@@ -48,7 +48,7 @@ import type { PiStatus } from "./ModelPicker";
 import type { KimiStatus } from "./KimiPanel";
 import type { CodexTrustStatus } from "./CodexTrustPanel";
 import type { ProfilesInfo } from "./ProfilesPanel";
-import type { CodexPermissions } from "./settings";
+import type { CodexPermissions, KimiPermissions } from "./settings";
 
 export { RELEASES_URL } from "./pages/updates";
 export type { CatId } from "./settingsMap";
@@ -91,6 +91,7 @@ function useHostSnap(open: boolean, cat: PageId, installed: VisCtx["installed"])
       notGranted(cmd) ? Promise.resolve(undefined) : invoke<T>(cmd, args).catch(() => undefined);
     void Promise.all([
       read<CodexPermissions>("get_codex_permissions"),
+      read<{ value: KimiPermissions }>("get_kimi_permissions"),
       read<number>("get_fetch_interval"),
       read<HostSnap["termHistory"]>("get_term_history_opts"),
       read<QuotaSettings>("quota_settings"),
@@ -101,10 +102,10 @@ function useHostSnap(open: boolean, cat: PageId, installed: VisCtx["installed"])
       installed.kimi === false ? undefined : read<KimiStatus>("kimi_status", { repo: null }),
       installed.codex === false ? undefined : read<CodexTrustStatus>("codex_status", { repo: null }),
       read<ProfilesInfo | null>("profiles_info", { repo: null }),
-    ]).then(([codexPermissions, fetchInterval, termHistory, quota, slots, limits, preset, pi, kimi, codex, profiles]) => {
+    ]).then(([codexPermissions, kimiPerm, fetchInterval, termHistory, quota, slots, limits, preset, pi, kimi, codex, profiles]) => {
       if (!alive) return;
       setSnap({
-        codexPermissions, fetchInterval, termHistory, quota, slots, limits, preset, pi, kimi, codex,
+        codexPermissions, kimiPermissions: kimiPerm?.value, fetchInterval, termHistory, quota, slots, limits, preset, pi, kimi, codex,
         profiles: profiles ? { count: profiles.profiles.length, hasDefault: !!profiles.default_id } : undefined,
       });
     });
@@ -184,6 +185,7 @@ export function SettingsSheet(props: SheetProps) {
   const host = useMemo(() => {
     const h: Partial<Record<HostKey, boolean>> = {};
     if (snap.codexPermissions) h.codex_access = snap.codexPermissions !== "auto-review";
+    if (snap.kimiPermissions) h.kimi_access = snap.kimiPermissions !== "ask-when-needed";
     if (keepAwake) h.keep_awake = keepAwake.on;
     if (snap.fetchInterval !== undefined) h.fetch_interval = snap.fetchInterval !== 0;
     if (snap.termHistory) h.term_history = !snap.termHistory.persist_scrollback || !snap.termHistory.per_tab_history;
