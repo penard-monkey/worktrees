@@ -447,6 +447,17 @@ pub struct Idea {
     pub kind: Kind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub problem: Option<Problem>,
+    /// The name of its text ([`rev_of`]), on a read and a save, never in the
+    /// list: what a save checked by its text (`expected_rev`) names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rev: Option<String>,
+}
+
+/// The name of a document's text, equal for equal bytes and for no others:
+/// what a save names to say which text it was made against
+/// ([`write_rev_at`]). The memory's own (`memory::rev_of`).
+pub fn rev_of(bytes: &[u8]) -> String {
+    crate::memory::rev_of(bytes)
 }
 
 /// What a document is: an idea, or a plan made from ideas (§2.2). Decided by
@@ -617,7 +628,7 @@ fn scan_with(root: &Path, names: impl Iterator<Item = String>, read: &dyn Fn(&Pa
         }
         let p = root.join(&name);
         let stem = name.trim_end_matches(".md").to_string();
-        let unreadable = |name: String| Idea { id: None, title: stem.clone(), file: name, created: None, mtime_ms: 0, size: 0, kind: Kind::Idea, problem: Some(Problem::Unreadable) };
+        let unreadable = |name: String| Idea { id: None, title: stem.clone(), file: name, created: None, mtime_ms: 0, size: 0, kind: Kind::Idea, problem: Some(Problem::Unreadable), rev: None };
         let md = match fs::symlink_metadata(&p) {
             Ok(md) => md,
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
@@ -630,7 +641,7 @@ fn scan_with(root: &Path, names: impl Iterator<Item = String>, read: &dyn Fn(&Pa
             idx.skipped.push(name);
             continue;
         }
-        let mut doc = Idea { id: None, title: stem.clone(), file: name, created: None, mtime_ms: mtime_ms(&md), size: md.len(), kind: Kind::Idea, problem: None };
+        let mut doc = Idea { id: None, title: stem.clone(), file: name, created: None, mtime_ms: mtime_ms(&md), size: md.len(), kind: Kind::Idea, problem: None, rev: None };
         if md.len() > MAX_BYTES {
             doc.problem = Some(Problem::TooLarge);
         } else {
@@ -763,7 +774,7 @@ pub fn read_at(root: &Path, id: &str) -> Result<Doc, String> {
         let last = versions_at(root, id).ok().and_then(|v| v.into_iter().next());
         Merged { id: id.to_string(), title: last.as_ref().and_then(|v| v.title.clone()), date: last.map(|v| v.at[..10].to_string()) }
     });
-    Ok(Doc { idea: Idea { mtime_ms: mtime_ms(&md), size: md.len(), ..idea }, content, merged })
+    Ok(Doc { idea: Idea { mtime_ms: mtime_ms(&md), size: md.len(), rev: Some(rev_of(content.as_bytes())), ..idea }, content, merged })
 }
 
 /// The current text of a listed document, from a path re-checked to be a
@@ -781,9 +792,7 @@ fn load(root: &Path, idea: &Idea) -> Result<(String, fs::Metadata), String> {
 
 fn check_mtime(md: &fs::Metadata, expected: Option<u64>) -> Result<(), String> {
     match expected {
-        Some(exp) if mtime_ms(md) != exp => {
-            Err("the idea changed on disk since you opened it — reload to see the latest".into())
-        }
+        Some(exp) if mtime_ms(md) != exp => Err(ERR_STALE.into()),
         _ => Ok(()),
     }
 }
@@ -800,8 +809,18 @@ pub fn date_of(epoch: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A test's clock for history copies: every copy is taken at this stamp.
+    static TEST_STAMP: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
 /// `20261108T153012.345Z`: when a history copy was taken, sortable.
 pub(crate) fn history_stamp() -> String {
+    #[cfg(test)]
+    if let Some(s) = TEST_STAMP.with(|t| t.borrow().clone()) {
+        return s;
+    }
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64);
@@ -919,7 +938,26 @@ pub fn write_kept_at(root: &Path, id: &str, content: &str, expected_mtime: Optio
     write_with_at(root, id, content, expected_mtime, true)
 }
 
+/// [`write_at`] / [`write_kept_at`], checked by the TEXT the save was made
+/// against when `expected_rev` is given ([`rev_of`] of what the caller read
+/// or last saved), else by `expected_mtime` as before. The mtime has a
+/// millisecond's resolution: a save that lands in the same millisecond as the
+/// one a caller read keeps it, and only the text tells them apart. Either
+/// way the file is read again just before it is written, and a change that
+/// landed in between is refused, never written over.
+pub fn write_rev_at(root: &Path, id: &str, content: &str, expected_mtime: Option<u64>, expected_rev: Option<&str>, keep_history: bool) -> Result<Idea, String> {
+    write_checked_at(root, id, content, expected_mtime, expected_rev, keep_history)
+}
+
 fn write_with_at(root: &Path, id: &str, content: &str, expected_mtime: Option<u64>, keep_history: bool) -> Result<Idea, String> {
+    write_checked_at(root, id, content, expected_mtime, None, keep_history)
+}
+
+/// The refusal a save made against text that is no longer there gets: the
+/// same words the mtime check gives, which clients know.
+const ERR_STALE: &str = "the idea changed on disk since you opened it — reload to see the latest";
+
+fn write_checked_at(root: &Path, id: &str, content: &str, expected_mtime: Option<u64>, expected_rev: Option<&str>, keep_history: bool) -> Result<Idea, String> {
     refuse_real(root)?;
     let idx = list_at(root)?;
     let idea = idx.resolve_exact(id)?.clone();
@@ -929,12 +967,20 @@ fn write_with_at(root: &Path, id: &str, content: &str, expected_mtime: Option<u6
         None => return Err(format!("the text has no id: keep the frontmatter's `id: {id}` line")),
     }
     let (now, md) = load(root, &idea)?;
-    check_mtime(&md, expected_mtime)?;
+    match expected_rev {
+        Some(r) if rev_of(now.as_bytes()) != r => return Err(ERR_STALE.into()),
+        Some(_) => {}
+        None => check_mtime(&md, expected_mtime)?,
+    }
     if now != content {
         if keep_history {
             history_copy_at(root, id, now.as_bytes())?;
         }
         let p = root.join(&idea.file);
+        // What is about to be replaced must still be what was checked.
+        if fs::read(&p).ok().as_deref() != Some(now.as_bytes()) {
+            return Err(ERR_STALE.into());
+        }
         crate::fsx::write_atomic(&p, content.as_bytes(), Some(md.permissions())).map_err(|e| format!("{}: {e}", idea.file))?;
     }
     // Checked on an unchanged save too: a rename that failed after its write
@@ -947,6 +993,7 @@ fn write_with_at(root: &Path, id: &str, content: &str, expected_mtime: Option<u6
         kind: Kind::of(content),
         mtime_ms: mtime_ms(&md),
         size: md.len(),
+        rev: Some(rev_of(content.as_bytes())),
         file,
         ..idea
     })
@@ -1389,6 +1436,14 @@ fn stamp_iso(name: &str) -> Option<String> {
     ))
 }
 
+/// The order of a history copy's name, `<stamp>[-n].md`: its stamp (fixed
+/// width, so it sorts as text), then `n`, 1 for none.
+fn version_key(name: &str) -> (&str, u32) {
+    let stem = name.strip_suffix(".md").unwrap_or(name);
+    let (stamp, rest) = stem.split_at(stem.len().min(20));
+    (stamp, rest.strip_prefix('-').and_then(|n| n.parse().ok()).unwrap_or(1))
+}
+
 /// The history folder of `id`, when it is a real directory (never a link).
 fn history_dir(root: &Path, id: &str) -> Result<Option<PathBuf>, String> {
     if !crate::ulid::is_valid(id) {
@@ -1428,7 +1483,10 @@ pub fn versions_at(root: &Path, id: &str) -> Result<Vec<Version>, String> {
             .and_then(|t| title_of(&t));
         out.push(Version { version: name, at, size: md.len(), title });
     }
-    out.sort_by(|x, y| y.version.cmp(&x.version));
+    // Newest first by (stamp, n): copies taken in one millisecond are
+    // `<stamp>.md`, `<stamp>-2.md`, …, and by name `-` sorts before `.` and
+    // `-10` before `-2`, which listed the later copy as the older one.
+    out.sort_by(|x, y| version_key(&y.version).cmp(&version_key(&x.version)));
     Ok(out)
 }
 
@@ -2791,4 +2849,86 @@ mod tests {
         assert!(refuse_real_in(real, real, false).is_ok());
         assert!(refuse_real_in(Path::new("/tmp/t/ideas"), real, true).is_ok());
     }
+
+    /// Every history copy is taken at `stamp`: two saves in one millisecond.
+    fn same_instant<T>(stamp: &str, f: impl FnOnce() -> T) -> T {
+        TEST_STAMP.with(|t| *t.borrow_mut() = Some(stamp.to_string()));
+        let out = f();
+        TEST_STAMP.with(|t| *t.borrow_mut() = None);
+        out
+    }
+
+    /// Copies taken in the same millisecond are `<stamp>.md`, `<stamp>-2.md`,
+    /// …: listed newest first by (stamp, n) numerically, so the version
+    /// before a change is the right one. By name, `-` sorts before `.` and
+    /// `-10` before `-2`.
+    #[test]
+    fn copies_in_one_millisecond_are_listed_in_the_order_they_were_taken() {
+        let t = Tmp::new("same-ms-order");
+        let root = t.root();
+        let d = made(&root, "A", "v0\n");
+        let id = id(&d);
+        let mut texts = vec![read_at(&root, &id).unwrap().content];
+        same_instant("20261127T100000.000Z", || {
+            for n in 1..=11 {
+                let now = read_at(&root, &id).unwrap();
+                write_kept_at(&root, &id, &now.content.replace(&format!("v{}", n - 1), &format!("v{n}")), Some(now.idea.mtime_ms)).unwrap();
+                texts.push(read_at(&root, &id).unwrap().content);
+            }
+        });
+        let v = versions_at(&root, &id).unwrap();
+        let names: Vec<&str> = v.iter().map(|x| x.version.as_str()).collect();
+        assert_eq!(names[..3], ["20261127T100000.000Z-11.md", "20261127T100000.000Z-10.md", "20261127T100000.000Z-9.md"], "{names:?}");
+        assert_eq!(*names.last().unwrap(), "20261127T100000.000Z.md");
+        assert_eq!(copies(&root, &id), texts[..11].to_vec(), "oldest first, each the text before its change");
+    }
+
+    /// `plan_of_edits_copy_the_plan_to_history_first_and_check_the_mtime`'s
+    /// history half, with every copy in one millisecond: what a fast runner,
+    /// or a chat saving twice, does. No sleeps.
+    #[test]
+    fn plan_of_edits_keep_their_order_when_taken_in_one_millisecond() {
+        let t = Tmp::new("plan-edit-same-ms");
+        let root = t.root();
+        let (a, b) = (id(&made(&root, "A", "a\n")), id(&made(&root, "B", "b\n")));
+        let p0 = make_plan_at(&root, std::slice::from_ref(&a), Some("P"), None).unwrap();
+        let pi = id(&p0);
+        let (p1, p2) = same_instant("20261127T100000.000Z", || {
+            let p1 = plan_add_ideas_at(&root, &pi, std::slice::from_ref(&b), Some(p0.idea.mtime_ms)).unwrap();
+            let p2 = plan_remove_idea_at(&root, &pi, &a, None).unwrap();
+            plan_remove_idea_at(&root, &pi, &b, None).unwrap();
+            (p1, p2)
+        });
+        assert_eq!(copies(&root, &pi), vec![p0.content, p1.content, p2.content]);
+    }
+
+    /// A save checked by the TEXT it was made against (`expected_rev`) is
+    /// refused when the file changed, even when the change kept its
+    /// millisecond: the mtime check cannot see that. An older caller's
+    /// `expected_mtime` is checked as before.
+    #[test]
+    fn a_save_checked_by_its_text_sees_a_change_in_the_same_millisecond() {
+        let t = Tmp::new("same-ms-rev");
+        let root = t.root();
+        let d = made(&root, "A", "mine\n");
+        let id = id(&d);
+        let rev = d.idea.rev.clone().expect("a read names its text");
+        assert_eq!(rev, rev_of(d.content.as_bytes()));
+        // Someone else saves in the same millisecond: the mtime is unchanged.
+        let p = root.join(&d.idea.file);
+        let theirs = d.content.replace("mine", "theirs");
+        fs::write(&p, &theirs).unwrap();
+        fs::File::options().write(true).open(&p).unwrap().set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_millis(d.idea.mtime_ms)).unwrap();
+        assert_eq!(mtime_ms(&fs::metadata(&p).unwrap()), d.idea.mtime_ms, "the same millisecond");
+        let ours = d.content.replace("mine", "ours");
+        let e = write_rev_at(&root, &id, &ours, None, Some(&rev), true).unwrap_err();
+        assert!(e.contains("changed on disk"), "{e}");
+        assert_eq!(fs::read_to_string(&p).unwrap(), theirs, "theirs is kept");
+        // Against the text that is there now, it saves, and says its new text.
+        let now = read_at(&root, &id).unwrap();
+        let saved = write_rev_at(&root, &id, &ours, None, now.idea.rev.as_deref(), true).unwrap();
+        assert_eq!(saved.rev.as_deref(), Some(rev_of(ours.as_bytes()).as_str()));
+        assert_eq!(copies(&root, &id).last(), Some(&theirs), "what it replaced is in history");
+    }
 }
+

@@ -80,8 +80,11 @@ export const ideaDocs: DocSource = {
     return id ? { source: ideaDocs, name: id } : null;
   },
   read: (id) => invoke<Doc>("idea_read", { id }),
-  write: (id, content, expectedMtime, keepHistory) =>
-    invoke<Saved>("idea_write", keepHistory ? { id, content, expectedMtime, keepHistory: true } : { id, content, expectedMtime }),
+  // `expectedRev`, the text this save was made against, when the engine gave
+  // one: a save that landed in the same millisecond is then refused too. The
+  // mtime still goes, for an older engine that knows only it.
+  write: (id, content, expectedMtime, keepHistory, expectedRev) =>
+    invoke<Saved>("idea_write", { id, content, expectedMtime, ...(expectedRev ? { expectedRev } : {}), ...(keepHistory ? { keepHistory: true } : {}) }),
   watch(on) {
     let off: (() => void) | null = null;
     let gone = false;
@@ -97,7 +100,7 @@ export const ideaDocs: DocSource = {
   async keepAsNew(title, text) {
     const d = await invoke<Doc>("idea_create", { title });
     const content = withId(text, d.id) ?? d.content;
-    const w = await invoke<Saved>("idea_write", { id: d.id, content, expectedMtime: d.mtime_ms });
+    const w = await invoke<Saved>("idea_write", { id: d.id, content, expectedMtime: d.mtime_ms, ...(d.rev ? { expectedRev: d.rev } : {}) });
     return { ...d, ...w, content };
   },
 };

@@ -59,12 +59,12 @@ pub fn idea_create(ctx: &Ctx, title: Option<String>) -> Result<Doc, String> {
 /// write_at`), so a client learns a rename from the answer. `keep_history`
 /// copies the file's current bytes to `.history/` first (a person keeping
 /// their text over an edit made elsewhere); an ordinary save never sets it.
-pub fn idea_write(ctx: &Ctx, id: String, content: String, expected_mtime: Option<u64>, keep_history: Option<bool>) -> Result<Idea, String> {
-    if keep_history == Some(true) {
-        ideas::write_kept_at(root(ctx), &id, &content, expected_mtime)
-    } else {
-        ideas::write_at(root(ctx), &id, &content, expected_mtime)
-    }
+/// `expected_rev` (the `rev` a read or the last save gave) checks the save
+/// against the TEXT it was made from, which sees a change that kept the
+/// millisecond; a caller that sends only `expected_mtime` (an older client)
+/// is checked by the mtime, as before. The answer carries the new `rev`.
+pub fn idea_write(ctx: &Ctx, id: String, content: String, expected_mtime: Option<u64>, keep_history: Option<bool>, expected_rev: Option<String>) -> Result<Idea, String> {
+    ideas::write_rev_at(root(ctx), &id, &content, expected_mtime, expected_rev.as_deref(), keep_history == Some(true))
 }
 
 pub fn idea_rename(ctx: &Ctx, id: String, title: String, expected_mtime: Option<u64>) -> Result<Doc, String> {

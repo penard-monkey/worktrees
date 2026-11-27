@@ -1337,7 +1337,7 @@ commands! { cx, a;
     ideas_list: HostConsole => ideas::ideas_list(&cx.ctx),
     idea_read: HostConsole => ideas::idea_read(&cx.ctx, a.get("id")?),
     idea_create: HostConsole => ideas::idea_create(&cx.ctx, a.get("title")?),
-    idea_write: HostConsole => ideas::idea_write(&cx.ctx, a.get("id")?, a.get("content")?, a.get("expected_mtime")?, a.get("keep_history")?),
+    idea_write: HostConsole => ideas::idea_write(&cx.ctx, a.get("id")?, a.get("content")?, a.get("expected_mtime")?, a.get("keep_history")?, a.get("expected_rev")?),
     idea_rename: HostConsole => ideas::idea_rename(&cx.ctx, a.get("id")?, a.get("title")?, a.get("expected_mtime")?),
     idea_remove: HostConsole => ideas::idea_remove(&cx.ctx, a.get("id")?, a.get("expected_mtime")?),
     idea_adopt: HostConsole => ideas::idea_adopt(&cx.ctx, a.get("file")?, a.get("expected_mtime")?),

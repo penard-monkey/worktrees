@@ -2214,8 +2214,16 @@ const ideaById = (id: string) => {
   for (const d of mockIdeas.values()) if (d.id === id) return d;
   throw `no idea has the id ${id}`;
 };
-const ideaCas = (d: MockIdea, exp: unknown) => {
+const ideaCas = (d: MockIdea, exp: unknown, rev?: unknown) => {
+  // The text it was made against first, as the engine checks it (`write_rev_at`).
+  if (typeof rev === "string" && rev) { if (rev !== ideaRev(d.content)) throw "the idea changed on disk since you opened it — reload to see the latest"; return; }
   if (exp != null && exp !== d.mtime_ms) throw "the idea changed on disk since you opened it — reload to see the latest";
+};
+/** The mock's stand-in for `ideas::rev_of`: opaque, equal for equal text. */
+const ideaRev = (text: string): string => {
+  let h = 5381;
+  for (let i = 0; i < text.length; i++) h = ((h * 33) ^ text.charCodeAt(i)) >>> 0;
+  return `m${text.length.toString(16)}${h.toString(16)}`;
 };
 /** The poll's stand-in (worktrees_api::ideas::tick): a tick after any change
  *  to the folder sends `ideas:changed` with what moved since the last one —
@@ -4719,9 +4727,9 @@ Phase 3: Frontend pane and mock harness
       return { ideas: [...mockIdeas.values()].sort((a, b) => b.mtime_ms - a.mtime_ms).map(ideaRow), skipped: mockIdeaSkipped.slice(), dir: "/Users/mock/.local/share/worktrees/ideas" };
     case "idea_read": {
       const { d, via } = ideaLookup(args.id as string);
-      if (!via) return { ...ideaRow(d), content: d.content };
+      if (!via) return { ...ideaRow(d), content: d.content, rev: ideaRev(d.content) };
       const last = mockIdeaVersions.filter((v) => v.id === args.id).pop();
-      return { ...ideaRow(d), content: d.content, merged: { id: args.id, title: last ? ideaTitle(last.content) : null, date: last?.at.slice(0, 10) ?? null } };
+      return { ...ideaRow(d), content: d.content, rev: ideaRev(d.content), merged: { id: args.id, title: last ? ideaTitle(last.content) : null, date: last?.at.slice(0, 10) ?? null } };
     }
     case "idea_create": {
       const title = String(args.title ?? "").trim() || "Untitled";
@@ -4741,7 +4749,7 @@ Phase 3: Frontend pane and mock harness
       if (carried !== args.id) throw carried ? `the text carries the id ${carried}, not ${args.id}: refusing to save one idea over another` : `the text has no id: keep the frontmatter's \`id: ${args.id}\` line`;
       const keep = (args.keepHistory ?? args.keep_history) === true;
       mockIdeaWrites.push({ id: args.id as string, content, expected_mtime: args.expectedMtime ?? args.expected_mtime, keep_history: keep });
-      ideaCas(d, args.expectedMtime ?? args.expected_mtime);
+      ideaCas(d, args.expectedMtime ?? args.expected_mtime, args.expectedRev ?? args.expected_rev);
       if (d.content !== content) {
         if (keep) { mockIdeaHistory.push({ id: d.id!, content: d.content }); ideaKeep(d.id!, d.content); }
         d.content = content; d.mtime_ms = ideaNow(); ideasTouched();
@@ -4750,7 +4758,7 @@ Phase 3: Frontend pane and mock harness
       // when the first heading renamed it (the mtime does not move for that).
       const to = ideaNameFor(d);
       if (to !== d.file) { mockIdeas.delete(d.file); d.file = to; mockIdeas.set(d.file, d); ideasTouched(); }
-      return ideaRow(d);
+      return { ...ideaRow(d), rev: ideaRev(d.content) };
     }
     case "idea_rename": {
       const d = ideaById(args.id as string);
