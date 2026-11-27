@@ -1680,6 +1680,27 @@ mod tests {
         }
     }
 
+    /// A finished kimi 2.8.1 lane, read from its log's bytes as the poll
+    /// reads them, gives the dot its done ring at the turn's own time — not
+    /// the green dot it kept while `wire_turn` knew only 2.2.0's records
+    /// (2026-11-27, `design-simplify-kimi`).
+    #[test]
+    fn a_finished_kimi_2_8_1_lane_is_done_on_the_dot() {
+        let wire = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../worktrees-core/tests/fixtures/kimi-wire/2.8.1/background-tasks.jsonl");
+        let mut watched =
+            HashMap::from([("/w/k".to_string(), KimiWatched { session: "p-k~agent~kimi".into(), model: None })]);
+        let out = kimi_tick_in(
+            &mut watched,
+            |_| worktrees_core::kimi::lane_file_at(wire.clone()),
+            |_| false,
+            |t| t.iter().map(|(c, _)| (c.clone(), worktrees_core::kimi::KimiScreen::Composer)).collect(),
+        );
+        assert!(out.busy.is_empty(), "a finished lane is not green: {:?}", out.busy);
+        assert!(out.waiting.is_empty());
+        assert_eq!(out.done, vec![("/w/k".to_string(), 1795813984)]);
+    }
+
     /// A kimi lane's dots through the tick: the wire log answers once a turn
     /// is on file (no capture at all), the trust modal answers before one is
     /// (amber), a pending opener holds a quiet lane green, and a finished turn

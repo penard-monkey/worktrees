@@ -235,7 +235,8 @@ fn ty(v: &serde_json::Value) -> &str {
 }
 
 /// The newest turn among `lines` (oldest first), or `None` when they hold no
-/// event at all. A tail with events but no turn boundary is a turn that began
+/// event at all. Reads kimi 2.2.0's records and 2.8.1's, which dropped the
+/// `agent.turn.*` pair (fixtures under `kimi-wire/<version>/`). A tail with events but no turn boundary is a turn that began
 /// before the tail did — an ended turn always has its end within reach, since
 /// only a handful of bookkeeping records follow `agent.turn.ended`.
 pub fn wire_turn(lines: &[String]) -> Option<KimiTurn> {
@@ -253,6 +254,21 @@ pub fn wire_turn(lines: &[String]) -> Option<KimiTurn> {
                     open = true;
                 }
             }
+            // 2.2.0 writes `agent.turn.ended` (`outcome`) and then
+            // `turn.ended` (`reason`); 2.8.1 writes only the second, so it is
+            // the one read, and the first is met only in a tail cut between
+            // the two. `continuation: "turn"` (2.8.1) chains the next turn —
+            // a background task's notification — a millisecond later: not
+            // done, busy.
+            "turn.ended" => {
+                let at = v.get("time").and_then(|t| t.as_i64()).map(|ms| ms / 1000);
+                return Some(match v.get("reason").and_then(|o| o.as_str()) {
+                    _ if open => KimiTurn::Waiting,
+                    Some("completed") if v.get("continuation").and_then(|c| c.as_str()) == Some("turn") => KimiTurn::Busy,
+                    Some("completed") => KimiTurn::Done { at },
+                    _ => KimiTurn::Aborted,
+                });
+            }
             "agent.turn.ended" => {
                 return Some(match v.get("outcome").and_then(|o| o.as_str()) {
                     Some("done") if !open => KimiTurn::Done { at: v.get("time").and_then(|t| t.as_i64()).map(|ms| ms / 1000) },
@@ -260,7 +276,9 @@ pub fn wire_turn(lines: &[String]) -> Option<KimiTurn> {
                     _ => KimiTurn::Aborted,
                 });
             }
-            "agent.turn.started" => return Some(if open { KimiTurn::Waiting } else { KimiTurn::Busy }),
+            // A turn's first record: `agent.turn.started` on 2.2.0, where
+            // `turn.prompt` follows it; `turn.prompt` alone on 2.8.1.
+            "agent.turn.started" | "turn.prompt" => return Some(if open { KimiTurn::Waiting } else { KimiTurn::Busy }),
             _ => {}
         }
     }
@@ -602,8 +620,12 @@ pub struct LaneFile {
 }
 
 pub fn lane_file(path: &str) -> Option<LaneFile> {
-    let s = current_session(path)?;
-    let wire = s.wire();
+    lane_file_at(current_session(path)?.wire())
+}
+
+/// `lane_file` for a known wire log, so a test reads a fixture's bytes the
+/// way the poll reads a lane's.
+pub fn lane_file_at(wire: PathBuf) -> Option<LaneFile> {
     let len = std::fs::metadata(&wire).ok()?.len();
     let (model, turn) = session_tail(&wire);
     Some(LaneFile { path: wire, len, model, turn })
@@ -1041,6 +1063,35 @@ mod tests {
         // A tail that starts mid-turn, with no boundary in it, is a running turn.
         assert_eq!(wire_turn(&lines(r#"{"type":"llm.request","modelAlias":"m"}"#)), Some(KimiTurn::Busy));
         assert_eq!(wire_turn(&[]), None);
+    }
+
+    /// kimi 2.8.1 writes no `agent.turn.started` / `agent.turn.ended`: a turn
+    /// opens with `turn.prompt` and closes with `turn.ended` (`reason`), and a
+    /// background task's notification is a turn of its own, chained with
+    /// `continuation: "turn"`. Read on 2.2.0's records alone, a finished 2.8.1
+    /// lane stayed busy on every surface (the owner's `design-simplify-kimi`,
+    /// 2026-11-27). The fixture is that lane's log, cut to events and times.
+    #[test]
+    fn a_2_8_1_turn_reads_from_its_own_records() {
+        let w = lines(&fixture("kimi-wire/2.8.1/background-tasks.jsonl"));
+        assert!(!w.iter().any(|l| l.contains("\"agent.turn.")), "the fixture is 2.8.1's shape");
+        // The whole log: the last turn finished, dated by its `turn.ended`.
+        assert_eq!(wire_turn(&w), Some(KimiTurn::Done { at: Some(1795813984) }));
+        // Its approval, open, is waiting; answered "for this session", busy.
+        let req = w.iter().position(|l| l.contains("\"interaction.request\"")).unwrap();
+        assert_eq!(wire_turn(&w[..=req]), Some(KimiTurn::Waiting));
+        let answered = w.iter().position(|l| l.contains("\"interaction.resolved\"")).unwrap();
+        assert_eq!(wire_turn(&w[..=answered]), Some(KimiTurn::Busy));
+        // A turn that a notification continues is not done: the next one is
+        // already on its way (the two records are a millisecond apart).
+        let chained = w.iter().position(|l| l.contains("\"continuation\":\"turn\"")).unwrap();
+        assert_eq!(wire_turn(&w[..=chained]), Some(KimiTurn::Busy));
+        // The notification's turn started: busy until its own end.
+        assert_eq!(wire_turn(&w[..=chained + 3]), Some(KimiTurn::Busy));
+        // Any other reason ended the turn without finishing it.
+        let esc = r#"{"type":"turn.prompt","turnId":0,"time":1000}
+{"type":"turn.ended","turnId":0,"reason":"cancelled","continuation":"none","time":2000}"#;
+        assert_eq!(wire_turn(&lines(esc)), Some(KimiTurn::Aborted));
     }
 
     #[test]

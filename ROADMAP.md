@@ -400,6 +400,20 @@ this repo's settings in `.claude/close-out.md`).
   `kimi web`'s SIGTERM → exit against `kimi_usage::GRACE` (2 s, never
   measured; §9b only states it). See docs/sessions/2026-10-19-kimi-harness/
   and [2026-10-21 server-edition](docs/sessions/2026-10-21-server-edition/summary.md).
+- **A long kimi 2.8.1 session has no model label.** 2.8.1 writes no
+  `llm.request`, so the alias's only record is `profile.bind`, the wire log's
+  4th line and ~200 KB on its own (the system prompt). Once the log passes
+  `ROLLOUT_TAIL_BYTES` (256 KB) `kimi::wire_model` finds nothing on a first
+  read, and `place_status`'s agent `model` is null (seen live 2026-11-27, the
+  `design-simplify-kimi` lane). Needs a bounded head read for `profile.bind`
+  (the line's size is the system prompt's, so stream it, do not slurp), and a
+  re-measure of `config.update` on a `/model` switch on 2.8.1. Found by
+  `fix/kimi-done-not-seen`.
+- **`worktrees ls` shows `○` for a lane whose agent runs in a sidecar.** The
+  TMUX cell asks `owns_session(session_name(slug))` (`project.rs`), the
+  canonical name only, so a kimi (or Codex, pi) lane up in its `~agent~<id>`
+  session reads as down, while `ls --json` names the sidecar `up: true`.
+  Found by `fix/kimi-done-not-seen`.
 - **Copying an MCP server to Codex puts its literal env values on argv.**
   `mcpmigrate.rs:180` turns each literal `env` entry of a Claude user-scope
   stdio server (status `CopyLiteralEnv`, usually an API key) into

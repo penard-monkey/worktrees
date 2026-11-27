@@ -9,6 +9,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 - **A workspace's view has a terminal.** With a workspace open (its chats, memory or overview, no place selected), the Terminal button in the right rail now works: its shells start in your home folder, and a new tab starts there too. Each workspace has its own tabs, and they are remembered like a place's: their names, the tab in front, the folder each was last in, its output and its command history all come back after a restart. Opening or closing the terminal in a workspace leaves every place's panels as they were. Files, Docs and Plan stay a place's. Removing a workspace closes its shells and forgets what they kept. These shells run on the computer worktrees runs on, so a paired device cannot open one.
 
+### Fixed
+
+- **A Kimi lane that finished no longer shows as working.** Kimi Code 2.8 writes the end of a turn differently, and worktrees kept reading a finished Kimi lane as busy: a green dot with no done ring or age in the sidebar, `busy` from `place_status`, and a `wait` that never returned. It now reads both the old and the new log, so a Kimi lane is done when its turn ends, dated by Kimi's own record, and a turn that a background task's notice continues still counts as working.
+
 ## [0.55.0] - 2026-11-27
 
 ### Added

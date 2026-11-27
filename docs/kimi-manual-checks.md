@@ -22,9 +22,21 @@ screens and the session layout are pinned by fixtures to one version:
 | wire log: a message queued behind a turn | 2.2.0 | `…/kimi-wire/2.2.0/queued.jsonl` |
 | wire log: turns for the chat (text, tools, approvals, a question, an Esc) | 2.2.0 | `…/kimi-wire/2.2.0/transcript.jsonl` |
 | screens: idle, typed, busy-typed, busy-queued, trust, approval, question | 2.2.0 | `…/kimi-screen/2.2.0/` |
+| wire log: background-task notifications chained as turns, an approval "for this session", a finished last turn | 2.8.1 | `…/kimi-wire/2.8.1/background-tasks.jsonl` |
 
 The wire fixtures keep only the record types the reader uses, scrubbed of
 kimi's system prompt and every reply; the prompts in them are the probe's own.
+The 2.8.1 one is a real lane's log cut to event types, ids, reasons and
+times, every prompt replaced by `<scrubbed>`.
+
+**2.8.1 changed the wire log's turn records** (found 2026-11-27, a finished
+lane green on every surface): no `agent.turn.started` / `agent.turn.ended`
+and no `llm.request`. A turn opens with `turn.prompt` and closes with
+`turn.ended` (`reason: completed`, `continuation: "turn"` when a background
+task's notification starts the next turn a millisecond later, `"none"` when
+nothing follows). `kimi::wire_turn` reads both shapes. The model alias is now
+only in `profile.bind` (the log's 4th line, ~200 KB with the system prompt)
+and, presumably, `config.update` on a switch (not measured on 2.8.1).
 
 Last run: 2026-10-19, kimi 2.2.0, `kimi-code/kimi-for-coding-highspeed`,
 through the branch's release CLI on a private tmux socket (`TMUX_TMPDIR` with
@@ -101,9 +113,10 @@ first `agent.turn.started`, at the first message; a kimi that wrote
 send nothing, and check `place_status` says idle.
 
 - [x] `wait until: idle` called right after `new` (trusted, so no modal) holds while kimi starts and while the opener is pending, then returns `idle` with a `last_done` once the brief's turn ends.
-- [ ] An approval (a Bash call) is **waiting** in `place_status` — from kimi's log (`interaction.request`), no screen needed; a question (`AskUserQuestion`) likewise. (The log records were captured live; the reading is unit-tested on them.)
-- [x] After the turn: **idle**, `last_done` from `agent.turn.ended`'s own time, and the agent row's `model` is the alias.
-- [ ] Esc mid-turn: `agent.turn.ended` with `outcome: aborted` → idle with no `last_done` (an Esc is not finished work). (Captured live; unit-tested.)
+- [ ] An approval (a Bash call) is **waiting** in `place_status` — from kimi's log (`interaction.request`), no screen needed; a question (`AskUserQuestion`) likewise. (The log records were captured live on 2.2.0 and, for an approval, on 2.8.1; the reading is unit-tested on both.)
+- [x] After the turn: **idle**, `last_done` from the turn's own end record (`agent.turn.ended` on 2.2.0, `turn.ended` on 2.8.1). **2.8.1, 2026-11-27**: a live lane that finished at 13:13 read `idle`, `last_done` 13:13, through the branch's release CLI's `place_status` and `wait until: idle` (it returned at once); the installed 0.55.0 said `busy` and `wait` timed out. A second turn the same lane ran from 13:28 (six turns chained by background-task notices) read `busy` throughout and `idle` with `last_done` 13:49:17 within one 15 s poll of its `turn.ended`; 0.55.0 still said `busy`.
+- [ ] The agent row's `model` is the alias. Passed on 2.2.0. **Fails on 2.8.1**: `model: null` for a long session, because the alias's only record, `profile.bind`, is outside the 256 KB tail the reader keeps (not fixed; ROADMAP, "A long kimi 2.8.1 session has no model label").
+- [ ] Esc mid-turn: `agent.turn.ended` with `outcome: aborted` → idle with no `last_done` (an Esc is not finished work). (Captured live on 2.2.0; unit-tested.) On 2.8.1 an Esc's `turn.ended` `reason` is NOT measured; any reason but `completed` reads as aborted.
 
 ## 4. send
 
