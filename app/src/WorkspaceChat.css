@@ -104,3 +104,6 @@ p.wsc-stale { margin: 0; }
 .wsc-pick { display: flex; flex-direction: column; gap: var(--s2); width: 260px; padding: var(--s1); }
 .wsc-pick .seg { flex-wrap: wrap; }
 .wsc-pick-why { margin: 0; padding-left: var(--s3); font-size: var(--fs-micro); color: var(--txt-dim); display: flex; flex-direction: column; gap: 2px; }
+/* A row renamed in place (RowNameField): the field takes the title's room. */
+.wsc-row.naming:hover { background: transparent; }
+.wsc-row .wsc-row-name { flex: 1 1 0; max-width: none; font-size: var(--fs-label); font-weight: var(--fw-med); }

@@ -4343,3 +4343,5 @@ html[data-guides="off"] .lane-rails { display: none; }
 .status-cluster .lane-line { min-width: 0; max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--txt-dim); }
 .status-cluster .lane-line.link { cursor: pointer; }
 .status-cluster .lane-line.link:hover { color: var(--txt-hi); }
+/* A nav row renamed in place (RowNameField): row-sized, not header-sized. */
+.row .row-name-input { max-width: none; width: 100%; box-sizing: border-box; font-size: var(--fs-row); font-weight: var(--fw-med); }
