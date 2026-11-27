@@ -2513,7 +2513,7 @@ function mockPlanRead(text: string) {
   if (lines[0] === "---") { const e = lines.indexOf("---", 1); start = e > 0 ? e + 1 : 0; }
   type P = { line: number; section: "projects" | "work"; text: string; words: string };
   const problems: P[] = [];
-  type W = { line: number; title: string; project: string | null; branch: string | null; brief: string | null; ai: string | null; model: string | null; started: string | null; place: { project: string; slug: string; at: string } | null; proposed?: string; proposal?: { by: string; chat: string; at: string } | null };
+  type W = { line: number; title: string; project: string | null; branch: string | null; brief: string | null; ai: string | null; model: string | null; started: string | null; place: { project: string; slug: string; at: string } | null; proposed?: string; proposal?: { by: string; chat: string; at: string } | null; made?: string; maker?: { by: string; chat: string; at: string } | null };
   let projects: { line: number; name: string; kind: string; url?: string; path?: string }[] | null = null;
   let work: W[] | null = null;
   let sec = "";
@@ -2545,15 +2545,16 @@ function mockPlanRead(text: string) {
       if (!t || /^<!--.*-->$/.test(t)) continue;
       if (!item) { problems.push({ line: n, section: "work", text: l, words: "text before the first work item: each item starts with `### <title>`" }); continue; }
       const kv = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(t);
-      if (!kv) { problems.push({ line: n, section: "work", text: l, words: "not a work item line: expected `project:`, `branch:`, `brief:`, `ai:`, `model:`, `proposed:` or `started:`" }); continue; }
+      if (!kv) { problems.push({ line: n, section: "work", text: l, words: "not a work item line: expected `project:`, `branch:`, `brief:`, `ai:`, `model:`, `proposed:`, `made:` or `started:`" }); continue; }
       const [, k, v] = kv;
       if (k === "project" || k === "branch" || k === "started" || k === "ai" || k === "model") {
         item[k] = v;
         if (k === "started") { const m = /^(.+?) · (\S+) · (.+)$/.exec(v); item.place = m ? { project: m[1], slug: m[2], at: m[3] } : null; }
       }
       else if (k === "proposed") { const m = /^(.+) · (\S+) · (.+)$/.exec(v); item.proposed = v; item.proposal = m ? { by: m[1], chat: m[2], at: m[3] } : null; }
+      else if (k === "made") { const m = /^(.+) · (\S+) · (.+)$/.exec(v); item.made = v; item.maker = m ? { by: m[1], chat: m[2], at: m[3] } : null; }
       else if (k === "brief") { if (v === "|") brief = []; else item.brief = v; }
-      else problems.push({ line: n, section: "work", text: l, words: `unknown key \`${k}:\`: expected \`project:\`, \`branch:\`, \`brief:\`, \`ai:\`, \`model:\`, \`proposed:\` or \`started:\`` });
+      else problems.push({ line: n, section: "work", text: l, words: `unknown key \`${k}:\`: expected \`project:\`, \`branch:\`, \`brief:\`, \`ai:\`, \`model:\`, \`proposed:\`, \`made:\` or \`started:\`` });
     }
   }
   close();

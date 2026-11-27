@@ -84,6 +84,14 @@ pub struct WorkItem {
     /// The proposer's line, read ([`Proposed`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proposal: Option<Proposed>,
+    /// Which workspace chat made it, as written: `<chat title> · <chat id> ·
+    /// <when>`, the line `plan_add_work` writes for an item that is not a
+    /// proposal (`workspace-chat-powers.md` §1.1). Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub made: Option<String>,
+    /// The maker's line, read ([`Proposed`]'s shape).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maker: Option<Proposed>,
     /// Lines the edits below need: the `project:` and `started:` lines, and
     /// the item's last line that is not blank.
     #[serde(skip)]
@@ -165,6 +173,8 @@ pub struct NewItem {
     pub ai: Option<String>,
     pub model: Option<String>,
     pub proposed: Option<Proposed>,
+    /// The chat that made it, when it is not a proposal: a `made:` line.
+    pub made: Option<Proposed>,
 }
 
 /// The longest brief [`with_item`] writes.
@@ -205,6 +215,10 @@ pub fn with_item(text: &str, item: &NewItem) -> Result<String, String> {
         return Err(format!("not a brief: it needs words, at most {BRIEF_MAX} bytes, and no control character but line breaks and tabs"));
     }
     let proposed = item.proposed.as_ref().map(Proposed::text).transpose().map_err(|e| format!("proposed: {e}"))?;
+    let made = item.made.as_ref().map(Proposed::text).transpose().map_err(|e| format!("made: {e}"))?;
+    if proposed.is_some() && made.is_some() {
+        return Err("an item is proposed or made, not both".into());
+    }
     let before = read(text);
     let w0 = before.work.clone().unwrap_or_default();
     if w0.iter().any(|w| w.title == title) {
@@ -219,6 +233,9 @@ pub fn with_item(text: &str, item: &NewItem) -> Result<String, String> {
     }
     if let Some(p) = &proposed {
         block.push_str(&format!("proposed: {p}{sep}"));
+    }
+    if let Some(m) = &made {
+        block.push_str(&format!("made: {m}{sep}"));
     }
     block.push_str(&format!("brief: |{sep}"));
     for l in brief.split('\n') {
@@ -250,9 +267,9 @@ pub fn with_item(text: &str, item: &NewItem) -> Result<String, String> {
     };
     let after = read(&out);
     let w1 = after.work.unwrap_or_default();
-    let same = |a: &WorkItem, b: &WorkItem| (&a.title, &a.project, &a.branch, &a.brief, &a.ai, &a.model, &a.started, &a.proposed) == (&b.title, &b.project, &b.branch, &b.brief, &b.ai, &b.model, &b.started, &b.proposed);
+    let same = |a: &WorkItem, b: &WorkItem| (&a.title, &a.project, &a.branch, &a.brief, &a.ai, &a.model, &a.started, &a.proposed, &a.made) == (&b.title, &b.project, &b.branch, &b.brief, &b.ai, &b.model, &b.started, &b.proposed, &b.made);
     let new_ok = w1.last().is_some_and(|n| {
-        n.title == title && n.project.as_deref() == Some(item.project.as_str()) && n.branch.as_deref() == Some(b.as_str()) && n.brief.as_deref() == Some(brief) && n.ai == item.ai && n.model == item.model && n.proposed == proposed && n.started.is_none()
+        n.title == title && n.project.as_deref() == Some(item.project.as_str()) && n.branch.as_deref() == Some(b.as_str()) && n.brief.as_deref() == Some(brief) && n.ai == item.ai && n.model == item.model && n.proposed == proposed && n.made == made && n.started.is_none()
     });
     if !(new_ok && w1.len() == w0.len() + 1 && w0.iter().zip(&w1).all(|(a, b)| same(a, b)) && after.projects == before.projects) {
         return Err(format!("“{title}” could not be added to the plan without changing the rest of it"));
@@ -392,7 +409,7 @@ fn skippable(t: &str) -> bool {
 }
 
 const PROJECT_FORM: &str = "write `- <name> (registered)`, `- <name> (clone: <url>)` or `- <name> (new: <path>)`";
-const WORK_KEYS: &str = "`project:`, `branch:`, `brief:`, `ai:`, `model:`, `proposed:` or `started:`";
+const WORK_KEYS: &str = "`project:`, `branch:`, `brief:`, `ai:`, `model:`, `proposed:`, `made:` or `started:`";
 
 fn project_line(l: &Line, problems: &mut Vec<Problem>) -> Option<Project> {
     let bad = |problems: &mut Vec<Problem>, words: String| {
@@ -570,6 +587,7 @@ pub fn read(text: &str) -> Sections {
                     "model" => &mut it.model,
                     "started" => &mut it.started,
                     "proposed" => &mut it.proposed,
+                    "made" => &mut it.made,
                     "brief" => &mut it.brief,
                     _ => {
                         bad(&mut problems, format!("unknown key `{key}:`: expected {WORK_KEYS}"));
@@ -607,6 +625,12 @@ pub fn read(text: &str) -> Sections {
                         it.proposal = Proposed::parse(value);
                         if it.proposal.is_none() {
                             bad(&mut problems, "not a proposed line: a workspace chat writes `proposed: <chat> · <chat id> · <when>`".into());
+                        }
+                    }
+                    "made" => {
+                        it.maker = Proposed::parse(value);
+                        if it.maker.is_none() {
+                            bad(&mut problems, "not a made line: a workspace chat writes `made: <chat> · <chat id> · <when>`".into());
                         }
                     }
                     _ => {}
@@ -905,7 +929,7 @@ started: homelab-ansible · jellyfin-role · 2026-11-12\n\n### Config repo\nproj
     }
 
     fn new_item(title: &str) -> NewItem {
-        NewItem { title: title.into(), project: "worktrees".into(), branch: "feat/x".into(), brief: "Goal.\n\n  ## not a heading\n```\nfenced\n```\nStop.".into(), ai: Some("claude".into()), model: None, proposed: Some(prop()) }
+        NewItem { title: title.into(), project: "worktrees".into(), branch: "feat/x".into(), brief: "Goal.\n\n  ## not a heading\n```\nfenced\n```\nStop.".into(), ai: Some("claude".into()), model: None, proposed: Some(prop()), made: None }
     }
 
     /// A proposed item lands as the last of `## Work`, reads back as itself
@@ -976,5 +1000,20 @@ started: homelab-ansible · jellyfin-role · 2026-11-12\n\n### Config repo\nproj
         let (_, _, e) = section_span(PLAN, "work").unwrap();
         assert!(PLAN[e..].starts_with("## Notes"));
         assert!(section_span("# x\n", "projects").is_none());
+    }
+
+    /// A chat's item that is not a proposal carries `made:`, read back as
+    /// its maker; an item cannot be both, and a bad `made:` is a problem.
+    #[test]
+    fn a_made_item_round_trips_and_is_never_also_proposed() {
+        let item = NewItem { proposed: None, made: Some(prop()), ..new_item("Made") };
+        let out = with_item(PLAN, &item).unwrap();
+        let it = read(&out).work.unwrap().into_iter().find(|w| w.title == "Made").unwrap();
+        assert_eq!((it.maker.as_ref(), it.proposal.as_ref()), (Some(&prop()), None));
+        assert!(out.contains(&format!("made: {}", prop().text().unwrap())), "{out}");
+        let both = NewItem { made: Some(prop()), ..new_item("Both") };
+        assert!(with_item(PLAN, &both).unwrap_err().contains("not both"));
+        let bad = out.replace(&format!("made: {}", prop().text().unwrap()), "made: nobody");
+        assert!(read(&bad).problems.iter().any(|p| p.words.contains("not a made line")), "{:?}", read(&bad).problems);
     }
 }

@@ -14,7 +14,7 @@ import { DeskTerminalPane } from "./TerminalPane";
 import { useArmed } from "./useArmed";
 import {
   accessWords, activeAt, ageWords, asksTrust, endedLine, failedWords, firstMessage, foldOf, foldRuns, introWords, isDefaultTitle, monthOf, navRows, quietLine, readsWords, stateWords, titleFrom, transcriptGone, TRUST_WORDS, whenWords,
-  type ChatRow, type DocRead, type ProjectRead, type RowState, type WsChat, type WsChats,
+  type ChatRow, type DocRead, unreadWords, type ProjectRead, type RowState, type WsChat, type WsChats,
   modelOf,
 } from "./wschats";
 import type { WsChatsLive } from "./useWsChats";
@@ -45,6 +45,8 @@ export function NavChats(props: {
   start(): void;
   all(): void;
   retry(): void;
+  /** Arm a drag of a row: into a place's chat, it is a reference. */
+  arm?(e: React.PointerEvent, conv: string, title: string): void;
 }) {
   const { rows, rest } = navRows(props.rows, props.q);
   const live = props.rows.filter((r) => r.live).length;
@@ -62,10 +64,12 @@ export function NavChats(props: {
         const age = ageWords(r, props.ago(activeAt(r.chat)));
         return (
           <button key={r.chat.id} className={"wsc-row" + (r.state === "ended" ? " closed" : "") + (r.chat.id === props.on ? " on" : "")} data-testid="ws-chat-row" data-track="nav.workspace.chat"
-            data-chat={r.chat.id} data-state={r.state} title={`${r.chat.title} · ${stateWords(r)}`} aria-current={r.chat.id === props.on || undefined} onClick={() => props.open(r.chat.id)}>
+            data-chat={r.chat.id} data-state={r.state} title={`${r.chat.title} · ${stateWords(r)}`} aria-current={r.chat.id === props.on || undefined} onClick={() => props.open(r.chat.id)}
+            data-drag-handle="" onPointerDown={props.arm ? (e) => props.arm!(e, r.chat.id, r.chat.title) : undefined}>
             <span className="wsc-row-in">
               <ChatDot state={r.state} />
               <span className="wsc-title">{r.chat.title}</span>
+              {r.unread > 0 && <span className="wsc-unread" data-testid="ws-chat-unread" title={unreadWords(r.unread)} aria-label={unreadWords(r.unread)}>{r.unread}</span>}
               <span className={"wsc-age" + (age.strong ? " strong" : "")}>{age.text}</span>
             </span>
           </button>
@@ -137,6 +141,9 @@ export function WorkspaceChatColumn(props: {
   memoryTick: number;
   memoryChanged(): void;
   onError(msg: string): void;
+  /** Why this chat has no worktrees tools (`mcpWords`), and the way to set
+   *  the server up; null when it has them. */
+  mcp?: { words: string; setUp(): void } | null;
 }) {
   const { ws, info, conv, live } = props;
   const row = props.rows.find((r) => r.chat.id === conv) ?? null;
@@ -238,6 +245,7 @@ export function WorkspaceChatColumn(props: {
         {model && <span className="agent-model wsc-model" data-testid="ws-chat-model" title="the model this chat last replied with">Claude {model}</span>}
         <button className="wsc-readsb" data-testid="ws-chat-readsb" data-track="workspace.chat.reads" title="Which projects this chat reads" aria-expanded={menu?.kind === "reads"} onClick={at("reads")}>{readsWords(info.projects)} ▾</button>
         {c.access === "stale" && <button className="wsc-stale-b" data-testid="ws-chat-stale-chip" title="What it may read has changed since it started" onClick={at("reads")}>its rules changed</button>}
+        {props.mcp && <button className="wsc-stale-b wsc-nomcp" data-testid="ws-chat-no-mcp" title={props.mcp.words} aria-label={`${props.mcp.words} Set up.`} onClick={props.mcp.setUp}>no tools · Set up</button>}
         <span className="wsc-acts">
           {row.live && (
             <span className="agent-view" role="group" aria-label="View">

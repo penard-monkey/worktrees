@@ -857,10 +857,29 @@ pub fn history_copy_at(root: &Path, id: &str, bytes: &[u8]) -> Result<PathBuf, S
 
 /// A new, blank idea titled `title`.
 pub fn create_at(root: &Path, title: &str) -> Result<Doc, String> {
+    create_with_at(root, title, None)
+}
+
+/// The frontmatter key naming the workspace chat that made a document:
+/// `<chat title> · <chat id> · <when>` (`plans::Proposed`'s shape). Written
+/// once, by [`create_made_at`] and [`make_workspace_plan_at`]; the app shows
+/// it as "made by". A label: nothing decides an act by it.
+pub const MADE_BY: &str = "made_by";
+
+/// [`create_at`], marked [`MADE_BY`] the chat `by` names.
+pub fn create_made_at(root: &Path, title: &str, by: &crate::plans::Proposed) -> Result<Doc, String> {
+    create_with_at(root, title, Some(by))
+}
+
+fn create_with_at(root: &Path, title: &str, by: Option<&crate::plans::Proposed>) -> Result<Doc, String> {
     ensure_root(root)?;
     let title = clean_title(title);
     let id = crate::ulid::new();
-    let content = format!("---\nid: {id}\ncreated: {}\n---\n\n# {title}\n", today());
+    let made = match by {
+        Some(b) => format!("{MADE_BY}: {}\n", b.text()?),
+        None => String::new(),
+    };
+    let content = format!("---\nid: {id}\ncreated: {}\n{made}---\n\n# {title}\n", today());
     let stem = slug(&title);
     for _ in 0..16 {
         let file = free_name(root, &stem, None);
@@ -1574,7 +1593,8 @@ pub fn plan_template(title: &str, ideas: &[(String, String)]) -> String {
         1 => links[0].clone(),
         n => format!("{} and {}", links[..n - 1].join(", "), links[n - 1]),
     };
-    format!("# {}\n\nFrom {from}.\n\n## Goal\n\n## Projects\n\n## Work\n", plan_title(title))
+    let from = if from.is_empty() { String::new() } else { format!("From {from}.\n\n") };
+    format!("# {}\n\n{from}## Goal\n\n## Projects\n\n## Work\n", plan_title(title))
 }
 
 /// `text` with `plan_of:` set to `items`; an empty list is written
@@ -1616,23 +1636,44 @@ fn live_ideas(idx: &Index, ids: &[String], not: Option<&str>) -> Result<Vec<(Str
 /// file is named, as every document is, by its first heading: a plan titled
 /// `Plan: Jellyfin` is `plan-jellyfin.md`. No idea is written.
 pub fn make_plan_at(root: &Path, ideas: &[String], title: Option<&str>, draft: Option<&str>) -> Result<Doc, String> {
+    if ideas.is_empty() {
+        return Err("a plan is made from one idea or more".into());
+    }
+    make_plan_with_at(root, ideas, title, draft, None)
+}
+
+/// A workspace's plan, made by its chat `by` (`workspace-chat-powers.md`
+/// §1.1): [`make_plan_at`] from the workspace's linked ideas, which may be
+/// none (`plan_of: []`, still a plan), titled `title`, marked [`MADE_BY`].
+pub fn make_workspace_plan_at(root: &Path, ideas: &[String], title: &str, draft: Option<&str>, by: &crate::plans::Proposed) -> Result<Doc, String> {
+    if title.trim().is_empty() {
+        return Err("a plan needs a title".into());
+    }
+    make_plan_with_at(root, ideas, Some(title), draft, Some(by))
+}
+
+fn make_plan_with_at(root: &Path, ideas: &[String], title: Option<&str>, draft: Option<&str>, by: Option<&crate::plans::Proposed>) -> Result<Doc, String> {
     refuse_real(root)?;
     if let Some(d) = draft {
         check_body(d)?;
     }
-    if ideas.is_empty() {
-        return Err("a plan is made from one idea or more".into());
-    }
     let idx = list_at(root)?;
     let live = live_ideas(&idx, ideas, None)?;
-    let title = title.map(str::trim).filter(|t| !t.is_empty()).map_or_else(|| live[0].1.clone(), str::to_string);
+    let title = match title.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) => t.to_string(),
+        None => live.first().map(|l| l.1.clone()).ok_or("a plan made from no idea needs a title")?,
+    };
     let id = crate::ulid::new();
     let ids: Vec<String> = live.iter().map(|(i, _)| i.clone()).collect();
     let body = match draft {
         Some(d) => d.to_string(),
         None => plan_template(&title, &live),
     };
-    let content = format!("---\nid: {id}\n{PLAN_OF}: [{}]\ncreated: {}\n---\n\n{body}", ids.join(", "), today());
+    let made = match by {
+        Some(b) => format!("{MADE_BY}: {}\n", b.text()?),
+        None => String::new(),
+    };
+    let content = format!("---\nid: {id}\n{PLAN_OF}: [{}]\ncreated: {}\n{made}---\n\n{body}", ids.join(", "), today());
     let stem = slug(&title_of(&content).unwrap_or_else(|| plan_title(&title)));
     create_named(root, &stem, &content)?;
     read_at(root, &id)

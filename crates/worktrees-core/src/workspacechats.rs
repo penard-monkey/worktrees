@@ -229,6 +229,11 @@ pub struct Chat {
     /// `start.md`'s chat template. Absent from a record before it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub tidy: bool,
+    /// The ideas this chat made (`idea_create` in its MCP server), by id:
+    /// what decides, beside the workspace's links, which ideas it may edit.
+    /// Kept here, in the engine's half, never in a file the chat can write.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub made: Vec<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -482,6 +487,7 @@ pub fn prepare_kind_at(root: &Path, ws: &str, kind: Kind, context: impl FnOnce(&
             fold: None,
             attempts: Vec::new(),
             tidy: kind == Kind::Tidy,
+            made: Vec::new(),
             extra: Map::new(),
         };
         rec.conversations.push(c.clone());
@@ -522,14 +528,30 @@ pub fn start_text(folder: &Path, conv: &str) -> String {
             the whole folder. If it is not there, the workspace has no memory yet.\n\
          2. Read `{folder}/{CHATS_DIR}/{conv}/{CONTEXT}`: the workspace's projects, their places, its plan\n\
             and its ideas, as they were when this chat was started or resumed.\n\
-         3. You may read the projects that file says you can read. Never write in a project's tree. Work\n\
-            is done in a place, by that place's agent. The plan and the linked ideas are the person's own\n\
-            documents: that file gives each one's path. Read one when the question touches it; never change\n\
-            one.\n\
-         4. When something durable is decided, write it in the memory folder: one line in\n\
+         3. You may read the projects that file says you can read. You have no checkout: never write in a\n\
+            project's tree with your file tools. Code is changed in a place, by that place's agent.\n\
+         4. You are an agent like a lane, and the `worktrees` MCP server gives you a lane's tools in each of\n\
+            the workspace's projects that file says you can read. You do not need the person to start work:\n\
+            - Lanes: `create_worktree` (project, branch, brief, provider, model) starts a place with its\n\
+              agent; `open_place`, `close_session`, `send`, `set_note`, `set_pin`, `set_lifecycle`,\n\
+              `list_places` and `place_status` act on a place as `<project>:<slug>`. You never remove a place.\n\
+            - The plan: `plan_read`; `plan_make` when the workspace has none; `plan_add_work` adds an item;\n\
+              `plan_write` edits the plan; `plan_start_work` starts an item. Every change is kept in history.\n\
+            - Ideas: `idea_create`, then `idea_write` and `idea_append` on ideas you made or the workspace\n\
+              links; `workspace_link_idea` links one.\n\
+            - Messages: your address is the `workspace` tool's `chat.address`. Lanes you start report to you.\n\
+              Read them with `messages` or `wait`; answer with `report`. `read_chat` reads another chat.\n\
+            Tell the person what you started or changed. Ask first before anything you cannot undo.\n\
+         5. When something durable is decided, write it in the memory folder: one line in\n\
             `{MEMORY_INDEX}`, and the detail in a file under `topics/` that the line links to.\n\
-         5. Write only in `{memory}` and in `{folder}/{CHATS_DIR}/{conv}/`. Do not commit: the app does.\n\
-         6. Start by saying in a few lines what you read and what you would ask first.\n",
+            - When the person says to remember something, do that right away, then call `remember` with\n\
+              a few words for what it is and the files you changed. It records them at once as their\n\
+              own change in History (\"Remembered: …\"), which the person can undo on its own.\n\
+            - When the person says to forget something, remove or correct it in `{MEMORY_INDEX}` and in\n\
+              every file that holds it, then call `forget` with the files. Chats no longer read it, but\n\
+              History keeps the old text: say so in one line, so forgetting is not taken for erasing.\n\
+         6. Write only in `{memory}` and in `{folder}/{CHATS_DIR}/{conv}/`. Do not commit: the app does.\n\
+         7. Start by saying in a few lines what you read and what you would ask first.\n",
         folder = folder.display(),
         memory = memory.display(),
     )
@@ -686,6 +708,11 @@ pub struct Access {
     pub at: String,
     /// A digest of the rules, whole: equal text, equal digest.
     pub digest: String,
+    /// A digest of the rules without the one Read rule each linked document
+    /// gets: what a document linked since does not change. Empty in a record
+    /// from a build before it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub base_digest: String,
     #[serde(default)]
     pub projects: Vec<AccessProject>,
     #[serde(default)]
@@ -727,6 +754,7 @@ pub fn access(w: &crate::workspaces::Workspace, src: &Sources) -> Result<Access,
     Ok(Access {
         at: desk::now_iso(),
         digest: crate::guidance::text_hash(&settings(w, src)?),
+        base_digest: crate::guidance::text_hash(&settings_with(w, src, false)?),
         projects: project_reads(w, src.reg)
             .into_iter()
             .map(|p| AccessProject { name: p.name.clone().unwrap_or_else(|| last_part(&p.root)), read: p.reads == Reads::Yes, why: p.why.map(String::from), root: p.root })
@@ -772,8 +800,16 @@ pub fn access_changes(then: &Access, now: &Access) -> Vec<AccessChange> {
             Some(_) => {}
         }
     }
-    out.extend(now.documents.iter().filter(|n| !then.documents.iter().any(|d| d.id == n.id)).map(|n| doc(n, "linked")));
-    if out.is_empty() && then.digest != now.digest {
+    // A document linked since only adds what the chat may read, and the chat
+    // reads every idea through its own tools anyway (`idea_read`); since a
+    // chat may link ideas and make the plan itself (workspace-chat-powers
+    // §9), its own act must not tell it its rules are stale. So a link is no
+    // change, and the rules are compared without the documents' own rules
+    // when both records have that digest.
+    let base = !then.base_digest.is_empty() && !now.base_digest.is_empty();
+    let linked = now.documents.iter().any(|n| !then.documents.iter().any(|d| d.id == n.id));
+    let differs = if base { then.base_digest != now.base_digest } else { then.digest != now.digest && !linked };
+    if out.is_empty() && differs {
         out.push(AccessChange { kind: "rules", name: String::new(), path: String::new(), change: "other" });
     }
     out
@@ -878,6 +914,11 @@ pub fn doc_reads(w: &crate::workspaces::Workspace, src: &Sources) -> Vec<DocRead
 /// The paths are the registry's, canonical, and hold no character that means
 /// anything in a rule ([`rule_root`]).
 pub fn settings(w: &crate::workspaces::Workspace, src: &Sources) -> Result<String, String> {
+    settings_with(w, src, true)
+}
+
+/// [`settings`], with or without the Read rule of each linked document.
+fn settings_with(w: &crate::workspaces::Workspace, src: &Sources, docs: bool) -> Result<String, String> {
     let reg = src.reg;
     let (mut allow, mut deny) = (Vec::new(), Vec::new());
     for p in project_reads(w, reg).iter().filter(|p| p.reads == Reads::Yes) {
@@ -890,7 +931,7 @@ pub fn settings(w: &crate::workspaces::Workspace, src: &Sources) -> Result<Strin
     }
     // The ideas folder is the person's: each linked document is read by a rule
     // of its own, and nothing in it is written.
-    for d in doc_reads(w, src).iter().filter(|d| d.reads == Reads::Yes) {
+    for d in doc_reads(w, src).iter().filter(|d| docs && d.reads == Reads::Yes) {
         let rule = format!("Read(/{})", d.path.as_deref().unwrap_or_default());
         if !allow.contains(&rule) {
             allow.push(rule);
@@ -1018,9 +1059,9 @@ pub fn context_text(c: &Context) -> String {
          \n\
          You may read the files of a project marked read; nothing asks, and you never write there. A\n\
          project marked NOT READ is not to be read at all, whatever Claude Code would allow. The plan and\n\
-         the linked ideas are the person's own documents, each at its absolute path as it was then (one\n\
-         that was renamed since is not there any more: say so). Read one when the question touches it, and\n\
-         change none.\n\n",
+         the linked ideas are each at its absolute path as it was then (one that was renamed since is not\n\
+         there any more: say so). Read one when the question touches it. Change one only through the\n\
+         worktrees tools (`plan_write`, `idea_write`, …), never with your file tools.\n\n",
         plain(&c.written, 40),
         plain(&c.workspace, 120)
     );
@@ -1559,6 +1600,162 @@ pub fn restore_folder_at(root: &Path, ws: &str, from: &Path) -> Result<(), Strin
     fs::rename(from, &dir).map_err(|e| format!("could not move {} back to {}: {e}", from.display(), dir.display()))
 }
 
+
+// ── the bus (`workspace-chat-powers.md` §2) ─────────────────────────────────
+
+/// What every chat's bus address starts with.
+pub const ADDRESS_PREFIX: &str = "workspace:";
+
+/// A chat's address on the message bus: `workspace:<workspace id>/<chat id>`,
+/// both ULIDs. A place's slug never holds a `/`, so it is never read as
+/// `<project>:<slug>`, even in a project named `workspace`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Address {
+    pub ws: String,
+    pub conv: String,
+}
+
+impl Address {
+    pub fn of(ws: &str, conv: &str) -> Address {
+        Address { ws: ws.to_string(), conv: conv.to_string() }
+    }
+
+    /// The address `s` names, or `None` for any other shape.
+    pub fn parse(s: &str) -> Option<Address> {
+        let (ws, conv) = s.trim().strip_prefix(ADDRESS_PREFIX)?.split_once('/')?;
+        (crate::ulid::is_valid(ws) && crate::ulid::is_valid(conv)).then(|| Address::of(ws, conv))
+    }
+
+    /// Whether `s` is meant as a chat's address, well formed or not: a
+    /// caller tells a malformed one apart from a place.
+    pub fn claims(s: &str) -> bool {
+        s.trim().strip_prefix(ADDRESS_PREFIX).is_some_and(|r| r.contains('/'))
+    }
+
+    pub fn text(&self) -> String {
+        format!("{ADDRESS_PREFIX}{}/{}", self.ws, self.conv)
+    }
+}
+
+impl std::fmt::Display for Address {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text())
+    }
+}
+
+/// Workspace `ws`'s chats' inbox: `messages`' log in the engine's half, where
+/// no chat's own file tools are pointed. Keyed by chat id.
+pub fn inbox_at(root: &Path, ws: &str) -> Result<PathBuf, String> {
+    Ok(engine_dir_at(root, ws)?.join(crate::messages::DIR_NAME))
+}
+
+/// The one refusal for a chat address a caller may not reach: the same words
+/// whether the workspace, the chat or the caller's membership is what is
+/// missing, so a lane learns nothing about workspaces it is not in.
+pub fn unreachable(addr: &str) -> String {
+    format!("{addr} is not a chat of a workspace this project belongs to (or that project is private)")
+}
+
+/// A chat another agent reached by its address.
+#[derive(Clone, Debug)]
+pub struct Reached {
+    pub addr: Address,
+    pub ws: crate::workspaces::Workspace,
+    pub chat: Chat,
+}
+
+/// The chat `addr` names, for a caller in the registered project at
+/// `from_root`: the workspace exists and holds that project, the project is
+/// not private, and the workspace's record holds the chat. Every refusal is
+/// [`unreachable`]'s.
+pub fn reach_at(root: &Path, ws_file: &Path, reg: &crate::registry::Registry, addr: &Address, from_root: &str) -> Result<Reached, String> {
+    let no = || unreachable(&addr.text());
+    let e = reg.by_root(from_root).filter(|e| !e.private).ok_or_else(no)?;
+    let w = crate::workspaces::read_at(ws_file).map_err(|_| no())?.workspaces.into_iter().find(|w| w.id == addr.ws).ok_or_else(no)?;
+    if !w.projects.iter().any(|p| p.root == e.root) {
+        return Err(no());
+    }
+    let chat = find_at(root, &addr.ws, &addr.conv).map_err(|_| no())?;
+    Ok(Reached { addr: addr.clone(), ws: w, chat })
+}
+
+/// The chat `addr` names, for ANOTHER chat of the same workspace.
+pub fn sibling_at(root: &Path, from_ws: &str, addr: &Address) -> Result<Chat, String> {
+    if addr.ws != from_ws {
+        return Err(format!("{addr} is a chat of another workspace: this chat reaches its own workspace's chats only"));
+    }
+    find_at(root, &addr.ws, &addr.conv).map_err(|_| format!("{addr} is not one of this workspace's chats"))
+}
+
+/// What chat `conv`'s Claude is doing, from the live probes: busy, waiting,
+/// idle, or none when no Claude runs in its session.
+pub fn chat_activity(probes: &[crate::agent::ClaudeProbe], conv: &str) -> crate::activity::Activity {
+    let session = session_name(conv);
+    match probes.iter().filter(|p| p.is_interactive_cli()).find(|p| p.session() == Some(session.as_str())) {
+        Some(p) => crate::activity::Activity {
+            provider: Some(crate::provider::CLAUDE.id),
+            state: crate::activity::claude_state(&crate::agent::effective_state(p)),
+            last_done: None,
+            session: Some(session),
+            reason: None,
+        },
+        None => crate::activity::Activity::none(),
+    }
+}
+
+/// Whether the chat at `addr` takes the reports of a place of the project at
+/// `from_root` that it started: it is reachable from that project
+/// ([`reach_at`], the user's files) and its Claude runs. The snapshot's
+/// `lineage.reports_to` asks this; the MCP `report` asks the same two things.
+pub fn takes_reports(from_root: &str, addr: &str, probes: &[crate::agent::ClaudeProbe]) -> bool {
+    let Some(a) = Address::parse(addr) else { return false };
+    let reg = crate::registry::read_lenient();
+    reach_at(&crate::wsfolder::root(), &crate::workspaces::path(), &reg, &a, from_root)
+        .is_ok_and(|r| crate::lineage::counts_as_live(chat_activity(probes, &r.chat.id).state))
+}
+
+/// One turn of a chat, as another agent may read it: the prompt and the
+/// reply's text, nothing of its tools, and whether the engine sent the prompt.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct ChatTurn {
+    pub at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine: Option<Engine>,
+    pub reply: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+/// Chat `c`'s last `n` turns ([`ChatTurn`]), read through `turns`' rules from
+/// the transcript under `claude_dir`: user and assistant messages only, and a
+/// turn whose prompt is an injected notice (a peer message, a task, a
+/// command) is left out.
+pub fn chat_turns_at(root: &Path, claude_dir: &Path, ws: &str, c: &Chat, n: usize) -> Result<Vec<ChatTurn>, String> {
+    let folder = folder_at(root, ws)?;
+    let paths = crate::desksessions::transcript_paths(claude_dir, &folder, &c.session_id);
+    let Some(path) = paths.iter().find(|p| p.is_file()) else { return Ok(Vec::new()) };
+    // `turns::window`, not a fixed tail: one long turn can fill a tail, and
+    // the turn before it would read back with no prompt (#711).
+    let lines = crate::turns::window(path, crate::provider::CLAUDE.id)?;
+    Ok(crate::turns::claude_opened(&lines, n, &openers(&folder, c))
+        .into_iter()
+        .filter(|t| t.notice.is_none())
+        .map(|t| ChatTurn { at: t.at, user: t.user, engine: t.engine, reply: t.reply, truncated: t.truncated })
+        .collect())
+}
+
+/// Record that chat `conv` made idea `id` ([`Chat::made`]).
+pub fn add_made_at(root: &Path, ws: &str, conv: &str, id: &str) -> Result<(), String> {
+    update_at(root, ws, conv, |c| {
+        if !c.made.iter().any(|m| m == id) {
+            c.made.push(id.to_string());
+        }
+    })
+    .map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1582,6 +1779,7 @@ mod tests {
             fold: None,
             attempts: Vec::new(),
             tidy: false,
+            made: Vec::new(),
             extra: Map::new(),
         }
     }
@@ -1774,11 +1972,19 @@ mod tests {
             ("document", "unlinked", "unlinked"),
             ("document", "gone", "gone"),
             ("document", "moved", "moved"),
-            ("document", "linked", "linked"),
         ];
-        assert_eq!(got, want.map(|(k, n, c)| (k, n.to_string(), c)));
+        assert_eq!(got, want.map(|(k, n, c)| (k, n.to_string(), c)), "a document linked since is no change");
         let rules = access_changes(&then, &Access { digest: "2".into(), ..then.clone() });
         assert_eq!((rules.len(), rules[0].kind, rules[0].change), (1, "rules", "other"), "a private project nested in one that is read");
+        // A chat that links an idea, or makes the plan, is not told by its own
+        // act that its rules are stale: the link adds one document's Read rule
+        // and moves the whole digest, but not the base.
+        let mine = Access { digest: "with-link".into(), base_digest: "b".into(), documents: [then.documents.clone(), vec![d("NEW", "/i/new-idea.md")]].concat(), ..then.clone() };
+        let then_b = Access { base_digest: "b".into(), ..then.clone() };
+        assert!(access_changes(&then_b, &mine).is_empty(), "{:?}", access_changes(&then_b, &mine));
+        assert_eq!(access_changes(&then_b, &Access { base_digest: "c".into(), ..mine.clone() }).len(), 1, "anything else in the rules still is");
+        // A record from before the base digest: a link alone is still no change.
+        assert!(access_changes(&then, &Access { digest: "with-link".into(), ..mine }).is_empty());
         let _ = fs::remove_dir_all(&top);
     }
 
@@ -2584,5 +2790,71 @@ mod tests {
             assert!(panes.agents_in("/r/repo/.worktrees/feat", None).is_empty(), "{cmd}");
             assert!(panes.sessions_in("/r/repo/.worktrees/feat", None).is_empty(), "{cmd}");
         }
+    }
+
+    /// A chat's bus address is two ULIDs after `workspace:`, split by a `/`,
+    /// which no place's slug holds; anything else is not one, and a
+    /// malformed one is still told apart from a place.
+    #[test]
+    fn a_chat_address_is_two_ulids_and_never_a_place() {
+        let (ws, conv) = (crate::ulid::new(), crate::ulid::new());
+        let a = Address::parse(&format!("  workspace:{ws}/{conv} ")).unwrap();
+        assert_eq!((a.ws.as_str(), a.conv.as_str()), (ws.as_str(), conv.as_str()));
+        assert_eq!(Address::parse(&a.text()), Some(a.clone()));
+        for bad in [format!("workspace:{ws}"), format!("workspace:{ws}/x"), format!("workspace:../{conv}"), format!("workspaces:{ws}/{conv}"), "workspace:(main)".into()] {
+            assert_eq!(Address::parse(&bad), None, "{bad}");
+        }
+        assert!(Address::claims("workspace:x/y") && !Address::claims("workspace:(main)") && !Address::claims("proj:(main)"));
+    }
+
+    /// A chat is told it is an agent with a lane's tools, and the words that
+    /// made it tell the person it could not start work are gone.
+    #[test]
+    fn start_md_tells_the_chat_its_tools() {
+        let t = start_text(Path::new("/w/ws"), "01JC90A1000000000000000000");
+        for tool in ["create_worktree", "plan_make", "plan_write", "plan_start_work", "idea_create", "report", "messages", "read_chat", "remember", "forget"] {
+            assert!(t.contains(&format!("`{tool}`")), "{tool}: {t}");
+        }
+        assert!(!t.contains("person's own") && !t.contains("never change"), "{t}");
+        assert!(t.contains("History keeps the old text"), "a forget is said not to erase: {t}");
+        assert!(t.contains("never write in a\n") || t.contains("never write in a project"), "{t}");
+        let c = context_text(&Context { written: "now".into(), workspace: "W".into(), projects: vec![], docs: vec![], notes: vec![] });
+        assert!(!c.contains("person's own") && !c.contains("change none"), "{c}");
+    }
+
+    /// The ideas a chat made are kept in the engine's record, once each.
+    #[test]
+    fn a_chats_made_ideas_are_recorded_once() {
+        let root = std::env::temp_dir().join(format!("wt-made-{}", crate::ulid::new()));
+        let ws = crate::ulid::new();
+        let c = prepare_at(&root, &ws, |_| String::new()).unwrap();
+        add_made_at(&root, &ws, &c.id, "01JC90A1000000000000000001").unwrap();
+        add_made_at(&root, &ws, &c.id, "01JC90A1000000000000000001").unwrap();
+        assert_eq!(find_at(&root, &ws, &c.id).unwrap().made, vec!["01JC90A1000000000000000001".to_string()]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A chat whose last turn is longer than a fixed tail reads back with its
+    /// prompt (`turns::window`, #711), for `read_chat`.
+    #[test]
+    fn a_long_chat_reads_back_with_every_prompt() {
+        let root = std::env::temp_dir().join(format!("wt-longchat-{}", crate::ulid::new()));
+        let ws = crate::ulid::new();
+        let c = prepare_at(&root, &ws, |_| String::new()).unwrap();
+        let claude = root.join("claude");
+        let folder = folder_at(&root, &ws).unwrap();
+        let path = crate::desksessions::transcript_paths(&claude, &folder, &c.session_id).remove(0);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let big = "x".repeat(600 * 1024);
+        let mut lines = vec![r#"{"type":"user","uuid":"u1","timestamp":"2026-11-27T10:00:00Z","message":{"role":"user","content":"Where do backups go?"}}"#.to_string()];
+        for i in 0..5 {
+            lines.push(format!(r#"{{"type":"assistant","uuid":"a{i}","timestamp":"2026-11-27T10:00:0{i}Z","message":{{"role":"assistant","model":"m","content":[{{"type":"tool_use","id":"t{i}","name":"Read","input":{{"file_path":"/{big}"}}}}]}}}}"#));
+        }
+        lines.push(r#"{"type":"assistant","uuid":"z","timestamp":"2026-11-27T10:00:09Z","message":{"role":"assistant","model":"m","content":[{"type":"text","text":"To the NAS."}]}}"#.into());
+        fs::write(&path, lines.join("\n") + "\n").unwrap();
+        assert!(fs::metadata(&path).unwrap().len() > crate::turns::TAIL_BYTES, "longer than the old tail");
+        let t = chat_turns_at(&root, &claude, &ws, &c, 10).unwrap();
+        assert_eq!(t.last().and_then(|t| t.user.as_deref()), Some("Where do backups go?"), "{t:?}");
+        let _ = fs::remove_dir_all(&root);
     }
 }

@@ -27,6 +27,9 @@ export type WorkItem = {
   /** The `proposed:` line a workspace chat wrote (`plan_propose_work`), as
    *  written and as read; absent for an item a person wrote. */
   proposed?: string | null; proposal?: Proposed | null;
+  /** The `made:` line a workspace chat wrote for an item it added and may
+   *  start itself (`plan_add_work`), as written and as read. */
+  made?: string | null; maker?: Proposed | null;
 };
 /** Core's `Proposed`: which workspace chat proposed an item, its title then. */
 export type Proposed = { by: string; chat: string; at: string };
@@ -297,7 +300,7 @@ export function planSources(open: DocRow | null, selected: readonly string[], ro
 export function workStatus(w: WorkItem, at: ItemPlace): string {
   const when = w.place ? `started ${w.place.at}` : "";
   switch (at.kind) {
-    case "none": return w.proposal ? `proposed by ${w.proposal.by} · not started` : "not started";
+    case "none": return w.proposal ? `proposed by ${w.proposal.by} · not started` : w.maker ? `made by ${w.maker.by} · not started` : "not started";
     case "unreadable": return `started: ${w.started}`;
     case "unknown": return when;
     case "unregistered": return `${when} · its project is not registered`;

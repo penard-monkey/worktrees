@@ -880,9 +880,10 @@ mod tests {
         let mut want: Vec<String> = LINEAGE_SAME_PROJECT.iter().chain(LINEAGE_CUT).map(|s| s.to_string()).collect();
         want.sort();
         assert_eq!(fields(lineage, "Lineage"), want, "a Lineage field is neither same-project nor cut");
-        // A starter, and a link, name another project by `project` alone.
-        assert_eq!(fields(lineage, "Starter"), ["at", "place", "project", "removed"]);
-        assert_eq!(fields(store, "Link"), ["at", "by", "from", "place", "project"]);
+        // A starter, and a link, name another project by `project`, and a
+        // workspace chat by `chat`: `cut_foreign_starter` cuts either.
+        assert_eq!(fields(lineage, "Starter"), ["at", "chat", "place", "project", "removed"]);
+        assert_eq!(fields(store, "Link"), ["at", "by", "chat", "from", "place", "project"]);
         // The declared links: only `started_by` may carry `project`.
         let decl = fields(store, "Declared");
         for k in ["started_by", "handed_to", "under"] {

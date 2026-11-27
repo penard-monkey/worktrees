@@ -25,6 +25,8 @@
 .wsc-row.closed .wsc-title { color: var(--txt); }
 .wsc-age { flex: none; margin-left: auto; color: var(--txt-dim); font-size: var(--fs-meta); }
 .wsc-age.strong { color: var(--txt-hi); }
+/* Lanes' messages it has not read: the hue is the tint, the digit the text colour. */
+.wsc-unread { flex: none; margin-left: var(--s1); padding: 0 5px; border-radius: 8px; font-size: var(--fs-meta); line-height: 1.5; color: var(--txt-hi); background: color-mix(in srgb, var(--accent) 22%, transparent); }
 .wsc-all { display: block; border: 0; background: transparent; padding: 2px var(--s3) 2px calc(var(--s3) + 8px + var(--s2)); color: var(--txt); font-size: var(--fs-meta); }
 .wsc-all:hover { color: var(--txt-hi); }
 .nav-view-seg .wsc-dot { margin-left: 6px; width: 6px; height: 6px; border-width: 0; vertical-align: 1px; }
@@ -84,6 +86,8 @@
 .wsc-when { flex: none; padding: 2px var(--s3); color: var(--txt); font-size: var(--fs-meta); }
 
 /* ── a live chat whose rules are not what a launch now would get ── */
+/* The no-tools chip gives up its room before the model's name does: its words are in its title. */
+.wsc-stale-b.wsc-nomcp { flex-shrink: 8; }
 .wsc-stale-b { flex: 0 1 auto; min-width: 0; border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line)); border-radius: var(--r-sm); background: color-mix(in srgb, var(--warn) 12%, var(--bg-panel)); color: var(--txt-hi); font: inherit; font-size: var(--fs-meta); padding: 1px var(--s2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wsc-stale { max-width: 22rem; padding: var(--s2) var(--s3); border-bottom: 1px solid var(--line); color: var(--txt-hi); font-size: var(--fs-meta); }
 .wsc-stale p { margin: 0; }

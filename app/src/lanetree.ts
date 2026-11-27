@@ -201,16 +201,22 @@ export function handoffLine(lanes: readonly string[], to: string): string | null
  *  snapshot's `lineage` and `declared.under`. Structural types, so this file
  *  keeps no import. */
 type LinkLike = { place: string; at: number; by?: string };
-type StarterLike = { at: number; elsewhere: true } | { place: string; at: number; project?: string; removed?: boolean };
+type StarterLike = { at: number; elsewhere: true } | { place: string; at: number; project?: string; chat?: string; removed?: boolean };
 export function laneLines(
   lin: { starter?: StarterLike; under?: LinkLike; handed_to?: LinkLike; parent?: string; reports_to?: string; started?: string[] } | undefined,
   closed: (slug: string) => boolean,
   date: (at: number) => string,
+  /** A workspace chat's title by its bus address (`lineage.starter.chat`),
+   *  null when this window has not read it. */
+  chatName: (address: string) => string | null = () => null,
 ): string[] {
   if (!lin) return [];
   const out: string[] = [];
   const s = lin.starter;
+  const chat = s && !("elsewhere" in s) && s.chat ? s.chat : null;
+  const chatWords = (a: string) => { const n = chatName(a); return n ? `the workspace chat “${n}”` : "a workspace chat"; };
   if (s && "elsewhere" in s) out.push("started in another project");
+  else if (chat) out.push(`started by ${chatWords(chat)}`);
   else if (s?.project) out.push(`from ${s.project}: ${s.place}`);
   else if (s) out.push(`started by ${s.place}${s.removed ? " (removed)" : closed(s.place) ? " (closed)" : ""}`);
   const u = lin.under;
@@ -220,7 +226,8 @@ export function laneLines(
   }
   const h = lin.handed_to;
   if (h && !u) out.push(h.place === "(main)" ? "now at the top level" : `now under ${h.place}`);
-  if (lin.reports_to && lin.reports_to !== (lin.parent ?? "(main)")) out.push(`reports to ${lin.reports_to}`);
+  if (lin.reports_to && lin.reports_to === chat) out.push("reports to it");
+  else if (lin.reports_to && lin.reports_to !== (lin.parent ?? "(main)")) out.push(`reports to ${lin.reports_to}`);
   const n = lin.started?.length ?? 0;
   if (n) out.push(`started ${n} lane${n === 1 ? "" : "s"}`);
   return out;

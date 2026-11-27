@@ -124,6 +124,13 @@ eq("closed starter, reports further up", laneLines({ starter: { place: "s", at: 
 eq("handed lane", laneLines({ starter: { place: "gone", at: 1, removed: true }, handed_to: { place: "a", at: 2 }, parent: "a", reports_to: "a" }, () => false, d),
   ["started by gone (removed)", "now under a"]);
 eq("from another project", laneLines({ starter: { place: "chats", at: 1, project: "worktrees" }, reports_to: "(main)" }, () => false, d), ["from worktrees: chats"]);
+{
+  const addr = "workspace:01JC90A1000000000000000000/01JC90A1000000000000000001";
+  const st = { place: "01JC90A1000000000000000001", at: 1, chat: addr };
+  eq("started by a workspace chat, which takes its reports", laneLines({ starter: st, reports_to: addr }, () => false, d, (a) => (a === addr ? "Release order" : null)), ["started by the workspace chat “Release order”", "reports to it"]);
+  eq("…its chat not running: its reports go to (main), said as ever", laneLines({ starter: st, reports_to: "(main)" }, () => false, d, () => null), ["started by a workspace chat"]);
+  eq("a chat id is never named as a place", laneLines({ starter: st, reports_to: addr }, (x) => x === st.place, d).some((l) => l.includes(st.place)), false);
+}
 eq("a starter the caller may not see", laneLines({ starter: { at: 1, elsewhere: true }, reports_to: "(main)" }, () => false, d), ["started in another project"]);
 eq("moved under by the owner", laneLines({ starter: { place: "s", at: 1 }, under: { place: "x", at: 2, by: "owner" }, parent: "x", reports_to: "s" }, () => false, d),
   ["started by s", "moved under x by the owner, 25 Nov", "reports to s"]);

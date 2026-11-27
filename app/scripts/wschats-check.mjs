@@ -143,5 +143,26 @@ eq("…a document, the rules, and what this build does not know", [...["unlinked
   eq("a chat this window has not read yet is still told", W.needsYouWords("waiting|s~z", ev({ waiting: ["s~z"], chat_of: { "s~z": { workspace: "W9", chat: "z" } } }), names), { title: "A workspace chat is waiting for you", body: "A chat of a workspace stopped on a question." });
 }
 
+// ── a lane's report waiting in a live chat's inbox (workspace-chat-powers §10) ──
+{
+  const live = ev({ live: ["s~a"], unread: { "s~a": 2, "s~b": 1 } });
+  const rows = W.chatRows([chat("a"), chat("b")], live);
+  eq("a live chat carries its unread count; an ended one shows none", rows.map((r) => [r.chat.id, r.unread]), [["a", 2], ["b", 0]]);
+  eq("an older engine's push has none", W.chatRows([chat("a")], ev({ live: ["s~a"] }))[0].unread, 0);
+  eq("the mark's words", W.unreadWords(1), "1 message from lanes, not read yet. The chat reads them when it checks its messages.");
+}
+
+// ── a chat with no worktrees MCP server says so ──
+eq("no server, or one that cannot run: said; read-only: said; installed: nothing", ["absent", "stale", "read-only", "installed", "elsewhere", null].map((s) => W.mcpWords(s) === null ? null : W.mcpWords(s).split(":")[0]), ["No worktrees tools", "No worktrees tools", "Read-only worktrees tools", null, null, null]);
+
+// ── a dragged chat row's reference (workspace-chat-powers §3) ──
+{
+  const ws = "01JC90A1000000000000000000", conv = "01JC90A1000000000000000001";
+  const r = W.chatReference(ws, conv, "Release order");
+  eq("it carries the chat's bus address and how to read it", [r.includes(`workspace:${ws}/${conv}`), /place_status/.test(r), /read_chat/.test(r), /“Release order”/.test(r)], [true, true, true, true]);
+  eq("a title cannot close the reference or break the line", W.chatReference(ws, conv, "a]b\nc[d"), `[workspace chat “a b c d” · workspace:${ws}/${conv} · its state: place_status; what it said: read_chat; message it: report]`);
+  eq("no title: still named", /“a workspace chat”/.test(W.chatReference(ws, conv, "  ")), true);
+}
+
 if (failed) { console.log(`\nwschats-check: ${failed} failed`); process.exit(1); }
 console.log("wschats-check: all ok");
