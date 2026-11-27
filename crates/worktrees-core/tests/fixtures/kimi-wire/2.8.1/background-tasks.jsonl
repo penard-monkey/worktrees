@@ -1,4 +1,5 @@
 {"type":"metadata","protocol_version":"1.5","created_at":1795812248293,"min_protocol_version":"1.5"}
+{"type":"profile.bind","agentId":"main","modelAlias":"kimi-code/k3.1-pro","profileName":"agent","thinkingEffort":"high","systemPrompt":"<scrubbed>","time":1795812248326}
 {"type":"permission.set_mode","agentId":"main","mode":"manual","time":1795812248326}
 {"type":"turn.prompt","agentId":"main","turnId":0,"trigger":"normal","time":1795812248374,"origin":{"kind":"user"},"input":[{"type":"text","text":"<scrubbed>"}]}
 {"type":"context.append_loop_event","agentId":"main","time":1795812248407}

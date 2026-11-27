@@ -13,6 +13,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 - **A Kimi lane that finished no longer shows as working.** Kimi Code 2.8 writes the end of a turn differently, and worktrees kept reading a finished Kimi lane as busy: a green dot with no done ring or age in the sidebar, `busy` from `place_status`, and a `wait` that never returned. It now reads both the old and the new log, so a Kimi lane is done when its turn ends, dated by Kimi's own record, and a turn that a background task's notice continues still counts as working.
 
+- **A long Kimi session shows its model again.** With Kimi Code 2.8, a Kimi lane whose log had grown past a few hundred kilobytes showed no model in the sidebar, the chat or `place_status`. worktrees now reads the model the session started on from the start of the log, once per session, and a `/model` switch made later still wins.
+
 ## [0.55.0] - 2026-11-27
 
 ### Added

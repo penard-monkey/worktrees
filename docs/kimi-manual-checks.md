@@ -36,7 +36,8 @@ and no `llm.request`. A turn opens with `turn.prompt` and closes with
 task's notification starts the next turn a millisecond later, `"none"` when
 nothing follows). `kimi::wire_turn` reads both shapes. The model alias is now
 only in `profile.bind` (the log's 4th line, ~200 KB with the system prompt)
-and, presumably, `config.update` on a switch (not measured on 2.8.1).
+and, presumably, `config.update` on a switch (not measured on 2.8.1), so the
+reader takes the session's start from the head (`kimi::head_model`).
 
 Last run: 2026-10-19, kimi 2.2.0, `kimi-code/kimi-for-coding-highspeed`,
 through the branch's release CLI on a private tmux socket (`TMUX_TMPDIR` with
@@ -115,7 +116,7 @@ send nothing, and check `place_status` says idle.
 - [x] `wait until: idle` called right after `new` (trusted, so no modal) holds while kimi starts and while the opener is pending, then returns `idle` with a `last_done` once the brief's turn ends.
 - [ ] An approval (a Bash call) is **waiting** in `place_status` — from kimi's log (`interaction.request`), no screen needed; a question (`AskUserQuestion`) likewise. (The log records were captured live on 2.2.0 and, for an approval, on 2.8.1; the reading is unit-tested on both.)
 - [x] After the turn: **idle**, `last_done` from the turn's own end record (`agent.turn.ended` on 2.2.0, `turn.ended` on 2.8.1). **2.8.1, 2026-11-27**: a live lane that finished at 13:13 read `idle`, `last_done` 13:13, through the branch's release CLI's `place_status` and `wait until: idle` (it returned at once); the installed 0.55.0 said `busy` and `wait` timed out. A second turn the same lane ran from 13:28 (six turns chained by background-task notices) read `busy` throughout and `idle` with `last_done` 13:49:17 within one 15 s poll of its `turn.ended`; 0.55.0 still said `busy`.
-- [ ] The agent row's `model` is the alias. Passed on 2.2.0. **Fails on 2.8.1**: `model: null` for a long session, because the alias's only record, `profile.bind`, is outside the 256 KB tail the reader keeps (not fixed; ROADMAP, "A long kimi 2.8.1 session has no model label").
+- [x] The agent row's `model` is the alias. Passed on 2.2.0. On 2.8.1 the alias's only record is `profile.bind`, the log's head (`llm.request` is gone), so it is read from the head once per log (`kimi::head_model`); a `/model` switch in the tail still wins. **2.8.1, 2026-11-27**: the live lane's 2 MB log, `model: null` before, `kimi-code/k3.1-pro` after.
 - [ ] Esc mid-turn: `agent.turn.ended` with `outcome: aborted` → idle with no `last_done` (an Esc is not finished work). (Captured live on 2.2.0; unit-tested.) On 2.8.1 an Esc's `turn.ended` `reason` is NOT measured; any reason but `completed` reads as aborted.
 
 ## 4. send
