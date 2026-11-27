@@ -5,6 +5,34 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (the repo's `/close-out` skill, `.claude/skills/close-out`;
 this repo's settings in `.claude/close-out.md`).
 
+- **The Files viewer rewrites a CRLF markdown file to LF on save.** Measured in
+  Chromium and WebKit on 2026-11-27: a textarea's value is LF, so every `\r\n`
+  comes back `\n`, and for a CRLF file "unsaved" never clears. The fix that
+  keeps the textarea is about 15 lines in `FilesPane.tsx`: name the file's
+  separator on read (`ideatext.lineBreakOf`), give the textarea and the dirty
+  compare the LF form, convert back on save and adopt that as the baseline, and
+  make a file with a lone `\r` or mixed endings read-only with a tag saying
+  why. Tests: a new `mdedit-check` rule that is red today, and the lane's probe
+  as a browser check. The owner decided the same day that Files does not become
+  a real editor yet; the lane's findings (in the archive's tarball) have the
+  cost of that: two days for markdown through `EditorHost` with a `guard:false`
+  option, more for other file types (language packages, a find story).
+  _From: [2026-11-27 terminal-while-in-chat](docs/sessions/2026-11-27-terminal-while-in-chat/summary.md), files-viewer-editor_
+- **Three `read_file` / `write_file` holes.** `read_file` decodes with
+  `from_utf8_lossy`, so saving a non-UTF-8 file writes U+FFFD over its bad
+  bytes. It reads the mtime after the bytes, so a write in between gives a
+  stale base that the compare-and-swap lets through. And `write_file` compares
+  mtime alone, with no rev: two saves in one millisecond look alike, the hole
+  #719 closed for ideas.
+  _From: [2026-11-27 terminal-while-in-chat](docs/sessions/2026-11-27-terminal-while-in-chat/summary.md), files-viewer-editor_
+- **A workspace's terminal, what #721 left.** No ⌘-click path links (there is
+  no Files tab to open one in). A ⌘J in a workspace before settings load is
+  lost, because the pre-hydration stash holds place values only. Not offered in
+  a remote window. With the dock open on a window near 1365 points the frame
+  drops to one column and the header truncates; where the terminal is drawn is
+  `docs/proposals/simplify-what-to-hide.md`'s to settle (option E). Not driven
+  in the real app: a tab rename, removing a workspace, a device's refusal.
+  _From: [2026-11-27 terminal-while-in-chat](docs/sessions/2026-11-27-terminal-while-in-chat/summary.md)_
 - **SimpleX bridge experiment, parked.** `docs/proposals/simplex-transport.md`
   answers whether SimpleX can carry worktrees communications: no as the
   channel's transport (keep D6), never linked (AGPL-3.0 throughout), nothing in

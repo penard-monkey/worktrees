@@ -81,19 +81,22 @@ const UPDATE = lines.slice(from, to + 1).join("\n");
 const uSrc = `
 type DockPatch = any; type PlacePanels = any; type Settings = any;
 export function build(env: any) {
-  const { useCallback, setSettings, selRef, hydrated, preHydration, panelsFor, placeKey, applySettings, saveSettings } = env;
+  const { useCallback, setSettings, selRef, wsDockRef, WORKSPACE_SCOPE, hydrated, preHydration, panelsFor, placeKey, applySettings, saveSettings } = env;
 ${UPDATE}
   return updatePanels;
 }`;
 const { build } = await import("data:text/javascript;base64," + Buffer.from(
   (await transformWithEsbuild(uSrc, "updatePanels.ts", { loader: "ts", format: "esm" })).code).toString("base64"));
-/** A one-place App: `state` is `settings`, `sel` is the selected place. */
-function world(state, slug, isHydrated = true) {
+/** A one-place App: `state` is `settings`, `sel` is the selected place —
+ *  or, with `slug` null, no place and workspace `ws`'s view (wsdock.ts). */
+function world(state, slug, isHydrated = true, ws = null) {
   const w = {
     state, saved: null,
     useCallback: (f) => f,
     setSettings: (fn) => { w.state = fn(w.state); },
-    selRef: { current: { repo: "/r", slug } },
+    selRef: { current: slug === null ? null : { repo: "/r", slug } },
+    wsDockRef: { current: ws },
+    WORKSPACE_SCOPE: "~",
     hydrated: { current: isHydrated },
     preHydration: { current: {} },
     panelsFor: S.panelsFor, placeKey: S.placeKey,
@@ -227,6 +230,28 @@ eq("…and now the record holds the full dock", wn.state.place_panels[C].dock_ta
 const wp = world(s, "a", false);
 wp.update({ dock_open: true });
 eq("pre-hydration, the stash never holds a view", "agent_view" in wp.preHydration.current, false);
+
+// ── 4b. a workspace's dock (wsdock.ts) is its own record and nobody's seed ──
+const WS = "~|01WS";
+const ww = world(s, null, true, "01WS");
+ww.update({ dock_open: true });
+eq("a workspace's ⌘J writes the workspace's record", ww.state.place_panels[WS], { dock_open: true, dock_tab: "terminal", dock_width: s.dock_width });
+eq("…and no global moves", flat(ww.state), flat(s));
+ok("…and no place's record is touched", Object.keys(s.place_panels).every((k) => ww.state.place_panels[k] === s.place_panels[k]));
+ww.update({ dock_tab: "files", dock_width: 333 });
+eq("a workspace never takes a dock tab, and keeps its own width", ww.state.place_panels[WS], { dock_open: true, dock_tab: "terminal", dock_width: 333 });
+eq("…still no global", flat(ww.state), flat(s));
+ww.update((cur) => ({ dock_open: !cur.dock_open }));
+eq("the function form toggles the workspace's own dock", ww.state.place_panels[WS].dock_open, false);
+const back = world(ww.state, "a");
+eq("a place visited after it keeps its own dock", S.panelsFor(back.state, A).dock_open, s.place_panels[A].dock_open);
+eq("…and a never-visited place still starts closed", S.panelsFor(back.state, C).dock_open, false);
+const wwp = world(s, null, false, "01WS");
+wwp.update({ dock_open: true });
+eq("pre-hydration, a workspace stashes nothing over the globals", wwp.preHydration.current, {});
+const none = world(s, null, true, null);
+none.update({ dock_open: true });
+eq("with neither a place nor a workspace, no record is made", none.state.place_panels, s.place_panels);
 
 // ── 5. App.tsx reads it in one place and writes it in one place ────────────
 const chatOn = [...app.matchAll(/const chatOn = ([^;\n]+);/g)];
