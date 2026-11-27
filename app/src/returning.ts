@@ -3,20 +3,23 @@
 // returning-check.mjs drives the real module on a scripted clock.
 
 export const RETURN_AFTER_MS = 6 * 60 * 60 * 1000;
+export const INPUT_PERSIST_MS = 10 * 60 * 1000;
 
 export type ReturnEvent = "input" | "hidden" | "visible" | "focus" | "unload";
 
 export type ReturningState = {
-  /** The later of the last input and the last hide. Null on a first run. */
+  /** The last input, hide or return. Null on a first run. */
   lastActive: number | null;
   /** The local day the panel last opened, not merely the last digest request. */
   shownDay: string | null;
+  /** In memory only: the lastActive value most recently handed to persistence. */
+  lastPersisted: number | null;
 };
 
 export type ReturnStep = {
   state: ReturningState;
   isReturn: boolean;
-  /** Only these transitions reach the settings blob; input stays in memory. */
+  /** Hide/unload writes, plus an input only once the persistence gap passes. */
   persist: boolean;
 };
 
@@ -25,13 +28,15 @@ export function reduceReturning(state: ReturningState, event: ReturnEvent, now: 
     && state.lastActive !== null
     && now - state.lastActive > RETURN_AFTER_MS
     && state.shownDay !== today;
-  const lastActive = event === "input" || event === "hidden"
+  const lastActive = event === "input" || event === "hidden" || isReturn
     ? Math.max(state.lastActive ?? now, now)
     : state.lastActive;
+  const persist = event === "hidden" || event === "unload"
+    || (event === "input" && (state.lastPersisted === null || now - state.lastPersisted > INPUT_PERSIST_MS));
   return {
-    state: { lastActive, shownDay: state.shownDay },
+    state: { lastActive, shownDay: state.shownDay, lastPersisted: persist ? lastActive : state.lastPersisted },
     isReturn,
-    persist: event === "hidden" || event === "unload",
+    persist,
   };
 }
 

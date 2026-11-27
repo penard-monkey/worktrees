@@ -4548,7 +4548,7 @@ function App() {
   const [settingsReady, setSettingsReady] = useState(false);
   // The panel slice consumes this; a qualifying return carries its digest's since.
   const [leftOffReturn, setLeftOffReturn] = useState<{ since: number } | null>(null);
-  const returningRef = useRef<ReturningState>({ lastActive: null, shownDay: null });
+  const returningRef = useRef<ReturningState>({ lastActive: null, shownDay: null, lastPersisted: null });
   const returnEventRef = useRef<(event: ReturnEvent) => void>(() => {});
   const [activeProvider, setActiveProvider] = useState<Harness>(HARNESSES[0]);
   // Where Settings was asked to open. One state, never a boolean beside it:
@@ -5782,7 +5782,11 @@ function App() {
     (async () => {
       const s = await loadSettings();
       const merged = { ...s, ...preHydration.current };
-      returningRef.current = { lastActive: merged.left_off_last_active ?? null, shownDay: merged.left_off_shown_day ?? null };
+      returningRef.current = {
+        lastActive: merged.left_off_last_active ?? null,
+        shownDay: merged.left_off_shown_day ?? null,
+        lastPersisted: merged.left_off_last_active ?? null,
+      };
       hydrated.current = true;
       applySettings(merged);
       setSettings(merged);

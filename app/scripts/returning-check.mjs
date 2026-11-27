@@ -28,8 +28,8 @@ const BASE = Date.parse("2026-11-27T08:00:00Z");
 const TODAY = "2026-11-27";
 const YESTERDAY = "2026-11-26";
 
-function machine({ lastActive = BASE, shownDay = YESTERDAY, now = BASE } = {}) {
-  let state = { lastActive, shownDay };
+function machine({ lastActive = BASE, shownDay = YESTERDAY, now = BASE, lastPersisted = lastActive } = {}) {
+  let state = { lastActive, shownDay, lastPersisted };
   return {
     advance(ms) { now += ms; },
     send(event, today = TODAY) {
@@ -55,14 +55,26 @@ for (const event of ["visible", "focus", "input"]) {
   m.advance(7 * HOUR);
   check(m.send(event).isReturn, `the first ${event} after seven hours is a return`);
 }
+{
+  const m = machine();
+  const since = m.state().lastActive;
+  m.advance(7 * HOUR);
+  const visible = m.send("visible");
+  const focus = m.send("focus");
+  const input = m.send("input");
+  check(visible.isReturn && !focus.isReturn && !input.isReturn,
+    "visible, focus and input after one gap produce exactly one return");
+  check(since === BASE && visible.state.lastActive === m.now(),
+    "the return's since is the old lastActive, and the visible return itself advances activity to now");
+}
 
 {
   // No hide or visibility transition: the laptop slept with the window showing.
   const m = machine();
   m.advance(9 * HOUR);
   const step = m.send("input");
-  check(step.isReturn && step.state.lastActive === m.now() && !step.persist,
-    "the first input after a sleep with the window visible is a return, kept in memory rather than written per input");
+  check(step.isReturn && step.state.lastActive === m.now() && step.persist,
+    "the first input after a sleep with the window visible is a return, and its long-overdue activity is persisted");
 }
 {
   const m = machine();
@@ -70,19 +82,35 @@ for (const event of ["visible", "focus", "input"]) {
   const first = m.send("visible");
   check(first.isReturn && first.state.shownDay === YESTERDAY, "a return alone does not mark the day: an unchanged digest can try again later");
   m.mark();
+  m.advance(7 * HOUR);
   check(m.state().shownDay === TODAY && !m.send("focus").isReturn,
-    "once the panel is marked shown, a second qualifying return that day is not a return");
+    "once the panel is marked shown, even another qualifying gap that day is not a return");
 }
 {
   const m = machine();
   m.advance(7 * HOUR);
   m.send("visible");
-  check(m.send("focus").isReturn, "without the panel being shown, a later qualifying event that day is still a return");
+  m.advance(7 * HOUR);
+  check(m.send("focus").isReturn, "without the panel being shown, another qualifying gap that day is still a return");
 }
 {
   const m = machine({ now: Date.parse("2026-11-27T18:00:00Z"), lastActive: Date.parse("2026-11-27T18:00:00Z") });
   m.advance(7 * HOUR);
   check(m.send("visible", "2026-11-28").isReturn, "a seven-hour return across local midnight is a return on the new day");
+}
+{
+  const m = machine();
+  check(R.INPUT_PERSIST_MS === 10 * 60_000, "input persistence has one named ten-minute threshold");
+  m.advance(5 * 60_000);
+  check(!m.send("input").persist, "an input five minutes after the persisted activity is not written");
+  m.advance(5 * 60_000);
+  check(!m.send("input").persist, "exactly ten minutes after the persisted activity is still not written");
+  m.advance(60_000);
+  const saved = m.send("input");
+  check(saved.persist && saved.state.lastPersisted === m.now(),
+    "an input more than ten minutes past the persisted activity is written and moves the in-memory persisted stamp");
+  m.advance(60_000);
+  check(!m.send("input").persist, "the next input is not another write");
 }
 {
   const m = machine({ lastActive: null, shownDay: null });
@@ -98,7 +126,7 @@ for (const event of ["visible", "focus", "input"]) {
   const hidden = m.send("hidden");
   m.advance(10 * 60_000);
   const unload = m.send("unload");
-  check(!input.persist && hidden.persist && unload.persist, "only hidden and unload ask for persistence");
+  check(input.persist && hidden.persist && unload.persist, "a throttled input, hidden and unload ask for persistence");
   check(hidden.state.lastActive === BASE + HOUR && unload.state.lastActive === hidden.state.lastActive,
     "lastActive follows the later input/hide, while unload saves it without counting as fresh activity");
 }
