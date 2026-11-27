@@ -108,6 +108,20 @@ row_for() { printf '%s\n' "$output" | strip_ansi | grep -F "$1" | head -n 1; }
   [[ "$row" == *"●"* ]]
 }
 
+@test "ls: a lane whose agent runs only in its sidecar session shows ●" {
+  # A kimi or Codex lane lives in `<session>~agent~<id>` alone; `ls --json`
+  # called it up while the table said ○ (2026-11-27, design-simplify-kimi).
+  run_wt new feat-z --no-tmux
+  printf 'cwd=%s\ncmd0=kimi\n' "$REPO/.worktrees/feat-z" > "$TMUX_STATE/repo-feat-z~agent~kimi"
+  run_wt ls
+  [ "$status" -eq 0 ]
+  local row; row="$(row_for 'feat-z')"
+  grep -qF "●" <<<"$row"
+  run_wt ls --json
+  [ "$status" -eq 0 ]
+  grep -qF '"up":true' <<<"$output"
+}
+
 @test "ls: no live session shows ○ in the row" {
   run_wt new feat-z --no-tmux
   run_wt ls

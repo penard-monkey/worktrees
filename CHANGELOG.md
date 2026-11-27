@@ -11,6 +11,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 - **A workspace's view has a terminal.** With a workspace open (its chats, memory or overview, no place selected), the Terminal button in the right rail now works: its shells start in your home folder, and a new tab starts there too. Each workspace has its own tabs, and they are remembered like a place's: their names, the tab in front, the folder each was last in, its output and its command history all come back after a restart. Opening or closing the terminal in a workspace leaves every place's panels as they were. Files, Docs and Plan stay a place's. Removing a workspace closes its shells and forgets what they kept. These shells run on the computer worktrees runs on, so a paired device cannot open one.
 - A workspace chat that sits idle now hears a lane's report. When a report arrives, the app types one line into the chat: how many messages wait and who sent them, never their words. It does this only while the chat is idle, with nothing typed in its box and no question or fold up. It types once per batch and at most once a minute. A message from another chat never wakes it, so two chats cannot keep waking each other. Each line is kept in the audit log. Part of the Workspace chats beta.
 
+### Fixed
+
+- **A Kimi lane that finished no longer shows as working.** Kimi Code 2.8 writes the end of a turn differently, and worktrees kept reading a finished Kimi lane as busy: a green dot with no done ring or age in the sidebar, `busy` from `place_status`, and a `wait` that never returned. It now reads both the old and the new log, so a Kimi lane is done when its turn ends, dated by Kimi's own record, and a turn that a background task's notice continues still counts as working.
+
+- **A long Kimi session shows its model again.** With Kimi Code 2.8, a Kimi lane whose log had grown past a few hundred kilobytes showed no model in the sidebar, the chat or `place_status`. worktrees now reads the model the session started on from the start of the log, once per session, and a `/model` switch made later still wins.
+
+- **`worktrees ls` shows a Kimi or Codex lane as open.** A lane whose agent runs in its own `~agent~kimi` or `~agent~codex` session, with no other session, showed `○` in the TMUX column while `ls --json` said its session was up. The column now uses the same rule as `--json`: `●` when the place has a session open, whichever it is.
+
 ## [0.55.0] - 2026-11-27
 
 ### Added
