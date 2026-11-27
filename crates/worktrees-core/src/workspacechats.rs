@@ -708,6 +708,11 @@ pub struct Access {
     pub at: String,
     /// A digest of the rules, whole: equal text, equal digest.
     pub digest: String,
+    /// A digest of the rules without the one Read rule each linked document
+    /// gets: what a document linked since does not change. Empty in a record
+    /// from a build before it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub base_digest: String,
     #[serde(default)]
     pub projects: Vec<AccessProject>,
     #[serde(default)]
@@ -749,6 +754,7 @@ pub fn access(w: &crate::workspaces::Workspace, src: &Sources) -> Result<Access,
     Ok(Access {
         at: desk::now_iso(),
         digest: crate::guidance::text_hash(&settings(w, src)?),
+        base_digest: crate::guidance::text_hash(&settings_with(w, src, false)?),
         projects: project_reads(w, src.reg)
             .into_iter()
             .map(|p| AccessProject { name: p.name.clone().unwrap_or_else(|| last_part(&p.root)), read: p.reads == Reads::Yes, why: p.why.map(String::from), root: p.root })
@@ -794,8 +800,16 @@ pub fn access_changes(then: &Access, now: &Access) -> Vec<AccessChange> {
             Some(_) => {}
         }
     }
-    out.extend(now.documents.iter().filter(|n| !then.documents.iter().any(|d| d.id == n.id)).map(|n| doc(n, "linked")));
-    if out.is_empty() && then.digest != now.digest {
+    // A document linked since only adds what the chat may read, and the chat
+    // reads every idea through its own tools anyway (`idea_read`); since a
+    // chat may link ideas and make the plan itself (workspace-chat-powers
+    // §9), its own act must not tell it its rules are stale. So a link is no
+    // change, and the rules are compared without the documents' own rules
+    // when both records have that digest.
+    let base = !then.base_digest.is_empty() && !now.base_digest.is_empty();
+    let linked = now.documents.iter().any(|n| !then.documents.iter().any(|d| d.id == n.id));
+    let differs = if base { then.base_digest != now.base_digest } else { then.digest != now.digest && !linked };
+    if out.is_empty() && differs {
         out.push(AccessChange { kind: "rules", name: String::new(), path: String::new(), change: "other" });
     }
     out
@@ -900,6 +914,11 @@ pub fn doc_reads(w: &crate::workspaces::Workspace, src: &Sources) -> Vec<DocRead
 /// The paths are the registry's, canonical, and hold no character that means
 /// anything in a rule ([`rule_root`]).
 pub fn settings(w: &crate::workspaces::Workspace, src: &Sources) -> Result<String, String> {
+    settings_with(w, src, true)
+}
+
+/// [`settings`], with or without the Read rule of each linked document.
+fn settings_with(w: &crate::workspaces::Workspace, src: &Sources, docs: bool) -> Result<String, String> {
     let reg = src.reg;
     let (mut allow, mut deny) = (Vec::new(), Vec::new());
     for p in project_reads(w, reg).iter().filter(|p| p.reads == Reads::Yes) {
@@ -912,7 +931,7 @@ pub fn settings(w: &crate::workspaces::Workspace, src: &Sources) -> Result<Strin
     }
     // The ideas folder is the person's: each linked document is read by a rule
     // of its own, and nothing in it is written.
-    for d in doc_reads(w, src).iter().filter(|d| d.reads == Reads::Yes) {
+    for d in doc_reads(w, src).iter().filter(|d| docs && d.reads == Reads::Yes) {
         let rule = format!("Read(/{})", d.path.as_deref().unwrap_or_default());
         if !allow.contains(&rule) {
             allow.push(rule);
@@ -1684,6 +1703,17 @@ pub fn chat_activity(probes: &[crate::agent::ClaudeProbe], conv: &str) -> crate:
     }
 }
 
+/// Whether the chat at `addr` takes the reports of a place of the project at
+/// `from_root` that it started: it is reachable from that project
+/// ([`reach_at`], the user's files) and its Claude runs. The snapshot's
+/// `lineage.reports_to` asks this; the MCP `report` asks the same two things.
+pub fn takes_reports(from_root: &str, addr: &str, probes: &[crate::agent::ClaudeProbe]) -> bool {
+    let Some(a) = Address::parse(addr) else { return false };
+    let reg = crate::registry::read_lenient();
+    reach_at(&crate::wsfolder::root(), &crate::workspaces::path(), &reg, &a, from_root)
+        .is_ok_and(|r| crate::lineage::counts_as_live(chat_activity(probes, &r.chat.id).state))
+}
+
 /// One turn of a chat, as another agent may read it: the prompt and the
 /// reply's text, nothing of its tools, and whether the engine sent the prompt.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -1942,11 +1972,19 @@ mod tests {
             ("document", "unlinked", "unlinked"),
             ("document", "gone", "gone"),
             ("document", "moved", "moved"),
-            ("document", "linked", "linked"),
         ];
-        assert_eq!(got, want.map(|(k, n, c)| (k, n.to_string(), c)));
+        assert_eq!(got, want.map(|(k, n, c)| (k, n.to_string(), c)), "a document linked since is no change");
         let rules = access_changes(&then, &Access { digest: "2".into(), ..then.clone() });
         assert_eq!((rules.len(), rules[0].kind, rules[0].change), (1, "rules", "other"), "a private project nested in one that is read");
+        // A chat that links an idea, or makes the plan, is not told by its own
+        // act that its rules are stale: the link adds one document's Read rule
+        // and moves the whole digest, but not the base.
+        let mine = Access { digest: "with-link".into(), base_digest: "b".into(), documents: [then.documents.clone(), vec![d("NEW", "/i/new-idea.md")]].concat(), ..then.clone() };
+        let then_b = Access { base_digest: "b".into(), ..then.clone() };
+        assert!(access_changes(&then_b, &mine).is_empty(), "{:?}", access_changes(&then_b, &mine));
+        assert_eq!(access_changes(&then_b, &Access { base_digest: "c".into(), ..mine.clone() }).len(), 1, "anything else in the rules still is");
+        // A record from before the base digest: a link alone is still no change.
+        assert!(access_changes(&then, &Access { digest: "with-link".into(), ..mine }).is_empty());
         let _ = fs::remove_dir_all(&top);
     }
 

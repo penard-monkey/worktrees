@@ -207,3 +207,55 @@ lumped with whatever else was dirty, and under a subject naming files.
 Held by `memory::tests::a_change_to_named_files_is_its_own_commit_and_leaves_the_rest`
 and `mcp::tests::remember_and_forget_are_each_their_own_change`.
 
+## 9. A chat's own act does not make it stale (2026-11-27, from the VM walk)
+
+**What was seen.** After a chat linked an idea, its header said "its rules
+changed". The owner saw the same on v0.54.0 on a brand-new chat, right after
+**New idea**, which links the idea it makes.
+
+**Why.** A chat's `access` records the documents it reads, and the digest of
+its permission rules, which hold one `Read(...)` rule per linked document.
+Linking an idea adds a document and moves the digest. So `access_changes`
+said `linked` at once, and the badge stayed until the chat was closed and a
+new one started. Nothing in a running chat clears it.
+
+**The rule now.** A document linked since launch (an idea linked, a plan set)
+is not a change: it only adds to what the chat may read, and the chat reads
+every idea through its own tools (`idea_read`) anyway. Narrowing changes still
+are (a document unlinked, gone or moved), and so is every project change. The
+rules are compared by a second digest without the documents' own rules
+(`Access::base_digest`). A record from an earlier build has no base digest: a
+link alone is still no change there, and any other difference still is. New
+chats see a linked idea in their `context.md`; a running one sees it in
+`workspace`.
+
+## 10. A report waking an idle chat: a proposal, not built
+
+**What was seen.** A lane's report reached the chat's inbox, and the chat
+heard it only because it was told to `wait`. An idle chat does not look.
+
+**Built (fits existing rows):** the `workspaces:sessions` push carries each
+live chat's unread count (`unread`, by session; one `read_dir` of the inbox
+per live chat per tick, opening only that chat's files), so a report alone
+moves the push. The chat's row in the nav shows the count, with words saying
+the messages wait until the chat checks them.
+
+**Proposed (needs the owner's yes: it is a rule change).** Today every line
+typed into Claude comes from a person's act through one of the named doors
+(`agent_send`, `idea_send`, `workspace_send`, `agent_command`), and AGENTS.md
+says not to grow another. Waking a chat means the ENGINE types with no person
+behind the act. The least invasive form:
+
+- serve's poll, for a live chat with unread messages newer than the last
+  nudge, that is idle (not busy, no prompt up, not folding) and whose composer
+  is empty, pastes ONE fixed line through `agents::send_at`, the same body as
+  the doors above, with the same lock, empty-composer and no-prompt checks:
+  `[worktrees: 2 new messages for this chat, from worktrees:kid. Read them
+  with the messages tool.]`. It types no message text (that stays in the
+  inbox), and only engine-derived addresses and a count.
+- At most one nudge per new batch. Never while the person has a draft, a
+  prompt is up or a fold runs: then the row's count is all there is.
+- An audit record per nudge (console origin, the count), like a send.
+- Off by default behind its own beta checkbox, or on in Workspace chats' beta:
+  the owner's choice.
+

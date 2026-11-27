@@ -182,6 +182,12 @@ pub struct WorkspaceSessions {
     /// ([`claude_model`]), never its probe. A chat that has named none yet is
     /// absent. In the payload, so a switch alone moves the push.
     pub model: std::collections::BTreeMap<String, String>,
+    /// Each live chat with messages it has not read in its inbox (lanes'
+    /// reports, `workspace-chat-powers.md` §2), by its session's name: how
+    /// many. Absent at none. In the payload, so a report alone moves the push
+    /// and the chat's row shows it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub unread: std::collections::BTreeMap<String, usize>,
 }
 
 /// Which chat a session is.
@@ -218,6 +224,16 @@ impl WorkspaceSessions {
             .filter_map(|s| {
                 let chat = wc::conv_of_session(s)?;
                 Some((s.clone(), ChatOf { workspace: of.get(chat)?.clone(), chat: chat.to_string() }))
+            })
+            .collect();
+        let now = worktrees_core::messages::now_ms();
+        self.unread = self
+            .chat_of
+            .iter()
+            .filter_map(|(s, c)| {
+                let inbox = wc::inbox_at(root, &c.workspace).ok()?;
+                let n = worktrees_core::messages::unread(&inbox, &c.chat, None, now).len();
+                (n > 0).then(|| (s.clone(), n))
             })
             .collect();
         self
@@ -1365,8 +1381,15 @@ mod tests {
         let idle = WorkspaceSessions { busy: vec![], ..got.clone() };
         assert_eq!(idle.ended_since(&got), vec![&ChatOf { workspace: ws.clone(), chat: ca }]);
         let gone = WorkspaceSessions { live: vec![a.clone()], waiting: vec![], ..got.clone() };
-        assert_eq!(gone.ended_since(&got), vec![&ChatOf { workspace: ws, chat: cb }]);
+        assert_eq!(gone.ended_since(&got), vec![&ChatOf { workspace: ws.clone(), chat: cb.clone() }]);
         assert!(got.ended_since(&got).is_empty());
+        // A lane's report to a live chat moves the push: its unread count.
+        assert!(got.unread.is_empty() && serde_json::to_value(&got).unwrap().get("unread").is_none(), "none: absent");
+        let inbox = wc::inbox_at(&root, &ws).unwrap();
+        worktrees_core::messages::post(&inbox, "proj:kid", &cb, "done", None, None, worktrees_core::messages::now_ms()).unwrap();
+        let again = WorkspaceSessions { chat_of: Default::default(), ..got.clone() }.with_chats(&root);
+        assert_eq!(again.unread, std::collections::BTreeMap::from([(b.clone(), 1)]), "only the chat it was sent to");
+        assert_ne!(again, got, "a report alone changes the payload");
         let _ = std::fs::remove_dir_all(&root);
     }
 

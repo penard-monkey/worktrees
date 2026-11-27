@@ -87,7 +87,7 @@ import { useWsMemory } from "./useWsMemory";
 import { fileOf, longIndex, memoryPicks, nameAt, sizeWords, trailStart, trailStep, trailTo, type Trail } from "./wsmemory";
 import { memoryDocs, type MemoryView } from "./doc/memory";
 import { linkTo, memoryLink } from "./doc/memorypath";
-import { chatReference, navRows, needsYouKeys, needsYouWords, tidyBar, type ChatRow } from "./wschats";
+import { chatReference, mcpWords, navRows, needsYouKeys, needsYouWords, tidyBar, type ChatRow } from "./wschats";
 import { attentionOf, chatActivity, placeActivity, docChips, LAST_VIEW_KEY, lastView, placeWorkspace, placeWorkspaces, PLACE_WS_KEY, placeWsRead, placeWsSet, rollupOf, tabsWith, tabOr, wsCounts, wsFrameOn, wsTabs, type LastView, type Rollup } from "./wsview";
 import { answer, ask, DOCK, FLOAT, take, windowEnv, type Ask, type HandDoc } from "./doc/handoff";
 import { MainDocument, type MainDocApi } from "./doc/MainDocument";
@@ -9417,6 +9417,7 @@ function App() {
           memoryTick={wsMem.tick(wsShown.id)}
           memoryChanged={() => void wsMem.refresh(wsShown.id)}
           openTerminalApp={(session) => { invoke("open_terminal", { cmd: settings.terminal_cmd, session }).catch((e) => fail(e)); }}
+          mcp={(() => { const words = mcpWords(mcpStatus?.state); return words ? { words, setUp: () => openSettings({ cat: "claude", focus: "mcp-server" }) } : null; })()}
           onError={fail} />
       ) : null;
   /** What the workspace view's tabs do with its plan and ideas. */
