@@ -352,6 +352,7 @@ macro_rules! obj {
     (session_of($a:ident, $r:ident, $s:ident)) => { Obj::SessionOf(stringify!($a), stringify!($r), stringify!($s)) };
     (attach($a:ident)) => { Obj::Attach(stringify!($a)) };
     (close($a:ident)) => { Obj::Close(stringify!($a)) };
+    (shell_scope($r:ident, $s:ident)) => { Obj::ShellScope(stringify!($r), stringify!($s)) };
     (shell($r:ident, $s:ident, $i:ident)) => { Obj::Shell(stringify!($r), stringify!($s), stringify!($i)) };
     (shell_ref($a:ident)) => { Obj::ShellRef(stringify!($a)) };
     (job($a:ident)) => { Obj::Job(stringify!($a)) };
@@ -1103,7 +1104,8 @@ commands! { cx, a;
     write_file: Engine [write, file(path)] => files::write_file(&cx.ctx, a.get("path")?, a.get("content")?, a.get("expected_mtime")?),
 
     // ── the dock: shells, scrollback, and the tmux attach (term) ─────────
-    list_shell_sessions: Engine [read, place(repo, slug)] => term::list_shell_sessions(a.get("repo")?, a.get("slug")?, &cx.ctx.shells),
+    // A place's, or a workspace's (`term::WORKSPACE_SCOPE`, console only).
+    list_shell_sessions: Engine [read, shell_scope(repo, slug)] => term::list_shell_sessions(a.get("repo")?, a.get("slug")?, &cx.ctx.shells),
     close_shell_session: Engine [stream, shell(repo, slug, index)] => {
         let (repo, slug, index): (String, String, u32) = (a.get("repo")?, a.get("slug")?, a.get("index")?);
         cx.frames.forget_shell(&repo, &slug, index);

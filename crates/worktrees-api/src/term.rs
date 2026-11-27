@@ -543,12 +543,13 @@ pub fn shell_open(
         return Ok(ShellAttach { gen: sh.gen, replay, replay_cols: (replay > 0).then_some(was_cols) });
     }
 
-    let (session, cwd) = place_session_cwd(&repo, &slug)?;
+    let (session, cwd) = shell_start(ctx, &repo, &slug)?;
     // One-time cleanup for anyone upgrading: their `<session>~term*` sidecars
     // are orphans now — nothing will ever attach them again. Cheap and
     // idempotent, and only reached when this place has no shell yet. (Runs
     // under the registry lock — a tmux round-trip, but only on first open.)
-    if worktrees_core::tmux::have_tmux() {
+    // A workspace has no session, so it never had a sidecar.
+    if let Some(session) = session.filter(|_| worktrees_core::tmux::have_tmux()) {
         let under = format!("{cwd}/.worktrees");
         worktrees_core::tmux::kill_shell_sidecars(&session, &cwd, (slug == "(main)").then_some(under.as_str()));
     }
@@ -725,6 +726,89 @@ pub fn place_session_cwd(repo: &str, slug: &str) -> Result<(String, String), Str
         return Err(format!("no such place: {slug}"));
     }
     Ok((p.session_name(slug), p.place_dir(slug)))
+}
+
+/// The `repo` of a WORKSPACE's dock shells, whose `slug` is the workspace's
+/// id. A workspace belongs to no project, so its shells start in the home
+/// directory. A project's `repo` is always an absolute path (the registry's
+/// key, `Project::discover`'s root), so this can never name one; every shell
+/// key, `shell-cwds.json` key and term-history meta keeps its shape.
+///
+/// Console only: serve's resolver refuses this scope to every paired device
+/// (`resolve::Obj::ShellScope`), and `shell:exit` for it reaches the console
+/// alone (`scope::Event::Shell`).
+pub const WORKSPACE_SCOPE: &str = "~";
+
+pub fn is_workspace_scope(repo: &str) -> bool {
+    repo == WORKSPACE_SCOPE
+}
+
+/// The home directory a workspace's shells start in, or why there is none.
+pub fn home_dir() -> Result<String, String> {
+    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or("HOME is not set, so a workspace's shell has nowhere to start")?;
+    if !home.is_absolute() || !home.is_dir() {
+        return Err(format!("the home directory {} is not a directory, so a workspace's shell has nowhere to start", home.display()));
+    }
+    Ok(home.to_string_lossy().into_owned())
+}
+
+/// A workspace `workspaces.json` lists, or the refusal.
+pub fn workspace_listed(ctx: &Ctx, id: &str) -> Result<(), String> {
+    let f = worktrees_core::workspaces::read_at(ctx.workspaces_file())?;
+    if f.workspaces.iter().any(|w| w.id == id) {
+        Ok(())
+    } else {
+        Err(format!("no such workspace: {id}"))
+    }
+}
+
+/// Where a NEW dock shell of `(repo, slug)` starts, and the place's canonical
+/// session (whose old tmux sidecars a first open sweeps). A place: its
+/// worktree, refused unless it is one (`place_session_cwd`). A workspace: the
+/// home directory, refused unless the workspace exists, and no session.
+pub fn shell_start(ctx: &Ctx, repo: &str, slug: &str) -> Result<(Option<String>, String), String> {
+    if is_workspace_scope(repo) {
+        workspace_listed(ctx, slug)?;
+        return Ok((None, home_dir()?));
+    }
+    place_session_cwd(repo, slug).map(|(session, cwd)| (Some(session), cwd))
+}
+
+/// Everything one shell scope keeps: its live shells, its remembered
+/// directories and its term history. For a scope that is gone for good — a
+/// removed workspace; `prefs::remove_place` does the same for a place.
+pub fn forget_shell_scope(ctx: &Ctx, repo: &str, slug: &str) {
+    kill_place_shells(&ctx.shells, repo, slug);
+    edit_cwds(ctx, |map| map.remove(&cwd_key(repo, slug)).is_some());
+    if let Ok(root) = term_hist_dir(ctx) {
+        forget_place_history(&root, repo, slug);
+    }
+}
+
+/// The workspaces that exist, for the sweeps below, or `None` when
+/// `workspaces.json` cannot be read: then a workspace's tabs are KEPT, never
+/// judged against a file nobody could read.
+fn live_workspaces(ctx: &Ctx) -> Option<std::collections::HashSet<String>> {
+    worktrees_core::workspaces::read_at(ctx.workspaces_file()).ok().map(|f| f.workspaces.into_iter().map(|w| w.id).collect())
+}
+
+/// What the sweeps ask of a stored key: the directory its shells start in,
+/// or `None` when its place or workspace is gone. `projects` caches one
+/// discovery per repo; `workspaces` is [`live_workspaces`]. A live
+/// workspace answers its home directory (`/` should HOME be missing, which
+/// is still a directory: the workspace is what decides).
+fn scope_dir(
+    projects: &mut HashMap<String, Option<Project>>,
+    workspaces: &Option<std::collections::HashSet<String>>,
+    repo: &str,
+    slug: &str,
+) -> Option<String> {
+    if is_workspace_scope(repo) {
+        let live = workspaces.as_ref().is_none_or(|w| w.contains(slug));
+        return live.then(|| home_dir().unwrap_or_else(|_| "/".into()));
+    }
+    projects.entry(repo.to_string()).or_insert_with(|| Project::discover(Path::new(repo)).ok());
+    projects[repo].as_ref().map(|p| p.place_dir(slug))
 }
 
 /// A place's dock shells, with liveness. The dock restores its Terminal tabs
@@ -1022,10 +1106,9 @@ pub fn forget_vanished_places(ctx: &Ctx) {
         return;
     }
     let mut projects: HashMap<String, Option<Project>> = HashMap::new();
-    let gone = vanished_keys(&keys, |repo, slug| {
-        projects.entry(repo.to_string()).or_insert_with(|| Project::discover(Path::new(repo)).ok());
-        projects[repo].as_ref().map(|p| p.place_dir(slug))
-    });
+    // A workspace's key (`~|<id>`) is no project's: judged by `workspaces.json`.
+    let workspaces = live_workspaces(ctx);
+    let gone = vanished_keys(&keys, |repo, slug| scope_dir(&mut projects, &workspaces, repo, slug));
     if gone.is_empty() {
         return;
     }
@@ -1325,10 +1408,8 @@ pub fn sweep_term_history(ctx: &Ctx) {
         return;
     }
     let mut projects: HashMap<String, Option<Project>> = HashMap::new();
-    let gone = stale_history(&metas, sysclock::now_epoch(), |repo, slug| {
-        projects.entry(repo.to_string()).or_insert_with(|| Project::discover(Path::new(repo)).ok());
-        projects[repo].as_ref().map(|p| p.place_dir(slug))
-    });
+    let workspaces = live_workspaces(ctx);
+    let gone = stale_history(&metas, sysclock::now_epoch(), |repo, slug| scope_dir(&mut projects, &workspaces, repo, slug));
     if gone.is_empty() {
         return;
     }
@@ -2671,6 +2752,103 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&std::fs::read(&ring).unwrap()), "ORPHAN-2\n");
         assert_eq!(String::from_utf8_lossy(&std::fs::read(&fresh_ring).unwrap()), "FRESH\n");
         assert_eq!(read_cwds_at(&cwd_path), cwds(&[("/r|feat", 1, here.as_str()), ("/r|feat", 2, here.as_str())]));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ── a workspace's dock shells (`WORKSPACE_SCOPE`) ────────────────────────
+
+    /// An engine whose `workspaces.json` and workspaces' folders are its own,
+    /// listing one workspace. (ctx, scratch, the workspace's id.)
+    fn engine_with_a_workspace(tag: &str) -> (Ctx, PathBuf, String) {
+        let base = hist_root(&format!("ws-{tag}"));
+        let file = base.join("cfg").join("workspaces.json");
+        let ctx = Ctx::new(base.join("cfg"), Arc::new(crate::tests::Recorder::default()))
+            .with_workspaces_file(file.clone())
+            .with_workspaces_dir(base.join("workspaces"));
+        let id = worktrees_core::workspaces::create_at(&file, "Home").unwrap().id;
+        (ctx, base, id)
+    }
+
+    /// A project's `repo` is an absolute path, so the workspace scope cannot
+    /// be one, and its key splits back into (scope, id) the way the sweeps
+    /// split every key (`vanished_keys`: the LAST `|`).
+    #[test]
+    fn the_workspace_scope_is_never_a_project_root() {
+        assert!(!Path::new(WORKSPACE_SCOPE).is_absolute());
+        assert_eq!(cwd_key(WORKSPACE_SCOPE, "01ABC").rsplit_once('|'), Some((WORKSPACE_SCOPE, "01ABC")));
+    }
+
+    /// A workspace's shell starts in the home directory, with no session to
+    /// sweep; one that `workspaces.json` does not list is refused before
+    /// anything spawns, as a slug that is not a place is.
+    #[test]
+    fn a_workspace_shell_starts_at_home_and_an_unknown_one_is_refused_before_anything_spawns() {
+        let (ctx, base, id) = engine_with_a_workspace("start");
+        assert_eq!(shell_start(&ctx, WORKSPACE_SCOPE, &id), Ok((None, home_dir().unwrap())));
+        // …and with no remembered directory, a tab starts there.
+        assert_eq!(pick_start_dir(None, &home_dir().unwrap()), home_dir().unwrap());
+        let shells = Shells::default();
+        for (slug, why) in [("nope", "no such workspace: nope"), ("--all", "may not begin with '-'"), ("", "slug is required")] {
+            let r = shell_open(&ctx, WORKSPACE_SCOPE.into(), slug.into(), 1, 80, 24, Arc::new(Nowhere), &shells);
+            let e = r.err().unwrap_or_else(|| panic!("`{slug}` was given a shell"));
+            assert!(e.contains(why), "`{slug}`: {e}");
+        }
+        assert!(shells.0.lock().unwrap().is_empty(), "a refused workspace left a shell behind");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The cold-start sweeps judge a workspace's keys by `workspaces.json`:
+    /// a live workspace's directories and history stay, a removed one's go,
+    /// and with the file unreadable nothing of any workspace is touched.
+    /// Before this, `Project::discover("~")` failed and BOTH sweeps dropped
+    /// every workspace tab on each launch.
+    #[test]
+    fn the_sweeps_keep_a_live_workspaces_tabs_and_drop_a_removed_ones() {
+        let (ctx, base, id) = engine_with_a_workspace("sweep");
+        let live = cwd_key(WORKSPACE_SCOPE, &id);
+        let gone = cwd_key(WORKSPACE_SCOPE, "01GONE");
+        let seed = |ctx: &Ctx| {
+            std::fs::write(cwd_file(ctx).unwrap(), serde_json::to_vec(&cwds(&[(&live, 1, "/tmp"), (&gone, 1, "/tmp")])).unwrap()).unwrap();
+            let root = term_hist_dir(ctx).unwrap();
+            for k in [key(WORKSPACE_SCOPE, &id, 1), key(WORKSPACE_SCOPE, "01GONE", 1)] {
+                std::fs::create_dir_all(tab_dir(&root, &k)).unwrap();
+                write_meta(&tab_dir(&root, &k), &k, 80);
+            }
+            root
+        };
+        let root = seed(&ctx);
+        forget_vanished_places(&ctx);
+        sweep_term_history(&ctx);
+        assert_eq!(read_cwds_at(&cwd_file(&ctx).unwrap()), cwds(&[(&live, 1, "/tmp")]), "the live workspace's directory stays, the removed one's goes");
+        assert!(tab_dir(&root, &key(WORKSPACE_SCOPE, &id, 1)).is_dir(), "the live workspace's history stays");
+        assert!(!tab_dir(&root, &key(WORKSPACE_SCOPE, "01GONE", 1)).exists(), "the removed workspace's history goes");
+        // An unreadable list decides nothing.
+        let root = seed(&ctx);
+        std::fs::write(ctx.workspaces_file(), b"{ not json").unwrap();
+        forget_vanished_places(&ctx);
+        sweep_term_history(&ctx);
+        assert_eq!(read_cwds_at(&cwd_file(&ctx).unwrap()).len(), 2, "an unreadable workspaces.json forgot a workspace's tabs");
+        assert!(tab_dir(&root, &key(WORKSPACE_SCOPE, "01GONE", 1)).is_dir());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Removing a workspace forgets what its shells kept, and nothing of
+    /// another workspace's or a place's.
+    #[test]
+    fn removing_a_workspace_forgets_its_shells_directories_and_history() {
+        let (ctx, base, id) = engine_with_a_workspace("remove");
+        let other = worktrees_core::workspaces::create_at(ctx.workspaces_file(), "Other").unwrap().id;
+        let (mine, theirs) = (cwd_key(WORKSPACE_SCOPE, &id), cwd_key(WORKSPACE_SCOPE, &other));
+        std::fs::write(cwd_file(&ctx).unwrap(), serde_json::to_vec(&cwds(&[(&mine, 1, "/tmp"), (&theirs, 1, "/tmp"), ("/r|feat", 1, "/tmp")])).unwrap()).unwrap();
+        let root = term_hist_dir(&ctx).unwrap();
+        for k in [key(WORKSPACE_SCOPE, &id, 1), key(WORKSPACE_SCOPE, &other, 1)] {
+            std::fs::create_dir_all(tab_dir(&root, &k)).unwrap();
+            write_meta(&tab_dir(&root, &k), &k, 80);
+        }
+        crate::workspaces::workspace_remove(&ctx, id.clone()).unwrap();
+        assert_eq!(read_cwds_at(&cwd_file(&ctx).unwrap()), cwds(&[(&theirs, 1, "/tmp"), ("/r|feat", 1, "/tmp")]));
+        assert!(!tab_dir(&root, &key(WORKSPACE_SCOPE, &id, 1)).exists(), "its history is gone");
+        assert!(tab_dir(&root, &key(WORKSPACE_SCOPE, &other, 1)).is_dir(), "another workspace's stays");
         let _ = std::fs::remove_dir_all(&base);
     }
 }
