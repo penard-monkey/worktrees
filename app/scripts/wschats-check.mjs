@@ -85,6 +85,18 @@ eq("an ended chat's line, Fold now and Resume", [end(null), end({ state: "done",
 eq("a failed fold is the engine's words, and no more", [W.failedWords({ state: "failed", why: "it wrote no note in five minutes. Memory is unchanged." }), W.failedWords({ state: "failed", why: "its Claude exited" })], ["The fold did not finish: it wrote no note in five minutes. Memory is unchanged.", "The fold did not finish: its Claude exited."]);
 eq("a transcript that is gone, in the engine's words", [W.transcriptGone("this conversation's transcript is no longer on disk"), W.transcriptGone("this conversation has written no transcript yet"), W.transcriptGone(undefined)], [true, false, false]);
 
+// ── its acts: the header and a row's right-click menu read one list ──
+{
+  const acts = (state, fold, running = false, gone = false, other = null) => W.chatActs(r(state, fold), running, gone, other).map((a) => a.why ? `${a.label} (${a.why})` : a.label);
+  eq("a live chat: Close, Close without folding, Delete", acts("running"), ["Close", "Close without folding", "Delete"]);
+  eq("…folding, Close is refused and says why", acts("folding", null, true), ["Close (It is folding into memory.)", "Close without folding", "Delete"]);
+  eq("…another chat folding, the engine would refuse its fold", acts("busy", null, false, false, "Naming"), ["Close (“Naming” is folding. Close this one after.)", "Close without folding", "Delete"]);
+  eq("an ended chat not folded: Fold now, Resume, Delete", acts("ended"), ["Fold now", "Resume", "Delete"]);
+  eq("…folded: Resume, Delete", acts("ended", { state: "done", commit: "a", reverted: false }), ["Resume", "Delete"]);
+  eq("…its transcript gone: both refused, with the reason", acts("ended", null, false, true), ["Fold now (Its transcript is gone.)", "Resume (Its transcript is gone.)", "Delete"]);
+  eq("…another chat folding", acts("ended", null, false, false, "Naming"), ["Fold now (“Naming” is folding. Close this one after.)", "Resume (A chat of this workspace is folding. Resume it after.)", "Delete"]);
+}
+
 // ── its name ──
 eq("the engine's own names", ["Chat 3", "Chat three", "Chat 3b", "Release order"].map(W.isDefaultTitle), [true, false, false, false]);
 eq("from the first line, whole", W.titleFrom("\n  Which   ships first?\nand why"), "Which ships first?");

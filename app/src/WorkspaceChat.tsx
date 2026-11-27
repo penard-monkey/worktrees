@@ -13,8 +13,8 @@ import * as Icons from "./icons";
 import { DeskTerminalPane } from "./TerminalPane";
 import { useArmed } from "./useArmed";
 import {
-  accessWords, activeAt, ageWords, asksTrust, endedLine, failedWords, firstMessage, foldOf, foldRuns, introWords, isDefaultTitle, monthOf, navRows, quietLine, readsWords, stateWords, titleFrom, transcriptGone, TRUST_WORDS, whenWords,
-  type ChatRow, type DocRead, type ProjectRead, type RowState, type WsChat, type WsChats,
+  accessWords, activeAt, ageWords, asksTrust, chatActs, endedLine, failedWords, firstMessage, foldOf, foldRuns, introWords, isDefaultTitle, monthOf, navRows, quietLine, readsWords, stateWords, titleFrom, transcriptGone, TRUST_WORDS, whenWords,
+  type ChatAct, type ChatActItem, type ChatRow, type DocRead, type ProjectRead, type RowState, type WsChat, type WsChats, type WsSessionsEv,
   modelOf,
 } from "./wschats";
 import type { WsChatsLive } from "./useWsChats";
@@ -28,6 +28,115 @@ const DOT_TITLE: Record<RowState, string> = {
 /** The hue is the dot's, never the words'. */
 export function ChatDot({ state }: { state: RowState }) {
   return <span className={`wsc-dot ${state}`} title={DOT_TITLE[state]} aria-hidden="true" />;
+}
+
+/** What the acts on a chat need from the window: the same for its header and
+ *  for a row's right-click menu. */
+export type ChatActsHost = {
+  ws: string;
+  live: WsChatsLive;
+  /** What is open of the workspace's documents is saved: asked before an act. */
+  ready(): Promise<boolean>;
+  onError(msg: string): void;
+  /** A close left changes in the memory: its commit. */
+  landed(commit: string): void;
+  /** Chat `conv` was deleted. */
+  gone(conv: string): void;
+};
+
+/** Another chat of the workspace whose fold runs: the engine folds one at a time. */
+function folding(rows: readonly ChatRow[], conv: string, ev: WsSessionsEv | null): string | null {
+  return rows.find((r) => r.chat.id !== conv && foldRuns(foldOf(r.chat, ev)))?.chat.title ?? null;
+}
+
+/** The acts on one chat and their state: ONE copy, which the header and a row's
+ *  menu both run. `said`: where the engine's sentence goes when it will not
+ *  fold (the header shows it under itself; elsewhere it is an error line).
+ *  `reattach`: an attached terminal must attach again. */
+function useChatActs(h: ChatActsHost, row: ChatRow | null, rows: readonly ChatRow[], gone: boolean, opts: { said?(s: string | null): void; reattach?(): void } = {}) {
+  const [busy, setBusy] = useState(false);
+  const arm = useArmed<"delete" | "close">();
+  const conv = row?.chat.id ?? "";
+  const running = row ? foldRuns(foldOf(row.chat, h.live.sessions)) : false;
+  const items: ChatActItem[] = row ? chatActs(row, running, gone, folding(rows, conv, h.live.sessions)) : [];
+  const said = (s: string | null) => { if (opts.said) opts.said(s); else if (s) h.onError(s.replace(/^./, (x) => x.toUpperCase()).replace(/([^.!?])$/, "$1.")); };
+  const act = async (what: string, run: () => Promise<void>, gated = true) => {
+    setBusy(true);
+    try { if (!gated || (await h.ready())) await run(); } catch (e) { h.onError(`Could not ${what}: ${String(e)}`); }
+    finally { setBusy(false); }
+  };
+  const close = () => void act("close it", async () => { said(null); const r = await h.live.close(h.ws, conv); if (r.commit) h.landed(r.commit); });
+  /** Close: the fold. The engine says, in its words, when it will not. */
+  const fold = async () => {
+    said(null);
+    setBusy(true);
+    try { if ((await h.ready()) && (await h.live.fold(h.ws, conv)).reattach) opts.reattach?.(); } catch (e) { said(String(e)); }
+    finally { setBusy(false); }
+  };
+  return {
+    busy, arm, items, running, act,
+    item: (a: ChatAct) => items.find((i) => i.act === a) ?? null,
+    fold, close,
+    // It is working: closing ends the turn, so it asks once.
+    closeAsk: () => (row?.state === "busy" ? arm.confirm("close", close) : close()),
+    resume: () => void act("resume it", () => h.live.resume(h.ws, conv)),
+    remove: (after?: () => void) => arm.confirm("delete", () => { after?.(); void act("delete it", async () => { await h.live.remove(h.ws, conv); h.gone(conv); }, !!row?.live); }),
+  };
+}
+type ChatActs = ReturnType<typeof useChatActs>;
+
+const ACT_TESTID: Record<ChatAct, string> = { close: "ws-chat-act-close", "close-none": "ws-chat-act-close-none", "fold-now": "ws-chat-act-fold-now", resume: "ws-chat-act-resume", delete: "ws-chat-act-delete" };
+const ACT_TRACK: Record<ChatAct, string> = { close: "workspace.chat.row.fold", "close-none": "workspace.chat.row.close", "fold-now": "workspace.chat.row.fold-now", resume: "workspace.chat.row.resume", delete: "workspace.chat.row.delete" };
+/** One act as a menu item, by [`chatActs`]' rule: refused, it is shown with the
+ *  reason and cannot be pressed. */
+function ActItem({ a, acts, busy, row, close }: { a: ChatActItem; acts: ChatActs; busy: boolean; row: ChatRow; close(): void }) {
+  const armed = acts.arm.armed;
+  const run = () => {
+    switch (a.act) {
+      case "close": close(); void acts.fold(); return;
+      case "fold-now": close(); void acts.fold(); return;
+      case "resume": close(); acts.resume(); return;
+      case "close-none": if (row.state !== "busy" || armed === "close") close(); acts.closeAsk(); return;
+      case "delete": acts.remove(close); return;
+    }
+  };
+  const danger = a.act === "delete" || (a.act === "close-none" && armed === "close");
+  const label = a.act === "close-none" && armed === "close" ? "It is working. Close?" : a.act === "delete" && armed === "delete" ? "Delete this chat?" : a.label;
+  return (
+    <button className={"pop-item" + (danger ? " danger" : "") + ((a.act === "delete" && armed === "delete") || (a.act === "close-none" && armed === "close") ? " armed" : "")}
+      data-testid={ACT_TESTID[a.act]} data-act={a.act} data-track={ACT_TRACK[a.act]}
+      disabled={busy || !!a.why} title={a.why ?? a.title} onClick={run}>
+      <span className="wsc-act-in"><span>{label}</span>{a.why && <span className="wsc-act-why">{a.why}</span>}</span>
+    </button>
+  );
+}
+
+/** A chat row's right-click menu: the acts its header has, by its state. */
+function ChatRowMenu({ x, y, host, row, rows, onClose }: { x: number; y: number; host: ChatActsHost; row: ChatRow; rows: readonly ChatRow[]; onClose(): void }) {
+  const reason = useChat(wsChatKey({ id: host.ws, conv: row.chat.id })).turns.data?.reason;
+  const acts = useChatActs(host, row, rows, transcriptGone(reason));
+  return (
+    <CtxMenu x={x} y={y} onClose={() => { acts.arm.disarm(); onClose(); }}>
+      <div className="pop-head wsc-menu-h" title={row.chat.title}>{row.chat.title}</div>
+      {acts.items.map((a) => <ActItem key={a.act} a={a} acts={acts} busy={acts.busy} row={row} close={onClose} />)}
+    </CtxMenu>
+  );
+}
+
+/** A row's right-click menu, opened by the pointer or by the menu key. */
+function useRowMenu() {
+  const [m, setM] = useState<{ conv: string; x: number; y: number } | null>(null);
+  const on = (conv: string) => ({
+    onContextMenu: (e: React.MouseEvent) => { e.preventDefault(); e.stopPropagation(); setM({ conv, x: e.clientX, y: e.clientY }); },
+    onKeyDown: (e: React.KeyboardEvent) => {
+      if (e.key !== "ContextMenu" && !(e.key === "F10" && e.shiftKey)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const r = e.currentTarget.getBoundingClientRect();
+      setM({ conv, x: r.left + 12, y: r.bottom });
+    },
+  });
+  return { m, on, close: () => setM(null) };
 }
 
 /** The Chats group in a workspace's card, above its projects. */
@@ -47,8 +156,12 @@ export function NavChats(props: {
   retry(): void;
   /** Arm a drag of a row: into a place's chat, it is a reference. */
   arm?(e: React.PointerEvent, conv: string, title: string): void;
+  /** A row's right-click menu. */
+  acts?: ChatActsHost;
 }) {
   const { rows, rest } = navRows(props.rows, props.q);
+  const menu = useRowMenu();
+  const mrow = menu.m && props.rows.find((r) => r.chat.id === menu.m!.conv);
   const live = props.rows.filter((r) => r.live).length;
   if (props.q && rows.length === 0) return null;
   return (
@@ -65,7 +178,8 @@ export function NavChats(props: {
         return (
           <button key={r.chat.id} className={"wsc-row" + (r.state === "ended" ? " closed" : "") + (r.chat.id === props.on ? " on" : "")} data-testid="ws-chat-row" data-track="nav.workspace.chat"
             data-chat={r.chat.id} data-state={r.state} title={`${r.chat.title} · ${stateWords(r)}`} aria-current={r.chat.id === props.on || undefined} onClick={() => props.open(r.chat.id)}
-            data-drag-handle="" onPointerDown={props.arm ? (e) => props.arm!(e, r.chat.id, r.chat.title) : undefined}>
+            data-drag-handle="" onPointerDown={props.arm ? (e) => props.arm!(e, r.chat.id, r.chat.title) : undefined}
+            {...(props.acts ? menu.on(r.chat.id) : {})} aria-haspopup={props.acts ? "menu" : undefined}>
             <span className="wsc-row-in">
               <ChatDot state={r.state} />
               <span className="wsc-title">{r.chat.title}</span>
@@ -74,6 +188,7 @@ export function NavChats(props: {
           </button>
         );
       })}
+      {mrow && props.acts && menu.m && <ChatRowMenu x={menu.m.x} y={menu.m.y} host={props.acts} row={mrow} rows={props.rows} onClose={menu.close} />}
       {rest && <button className="wsc-all" data-testid="ws-chats-all" data-track="nav.workspace.chats" onClick={props.all}>All chats · {props.total} ▸</button>}
     </div>
   );
@@ -147,18 +262,22 @@ export function WorkspaceChatColumn(props: {
   const [view, setView] = useState<"chat" | "terminal">("chat");
   const [menu, setMenu] = useState<{ kind: "chats" | "reads" | "close"; x: number; y: number } | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   /** The engine's own sentence, when it would not fold. */
   const [said, setSaid] = useState<string | null>(null);
   /** The session under an attached terminal was replaced: attach again. */
   const [attach, setAttach] = useState(0);
-  const arm = useArmed<"delete" | "close">();
   useEffect(() => { setMenu(null); setRenaming(null); setView("chat"); setSaid(null); }, [conv]);
+  const key = wsChatKey({ id: ws.id, conv });
+  const data = useChat(key).turns.data;
+  const turns = data?.turns, reason = data?.reason;
+  const acts = useChatActs(
+    { ws: ws.id, live, ready: props.ready, onError: props.onError, landed: props.landed, gone: () => props.away() },
+    row, props.rows, transcriptGone(reason), { said: setSaid, reattach: () => setAttach((n) => n + 1) });
+  const { busy, arm, running, act, fold, close } = acts;
 
   // A fold of this chat that lands while it is on screen: its diff is shown
   // beside it (App says when not to).
   const change = useFoldChange(ws.id, c, props.memoryTick);
-  const running = c ? foldRuns(foldOf(c, live.sessions)) : false;
   const ran = useRef<{ conv: string; asked?: string } | null>(null);
   const commit = c?.fold?.state === "done" ? c.fold.commit : undefined;
   useEffect(() => {
@@ -169,9 +288,6 @@ export function WorkspaceChatColumn(props: {
   }, [running, commit, conv]);
 
   // A chat nobody has named takes its name from the person's first message.
-  const key = wsChatKey({ id: ws.id, conv });
-  const data = useChat(key).turns.data;
-  const turns = data?.turns, reason = data?.reason;
   const named = useRef(new Set<string>());
   const first = c && isDefaultTitle(c.title) && turns ? firstMessage(turns) : null;
   useEffect(() => {
@@ -185,11 +301,6 @@ export function WorkspaceChatColumn(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [first, conv]);
 
-  const act = async (what: string, run: () => Promise<void>, gated = true) => {
-    setBusy(true);
-    try { if (!gated || (await props.ready())) await run(); } catch (e) { props.onError(`Could not ${what}: ${String(e)}`); }
-    finally { setBusy(false); }
-  };
   if (!c || !row) {
     return (
       <div className="wsc-col" data-testid="ws-chat-col">
@@ -203,20 +314,9 @@ export function WorkspaceChatColumn(props: {
     if (kind === "reads") void live.refresh(ws.id);
     setMenu((m) => (m?.kind === kind ? null : { kind, x: kind === "close" ? r.right - 180 : r.left, y: r.bottom + 4 }));
   };
-  const resume = () => void act("resume it", () => live.resume(ws.id, conv));
   const now = foldOf(c, live.sessions);
-  const close = () => void act("close it", async () => { setSaid(null); const r = await live.close(ws.id, conv); if (r.commit) props.landed(r.commit); });
-  // It is working: closing ends the turn, so it asks once.
-  const closeAsk = () => (row.state === "busy" ? arm.confirm("close", close) : close());
-  /** Close: the fold. The engine says, in its words, when it will not. */
-  const fold = async () => {
-    setSaid(null);
-    setBusy(true);
-    try { if ((await props.ready()) && (await live.fold(ws.id, conv)).reattach) setAttach((n) => n + 1); } catch (e) { setSaid(String(e)); }
-    finally { setBusy(false); }
-  };
   const ended = endedLine(c, transcriptGone(reason));
-  const remove = () => arm.confirm("delete", () => { setMenu(null); void act("delete it", async () => { await live.remove(ws.id, conv); props.away(); }, row.live); });
+  const closeItem = acts.item("close"), foldNow = acts.item("fold-now"), resumeItem = acts.item("resume");
   const rename = (t: string) => {
     setRenaming(null);
     if (t.trim() && t.trim() !== c.title) void act("rename it", () => live.rename(ws.id, conv, t.trim()), false);
@@ -250,7 +350,7 @@ export function WorkspaceChatColumn(props: {
           )}
           {row.live ? (
             <span className="wsc-close">
-              <button className="ctrl sm" data-testid="ws-chat-close" data-track="workspace.chat.fold" disabled={busy || running} title="Close it: it writes what is worth keeping into the workspace's memory first. You can undo that." onClick={() => void fold()}>Close</button>
+              <button className="ctrl sm" data-testid="ws-chat-close" data-track="workspace.chat.fold" disabled={busy || !!closeItem?.why} title={closeItem?.why ?? closeItem?.title} onClick={() => void fold()}>Close</button>
               <button className="ctrl sm" data-testid="ws-chat-close-menu" aria-label="More" aria-haspopup="menu" aria-expanded={menu?.kind === "close"} onClick={at("close")}>▾</button>
             </span>
           ) : <button className="ctrl sm" data-testid="ws-chat-close-menu" aria-label="More" aria-haspopup="menu" aria-expanded={menu?.kind === "close"} onClick={at("close")}>▾</button>}
@@ -298,8 +398,8 @@ export function WorkspaceChatColumn(props: {
             ) : row.live ? undefined : (
               <div className="wsc-ended" data-testid="ws-chat-ended">
                 <span>{ended.text} Started {whenWords(c.started)}.</span>
-                {ended.foldNow && <button className="ctrl sm" data-testid="ws-chat-fold-now" data-track="workspace.chat.fold" disabled={busy} title="Write what is worth keeping into the workspace's memory" onClick={() => void fold()}>Fold now</button>}
-                {ended.resume && <button className="enter-btn sm" data-testid="ws-chat-resume" data-track="workspace.chat.resume" disabled={busy} onClick={resume}>Resume</button>}
+                {ended.foldNow && foldNow && <button className="ctrl sm" data-testid="ws-chat-fold-now" data-track="workspace.chat.fold" disabled={busy || !!foldNow.why} title={foldNow.why ?? foldNow.title} onClick={() => void fold()}>Fold now</button>}
+                {ended.resume && resumeItem && <button className="enter-btn sm" data-testid="ws-chat-resume" data-track="workspace.chat.resume" disabled={busy || !!resumeItem.why} title={resumeItem.why ?? undefined} onClick={acts.resume}>Resume</button>}
               </div>
             )} />
         )}
@@ -323,14 +423,14 @@ export function WorkspaceChatColumn(props: {
       {menu?.kind === "close" && (
         <CtxMenu x={menu.x} y={menu.y} onClose={() => { setMenu(null); arm.disarm(); }}>
           {row.live && (
-            <button className={"pop-item" + (arm.armed === "close" ? " danger armed" : "")} data-testid="ws-chat-close-item" data-track="workspace.chat.close" title="End it and write nothing. It stays here to read, and can be folded later."
-              onClick={() => { if (row.state !== "busy" || arm.armed === "close") setMenu(null); closeAsk(); }}>
+            <button className={"pop-item" + (arm.armed === "close" ? " danger armed" : "")} data-testid="ws-chat-close-item" data-track="workspace.chat.close" title={acts.item("close-none")?.title}
+              onClick={() => { if (row.state !== "busy" || arm.armed === "close") setMenu(null); acts.closeAsk(); }}>
               {arm.armed === "close" ? "It is working. Close?" : "Close without folding"}
             </button>
           )}
           {row.live && props.terminalCmd.trim() && <button className="pop-item" data-testid="ws-chat-terminal-app" data-track="workspace.chat.terminal-app" onClick={() => { setMenu(null); props.openTerminalApp(c.session); }}>Open in terminal app</button>}
           <button className={"pop-item danger" + (arm.armed === "delete" ? " armed" : "")} data-testid="ws-chat-delete" data-track="workspace.chat.delete"
-            title="Forgets this chat and its folder here. Its note in memory stays, and so does Claude's own transcript." onClick={remove}>
+            title={acts.item("delete")?.title} onClick={() => acts.remove(() => setMenu(null))}>
             {arm.armed === "delete" ? "Delete this chat?" : "Delete"}
           </button>
         </CtxMenu>
@@ -413,8 +513,10 @@ export function ChatLines(props: { rows: readonly ChatRow[]; ago(epoch: number):
 
 /** The Chats tab: every chat, what needs somebody first, the closed ones by
  *  month. */
-export function ChatsTab(props: { note(path: string): void; rows: readonly ChatRow[]; on: string | null; starting: boolean; ago(epoch: number): string; open(conv: string): void; start(): void }) {
+export function ChatsTab(props: { note(path: string): void; rows: readonly ChatRow[]; on: string | null; starting: boolean; ago(epoch: number): string; open(conv: string): void; start(): void; acts?: ChatActsHost }) {
   const [q, setQ] = useState("");
+  const menu = useRowMenu();
+  const mrow = menu.m && props.rows.find((r) => r.chat.id === menu.m!.conv);
   const needle = q.trim().toLowerCase();
   const hit = props.rows.filter((r) => !needle || r.chat.title.toLowerCase().includes(needle));
   const groups = useMemo(() => {
@@ -439,7 +541,7 @@ export function ChatsTab(props: { note(path: string): void; rows: readonly ChatR
           <ul className="wsc-list">
             {g.rows.map((r) => (
               <li key={r.chat.id} className={"wsc-item" + (r.chat.id === props.on ? " on" : "")} data-testid="ws-chats-row" data-chat={r.chat.id} data-state={r.state}>
-                <button className="wsc-item-b" onClick={() => props.open(r.chat.id)}>
+                <button className="wsc-item-b" onClick={() => props.open(r.chat.id)} {...(props.acts ? menu.on(r.chat.id) : {})} aria-haspopup={props.acts ? "menu" : undefined}>
                   <span className="wsc-line-in">
                     <ChatDot state={r.state} />
                     <span className="ws-ov-name">{r.chat.title}</span>
@@ -453,6 +555,7 @@ export function ChatsTab(props: { note(path: string): void; rows: readonly ChatR
           </ul>
         </section>
       ))}
+      {mrow && props.acts && menu.m && <ChatRowMenu x={menu.m.x} y={menu.m.y} host={props.acts} row={mrow} rows={props.rows} onClose={menu.close} />}
     </div>
   );
 }

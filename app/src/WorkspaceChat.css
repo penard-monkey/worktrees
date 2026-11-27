@@ -62,6 +62,10 @@
 .wsc-gone p { margin: 0; overflow-wrap: anywhere; }
 .wsc-menu { display: flex; flex-direction: column; width: 270px; }
 .wsc-menu .pop-item { display: flex; align-items: center; gap: var(--s2); }
+/* A chat row's right-click menu: its title, and why an act is refused, under it. */
+.wsc-menu-h { max-width: 270px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wsc-act-in { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.wsc-act-why { font-size: var(--fs-micro); white-space: normal; }
 .wsc-menu-t { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wsc-reads { list-style: none; margin: 0; padding: var(--s1) var(--s2); width: 300px; display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-meta); }
 .wsc-reads li { display: flex; flex-wrap: wrap; gap: 0 var(--s2); }

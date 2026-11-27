@@ -79,7 +79,7 @@ import { PickPlace, StartReview } from "./StartWork";
 import { useGone } from "./useGone";
 import { NoMemory, WorkspaceOverview, type DocLite, type WsParts } from "./WorkspaceOverview";
 import { WorkspaceFrame } from "./WorkspaceFrame";
-import { ChatDot, ChatLines, ChatsTab, NavChats, RefusedStart, StartingChat, WorkspaceChatColumn } from "./WorkspaceChat";
+import { ChatDot, ChatLines, ChatsTab, NavChats, RefusedStart, StartingChat, WorkspaceChatColumn, type ChatActsHost } from "./WorkspaceChat";
 import { PickPlaceWs, WorkspaceDock, type DockDoc } from "./WorkspaceDock";
 import { useWsChats } from "./useWsChats";
 import { keepFiles, MemoryCard, MemoryFiles, MemoryHistory, MemoryPreview, MemoryStrips, MemoryUnread } from "./WorkspaceMemory";
@@ -9397,6 +9397,14 @@ function App() {
     ...docChips({ ideas: ideasOn, chats: wsChatsOn }).map((t) => ({ key: `${w.id}|${t}`, name: WS_TAB_LABEL[t], where: w.name, what: "document", dot: <span className="status-dot" />, go: () => void showWs(w.id, t) })),
     ...(wsChatsOn ? wsChats.rows(w.id) : []).map((x: ChatRow) => ({ key: x.chat.id, name: x.chat.title, where: w.name, what: "chat", dot: <ChatDot state={x.state} />, go: () => openChat(w.id, x.chat.id) })),
   ]);
+  /** What a chat row's right-click menu acts with: the header's handlers, for a
+   *  chat that may not be on screen. */
+  const chatActsHost = (id: string): ChatActsHost => ({
+    ws: id, live: wsChats, ready: () => docSaved(id), onError: fail,
+    // A close's changes are shown where its workspace is shown, as the header does.
+    landed: (commit) => { if (wsShown?.id === id && !mainDocApi.current?.editing()) void showChange(id, commit).then(() => setWsSide("chat")); },
+    gone: (conv) => { if (wsShown?.id === id && wsChat[id] === conv) void showWs(id, wsTabNow, { chat: null }); },
+  });
   /** The chat in the middle of the workspace view, or the start of one. */
   const wsConv = wsShown ? wsChat[wsShown.id] ?? null : null;
   const wsMiddle = !wsShown || !wsChatsOn ? null
@@ -10102,6 +10110,7 @@ function App() {
                         all={() => { void showWs(w.id, "chats"); setMenu(null); closeCtx(); hideNav(); }}
                         retry={() => void wsChats.refresh(w.id)}
                         arm={(e, conv, title) => arm(e, { kind: "chat", ws: w.id, conv, title })}
+                        acts={chatActsHost(w.id)}
                       />
                     )}
                     {w.projects.length === 0 && (
@@ -11053,7 +11062,7 @@ function App() {
                 firstChat={() => { if (wsShown) void startChat(wsShown.id); }}
                 chatsTab={wsShown && wsChatsOn && (
                   <ChatsTab note={(path) => openMemory(wsShown.id, path)} rows={wsChats.rows(wsShown.id)} on={wsChat[wsShown.id] ?? null} starting={wsStart?.why === null} ago={ago}
-                    open={(conv) => openChat(wsShown.id, conv)} start={() => void startChat(wsShown.id)} />
+                    open={(conv) => openChat(wsShown.id, conv)} start={() => void startChat(wsShown.id)} acts={chatActsHost(wsShown.id)} />
                 )}
                 showTab={(t) => { if (wsShown) void showWs(wsShown.id, t); }}
                 navButtons={navButtons}
