@@ -13,9 +13,10 @@ the checks.
 ## How the work runs
 
 - Each slice is one lane on its own branch, started from a brief and built by
-  a Claude or a Kimi agent (the owner, 2026-11-27: use both a lot). The lane
-  commits, runs the gates and reports; it does not push. First hand-out:
-  1a and 1b to Claude, 1c to Kimi, side by side.
+  a Kimi or a Codex agent (the owner, 2026-11-27: use those two a lot; Claude
+  is fine too). The lane commits, runs the gates and reports; it does not
+  push. Hand-out: 1a and 1b to Claude and 1c to Kimi, started side by side on
+  2026-11-27; 1d to Codex once both report.
 - The diff is reviewed before `(main)` pushes it, opens the pull request and
   squash-merges.
 - Everything on screen sits behind one beta switch, `beta_left_off`, default
