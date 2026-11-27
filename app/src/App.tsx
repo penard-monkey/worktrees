@@ -8066,14 +8066,17 @@ function App() {
     if (!sync.adopt) loadSyncStatus(sync.root);
     void loadHubs();
   };
-  const placeCtx = (e: React.MouseEvent, repo: string, p: Place) => {
+  const placeCtx = (e: React.MouseEvent | React.KeyboardEvent, repo: string, p: Place) => {
     e.preventDefault();
     ctxCard.current = e.currentTarget.matches("li.row") ? e.currentTarget.closest<HTMLElement>("[data-ws-id]")?.dataset.wsId ?? null : undefined;
     ctxGhost.current = e.currentTarget.matches("li.row.ghost");
     e.stopPropagation();
     setMenu(null);
     setConfirmRm(null);
-    setCtx({ kind: "place", x: e.clientX, y: e.clientY, repo, slug: p.slug });
+    const bounds = e.currentTarget.getBoundingClientRect();
+    const x = "clientX" in e ? e.clientX : bounds.left;
+    const y = "clientY" in e ? e.clientY : bounds.bottom;
+    setCtx({ kind: "place", x, y, repo, slug: p.slug });
   };
   const projectCtx = (e: React.MouseEvent, root: string, inWs?: string) => {
     e.preventDefault();
@@ -10104,6 +10107,7 @@ function App() {
           (stale ? " stale" : "")
         }
         data-slug={p.slug}
+        tabIndex={0}
         style={lb?.style}
         // Click SELECTS; opening is always an explicit gesture (double-click, the
         // ▸ button below, the topbar/empty-state Enter, or the ctx menu). The
@@ -10112,6 +10116,21 @@ function App() {
         onClick={(e) => { fromRow(e.currentTarget, repo, p.slug); selectPlace(repo, p); hideNav(); }}
         onDoubleClick={() => { enterPlace(repo, p); hideNav(); }}
         onContextMenu={(e) => placeCtx(e, repo, p)}
+        onKeyDown={(e) => {
+          if (e.target !== e.currentTarget) return;
+          if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) placeCtx(e, repo, p);
+          if (e.key === "Enter") {
+            e.preventDefault();
+            fromRow(e.currentTarget, repo, p.slug);
+            enterPlace(repo, p);
+            hideNav();
+          }
+          if (e.key === " ") {
+            e.preventDefault();
+            fromRow(e.currentTarget, repo, p.slug);
+            selectPlace(repo, p);
+          }
+        }}
         onPointerDown={draggable ? (e) => arm(e, { kind: "place", repo, slug: p.slug }) : undefined}
         title={p.declared?.title ? `${p.declared.title} — ${p.slug}` : p.slug}
         // usage: this row's TITLE is the place's name. Every control whose

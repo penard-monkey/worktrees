@@ -867,6 +867,21 @@ html[data-guides="off"] .kids > .places::after { display: none; }
    keep saying so while the pointer is over it. */
 .row:hover .row-slot .row-age, .row.sel .row-slot .row-age { visibility: hidden; }
 
+/* Reserve the branch and glyph slots. Revealing details never moves the
+   hovered row, the name, or a lane caret underneath the pointer. */
+@media (hover: hover) and (pointer: fine) {
+  [data-quiet-chrome] .row[data-slug]:not(:is(:hover, :focus-within, .sel)) :is(
+    .row-branch, .row-age, .g-ahead, .g-dirty, .g-more
+  ) { visibility: hidden; }
+}
+[data-quiet-chrome] .row[data-slug] .glyphs { gap: var(--s1); }
+[data-quiet-chrome] .row[data-slug] .row-slot { grid-auto-flow: column; gap: 2px; }
+[data-quiet-chrome] .row[data-slug] .row-slot > * { grid-area: auto; }
+[data-quiet-chrome] .row[data-slug]:is(:hover, :focus-within, .sel) .row-age { visibility: visible; }
+.row[data-slug]:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.row[data-slug]:focus-within .row-enter { visibility: visible; }
+.app:not([data-quiet-chrome]) .row[data-slug]:focus-within .row-age { visibility: hidden; }
+
 /* ── space ──
  * One grid cell holding the selected place's whole workbench: the header on
  * top, then the terminal and the dock side by side beneath it. The dock is a

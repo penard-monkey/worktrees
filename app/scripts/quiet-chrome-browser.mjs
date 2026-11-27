@@ -4,6 +4,10 @@ import assert from "node:assert/strict";
 const { chromium, webkit } = await import(process.env.PLAYWRIGHT_MODULE ?? "playwright");
 const base = process.env.QUIET_CHROME_URL ?? "http://127.0.0.1:1478";
 const stateKey = "wt-mock-ui-state";
+const hittable = (locator) => locator.evaluate((el) => {
+  const r = el.getBoundingClientRect();
+  return el.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
+});
 let failed = false;
 
 for (const [name, engine] of Object.entries({ chromium, webkit })) {
@@ -16,7 +20,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
         sessionStorage.setItem(key, JSON.stringify({ nav_pinned: true, nav_view: "projects", settings_rev: 5 }));
       }
     }, stateKey);
-    await page.goto(`${base}/?strays=2`);
+    await page.goto(`${base}/?strays=2&activity=0`);
     const toggle = page.getByRole("button", { name: "Show all", exact: true });
     await toggle.waitFor();
     assert.equal(await toggle.getAttribute("aria-pressed"), "false", "existing settings default to quiet");
@@ -44,6 +48,31 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
       assert.equal(await button.isVisible(), false, `${label} folds again`);
     }
     console.log(`ok   ${name} both warning chips disclose their full cards`);
+
+    const row = page.locator('li.row[data-slug="billing-refactor"]').first();
+    const branch = row.locator(".row-branch");
+    const age = row.locator(".row-age");
+    await row.scrollIntoViewIfNeeded();
+    await page.mouse.move(700, 50);
+    assert.equal(await branch.isVisible(), false);
+    assert.equal(await hittable(branch), false);
+    const before = await row.boundingBox();
+    await row.hover();
+    assert.equal(await hittable(branch), true);
+    assert.equal(await age.isVisible(), true);
+    assert.deepEqual(await row.boundingBox(), before);
+    await page.mouse.move(700, 50);
+    await row.focus();
+    assert.equal(await hittable(branch), true);
+    await row.click();
+    await page.mouse.move(700, 50);
+    await row.evaluate((el) => el.blur());
+    assert.equal(await hittable(branch), true);
+    assert.equal(await age.isVisible(), true);
+    const waiting = page.locator('li.row[data-slug="feat-redesign"] .status-dot.waiting');
+    await waiting.scrollIntoViewIfNeeded();
+    assert.equal(await hittable(waiting), true, "an unselected waiting row keeps its dot");
+    console.log(`ok   ${name} row details reveal without movement on hover, focus, and selection`);
   } catch (error) {
     failed = true;
     console.error(`FAIL ${name}`, error);
