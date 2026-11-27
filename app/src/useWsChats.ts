@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke, listen } from "./ipc";
 import type { Expect } from "./desk";
-import { chatRows, type ChatRow, type WsChats, type WsSessionsEv } from "./wschats";
+import { chatRows, type ChatPick, type ChatRow, type WsChats, type WsSessionsEv } from "./wschats";
 
 const errText = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : String(e));
 
@@ -20,7 +20,7 @@ export type WsChatsLive = {
   /** A workspace whose chat is being started: its row, before there is one. */
   starting: string | null;
   /** `tidy`: Tidy…, a chat on the engine's tidy file (`workspace_chat_tidy`). */
-  start(id: string, tidy?: boolean): Promise<{ conv: string } | { refused: string }>;
+  start(id: string, tidy?: boolean, pick?: ChatPick): Promise<{ conv: string } | { refused: string }>;
   /** Each throws in words. */
   resume(id: string, conv: string): Promise<void>;
   /** End it with no fold; a running one is stopped. The commit, if it left changes. */
@@ -102,10 +102,11 @@ export function useWsChats(on: boolean, ids: readonly string[], also: unknown): 
     error: (id) => errors[id] ?? null,
     rows: (id) => rows[id] ?? [],
     refresh,
-    async start(id, tidy) {
+    async start(id, tidy, pick) {
       setStarting(id);
       try {
-        const r = await invoke<{ chat: { id: string } }>(tidy ? "workspace_chat_tidy" : "workspace_chat_start", { id });
+        const r = await invoke<{ chat: { id: string } }>(tidy ? "workspace_chat_tidy" : "workspace_chat_start",
+          tidy || !pick ? { id } : { id, harness: pick.harness, ...(pick.model ? { model: pick.model } : {}) });
         setExpect((x) => ({ ...x, [r.chat.id]: { conv: r.chat.id, live: true } }));
         await refresh(id);
         return { conv: r.chat.id };

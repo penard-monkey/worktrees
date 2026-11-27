@@ -13,7 +13,9 @@
 // answered there; Chat | Terminal; Close, ended, Resume, Delete; a start, its
 // name from the first message, a refusal said in the chat's side; the Chats tab;
 // one side under 760 px; Back and Forward; six themes; nothing of it with the
-// beta off.
+// beta off. And a chat row's right-click menu, in the card and in the Chats tab:
+// the header's acts by the chat's state, refused ones said, by key too. And
+// New chat's ▾: the harness and model a chat starts on.
 const { chromium, webkit } = await import(process.env.PLAYWRIGHT_MODULE ?? "playwright");
 const BASE = process.env.IDEAS_MOCK_URL ?? "http://localhost:1466";
 const SHOTS = process.env.IDEAS_SCREENSHOTS;
@@ -210,6 +212,92 @@ async function chat(page, tag, name) {
   await page.click("[data-testid=ws-chat-delete]");
   ok(await until(page, (w) => window.__mock.wsChats(w).length === 4, ws) && await until(page, () => !document.querySelector("[data-testid=ws-mid]")), `${tag} the second press deletes it, and the documents take the room`);
   ok(await page.evaluate(() => Math.abs(document.querySelector(".wsf-docs").getBoundingClientRect().width - document.querySelector(".wsf-body").getBoundingClientRect().width) < 1), `${tag} …all of it`);
+}
+
+/** A row's right-click menu: the header's acts, by the chat's state (wschats.ts `chatActs`). */
+async function rowmenu(page, tag) {
+  const ws = await boot(page);
+  const items = () => page.locator(".ctxmenu .pop-item").evaluateAll((b) => b.map((x) => (x.disabled ? "~" : "") + x.querySelector("span span").textContent));
+  const ctx = async (t) => { await row(page, t).click({ button: "right" }); return until(page, () => !!document.querySelector(".ctxmenu")); };
+  ok(await ctx("Release order"), `${tag} a chat row has a right-click menu`);
+  ok(JSON.stringify(await items()) === JSON.stringify(["Close", "Close without folding", "Delete"]), `${tag} …a live chat's: Close, Close without folding, Delete (${JSON.stringify(await items())})`);
+  ok((await page.locator(".ctxmenu .wsc-menu-h").innerText()) === "Release order" && await page.evaluate(() => document.querySelector(".ctxmenu").getAttribute("role") === "menu"), `${tag} …a menu, named by the chat`);
+  ok(!(await page.$("[data-testid=ws-chat-col]")), `${tag} …and opening it opens no chat`);
+  await page.keyboard.press("ArrowDown");
+  ok(await page.evaluate(() => document.activeElement?.dataset.act === "close"), `${tag} ↓ goes into it`);
+  await page.keyboard.press("Escape");
+  ok(await until(page, () => !document.querySelector(".ctxmenu")), `${tag} Escape closes it`);
+  // By key: the menu key on a focused row, its first act focused.
+  await row(page, "Release order").focus();
+  await page.keyboard.press("Shift+F10");
+  ok(await until(page, () => document.activeElement?.dataset.act === "close"), `${tag} Shift+F10 on a row opens it, its first act focused`);
+  await page.keyboard.press("Escape");
+  // Close without folding, from the row.
+  await ctx("Release order");
+  await page.click("[data-testid=ws-chat-act-close-none]");
+  ok(await until(page, () => [...document.querySelectorAll("[data-testid=ws-chat-row]")].find((r) => r.querySelector(".wsc-title").textContent === "Release order")?.dataset.state === "ended"), `${tag} Close without folding ends it`);
+  await ctx("Release order");
+  ok(JSON.stringify(await items()) === JSON.stringify(["Fold now", "Resume", "Delete"]), `${tag} an ended one: Fold now, Resume, Delete (${JSON.stringify(await items())})`);
+  await page.click("[data-testid=ws-chat-act-resume]");
+  ok(await until(page, () => [...document.querySelectorAll("[data-testid=ws-chat-row]")].find((r) => r.querySelector(".wsc-title").textContent === "Release order")?.dataset.state === "running"), `${tag} Resume starts it again`);
+  // Another chat folds: its fold would be refused, and says why.
+  const rel = await row(page, "Release order").getAttribute("data-chat");
+  await page.evaluate(([w, c]) => window.__mock.wsFold(w, c, "folding"), [ws, rel]);
+  await until(page, (c) => document.querySelector(`[data-chat='${c}']`)?.dataset.state === "folding", rel);
+  await ctx("Release order");
+  ok(await page.locator("[data-testid=ws-chat-act-close]").isDisabled() && /It is folding into memory\./.test(await page.locator("[data-testid=ws-chat-act-close]").innerText()), `${tag} a folding chat's Close is refused, with the reason`);
+  await page.keyboard.press("Escape");
+  await ctx("Naming");
+  ok(await page.locator("[data-testid=ws-chat-act-fold-now]").isDisabled() && /“Release order” is folding\. Close this one after\./.test(await page.locator("[data-testid=ws-chat-act-fold-now]").innerText()), `${tag} …and another chat's Fold now, with the engine's words`);
+  await page.keyboard.press("Escape");
+  await page.evaluate(([w, c]) => window.__mock.wsFold(w, c, null), [ws, rel]);
+  // Close, the fold, from the row.
+  await until(page, (c) => document.querySelector(`[data-chat='${c}']`)?.dataset.state !== "folding", rel);
+  await ctx("Storage layout");
+  ok(JSON.stringify(await items()) === JSON.stringify(["Resume", "Delete"]), `${tag} a folded one: Resume, Delete (${JSON.stringify(await items())})`);
+  await page.keyboard.press("Escape");
+  await ctx("First look");
+  await page.click("[data-testid=ws-chat-act-fold-now]");
+  ok(await until(page, () => /folding…/.test([...document.querySelectorAll("[data-testid=ws-chat-row]")].find((r) => r.querySelector(".wsc-title").textContent === "First look")?.textContent ?? "")), `${tag} Fold now folds it`);
+  // Delete asks first.
+  await ctx("Storage layout");
+  await page.click("[data-testid=ws-chat-act-delete]");
+  ok(/Delete this chat\?/.test(await page.locator("[data-testid=ws-chat-act-delete]").innerText()) && (await page.evaluate((w) => window.__mock.wsChats(w).length, ws)) === 5, `${tag} Delete asks first`);
+  await page.click("[data-testid=ws-chat-act-delete]");
+  ok(await until(page, (w) => window.__mock.wsChats(w).length === 4, ws) && !(await page.$(".ctxmenu")), `${tag} …and the second press deletes it`);
+  // The Chats tab's rows have it too, once the fold has landed.
+  await until(page, () => ![...document.querySelectorAll("[data-testid=ws-chat-row]")].some((r) => r.dataset.state === "folding"), null, 8000);
+  await page.locator("[data-testid=ws-name]", { hasText: "Everything" }).first().click();
+  await page.waitForSelector("[data-testid=ws-overview]");
+  await tab(page, "chats");
+  await page.locator("[data-testid=ws-chats-row]", { hasText: "Naming" }).locator(".wsc-item-b").click({ button: "right" });
+  ok(await until(page, () => !!document.querySelector(".ctxmenu")) && JSON.stringify(await items()) === JSON.stringify(["Fold now", "Resume", "Delete"]), `${tag} the Chats tab's rows have it too (${JSON.stringify(await items())})`);
+}
+
+/** New chat's ▾: the harness and its model (workspace-chat-provider.md §3). */
+async function picker(page, tag) {
+  const ws = await boot(page);
+  await page.locator("[data-testid=ws-name]", { hasText: "Everything" }).first().click();
+  await page.waitForSelector("[data-testid=ws-overview]");
+  await page.click("[data-testid=ws-frame-new-chat-more]");
+  ok(await until(page, () => !!document.querySelector("[data-testid=ws-chat-pick]")), `${tag} New chat's ▾ opens the pick`);
+  const hs = await page.locator("[data-testid=ws-chat-pick-harness]").evaluateAll((b) => b.map((x) => (x.disabled ? "~" : "") + x.textContent));
+  ok(JSON.stringify(hs) === JSON.stringify(["Claude", "~Codex", "~pi", "~Kimi"]), `${tag} every harness, the ones that cannot be a chat disabled (${JSON.stringify(hs)})`);
+  ok(/Codex cannot be a workspace chat yet\. Its sandbox does not stop reads, so a private project would be readable\./.test(await page.locator("[data-testid=ws-chat-pick-why]").innerText()), `${tag} …each with the engine's reason`);
+  ok(await page.locator("[data-testid=ws-chat-pick-harness][data-harness=codex]").getAttribute("title") !== null, `${tag} …on the button too`);
+  await until(page, () => document.querySelectorAll("[data-testid=ws-chat-pick-model] option").length > 2);
+  await page.selectOption("[data-testid=ws-chat-pick-model]", "sonnet");
+  await page.click("[data-testid=ws-chat-pick-start]");
+  ok(await until(page, () => window.__mock.chatStarts().length === 1) && JSON.stringify((await page.evaluate(() => window.__mock.chatStarts()))[0]) === JSON.stringify({ harness: "claude", model: "sonnet" }), `${tag} Start starts Claude on that model`);
+  ok(await until(page, () => /^Claude sonnet$/.test(document.querySelector("[data-testid=ws-chat-model]")?.textContent ?? "")), `${tag} its header names the model it was started on (${await page.locator("[data-testid=ws-chat-model]").innerText().catch(() => "none")})`);
+  const conv = await page.locator("[data-testid=ws-chat-col]").getAttribute("data-chat");
+  ok((await call(page, "workspace_chats", { id: ws })).chats.find((c) => c.id === conv)?.model === "sonnet", `${tag} …and its record holds it`);
+  ok(/· Claude · sonnet$/.test(await group(page, "Everything").locator(`[data-testid=ws-chat-row][data-chat='${conv}']`).getAttribute("title")), `${tag} its row says what it runs on`);
+  // The plain press starts the last pick, with no step.
+  await until(page, () => !document.querySelector("[data-testid=ws-frame-new-chat]")?.disabled);
+  await page.click("[data-testid=ws-frame-new-chat]");
+  ok(await until(page, () => window.__mock.chatStarts().length === 2) && JSON.stringify((await page.evaluate(() => window.__mock.chatStarts()))[1]) === JSON.stringify({ harness: "claude", model: "sonnet" }), `${tag} New chat's plain press starts the workspace's last pick`);
+  ok(!(await page.$("[data-testid=ws-chat-pick]")), `${tag} …with no step`);
 }
 
 async function start(page, tag) {
@@ -456,7 +544,7 @@ async function off(page, tag) {
 const only = process.env.ONLY?.split(",");
 for (const [engine, name] of [[chromium, "chromium"], [webkit, "webkit"]]) {
   const browser = await engine.launch();
-  for (const part of [nav, chat, start, narrow, back, trust, themes, model, notified, off]) {
+  for (const part of [nav, chat, rowmenu, picker, start, narrow, back, trust, themes, model, notified, off]) {
     if (only && !only.includes(part.name)) continue;
     const page = await (await browser.newContext({ viewport: { width: 1440, height: 900 } })).newPage();
     const errors = [];

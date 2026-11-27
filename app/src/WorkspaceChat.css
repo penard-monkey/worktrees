@@ -64,6 +64,10 @@
 .wsc-gone p { margin: 0; overflow-wrap: anywhere; }
 .wsc-menu { display: flex; flex-direction: column; width: 270px; }
 .wsc-menu .pop-item { display: flex; align-items: center; gap: var(--s2); }
+/* A chat row's right-click menu: its title, and why an act is refused, under it. */
+.wsc-menu-h { max-width: 270px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wsc-act-in { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.wsc-act-why { font-size: var(--fs-micro); white-space: normal; }
 .wsc-menu-t { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wsc-reads { list-style: none; margin: 0; padding: var(--s1) var(--s2); width: 300px; display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-meta); }
 .wsc-reads li { display: flex; flex-wrap: wrap; gap: 0 var(--s2); }
@@ -94,3 +98,9 @@
 .wsc-stale ul { margin: var(--s1) 0; padding-left: var(--s4); }
 p.wsc-stale { margin: 0; }
 .wsc-limits { max-width: 22rem; margin: 0; padding: var(--s2) var(--s3); border-top: 1px solid var(--line); color: var(--txt); font-size: var(--fs-meta); }
+
+/* New chat's ▾ and what it opens: the harness, its model, why not the others. */
+.wsc-more { margin-left: calc(-1 * var(--s1)); padding-inline: var(--s1); }
+.wsc-pick { display: flex; flex-direction: column; gap: var(--s2); width: 260px; padding: var(--s1); }
+.wsc-pick .seg { flex-wrap: wrap; }
+.wsc-pick-why { margin: 0; padding-left: var(--s3); font-size: var(--fs-micro); color: var(--txt-dim); display: flex; flex-direction: column; gap: 2px; }

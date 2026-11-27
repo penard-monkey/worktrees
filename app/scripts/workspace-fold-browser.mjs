@@ -196,8 +196,7 @@ async function states(page, tag, name) {
   await row(page, "Who can see what").click();
   await colOf(page, "Who can see what");
   await page.waitForSelector("[data-testid=ws-chat-fold-now]");
-  await page.click("[data-testid=ws-chat-fold-now]");
-  ok(await until(page, () => /“Release order” is folding\. Close this one after\./.test(document.querySelector("[data-testid=ws-chat-said]")?.textContent ?? "")), `${tag} one fold at a time, naming the other`);
+  ok(await until(page, () => { const b = document.querySelector("[data-testid=ws-chat-fold-now]"); return b?.disabled && b.title === "“Release order” is folding. Close this one after."; }), `${tag} one fold at a time: Fold now is refused before the press, naming the other`);
   // ── failed ──
   await page.evaluate((w) => window.__mock.memoryEdit(w, "topics/half.md", "# Half\n"), ws);
   await fold(page, ws, rel, "failed");

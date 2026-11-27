@@ -1499,7 +1499,7 @@ commands! { cx, a;
     // `idea_answer_text`'s behind one more console-only door (the owner,
     // 2026-11-24), audited the same way.
     workspace_chats: HostConsole [console, workspace(id)] => workspacechats::workspace_chats(&cx.ctx, a.get("id")?),
-    workspace_chat_start: HostConsole [console, workspace(id)] => workspacechats::workspace_chat_start(&cx.ctx, a.get("id")?),
+    workspace_chat_start: HostConsole [console, workspace(id)] => workspacechats::workspace_chat_start(&cx.ctx, a.get("id")?, a.get("harness")?, a.get("model")?),
     // Tidy…: a chat on the engine's own tidy file. It takes the id alone, so
     // no client text reaches what the chat is told.
     workspace_chat_tidy: HostConsole [console, workspace(id)] => workspacechats::workspace_chat_tidy(&cx.ctx, a.get("id")?),

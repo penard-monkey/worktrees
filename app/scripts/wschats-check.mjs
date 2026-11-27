@@ -85,6 +85,18 @@ eq("an ended chat's line, Fold now and Resume", [end(null), end({ state: "done",
 eq("a failed fold is the engine's words, and no more", [W.failedWords({ state: "failed", why: "it wrote no note in five minutes. Memory is unchanged." }), W.failedWords({ state: "failed", why: "its Claude exited" })], ["The fold did not finish: it wrote no note in five minutes. Memory is unchanged.", "The fold did not finish: its Claude exited."]);
 eq("a transcript that is gone, in the engine's words", [W.transcriptGone("this conversation's transcript is no longer on disk"), W.transcriptGone("this conversation has written no transcript yet"), W.transcriptGone(undefined)], [true, false, false]);
 
+// ── its acts: the header and a row's right-click menu read one list ──
+{
+  const acts = (state, fold, running = false, gone = false, other = null) => W.chatActs(r(state, fold), running, gone, other).map((a) => a.why ? `${a.label} (${a.why})` : a.label);
+  eq("a live chat: Close, Close without folding, Delete", acts("running"), ["Close", "Close without folding", "Delete"]);
+  eq("…folding, Close is refused and says why", acts("folding", null, true), ["Close (It is folding into memory.)", "Close without folding", "Delete"]);
+  eq("…another chat folding, the engine would refuse its fold", acts("busy", null, false, false, "Naming"), ["Close (“Naming” is folding. Close this one after.)", "Close without folding", "Delete"]);
+  eq("an ended chat not folded: Fold now, Resume, Delete", acts("ended"), ["Fold now", "Resume", "Delete"]);
+  eq("…folded: Resume, Delete", acts("ended", { state: "done", commit: "a", reverted: false }), ["Resume", "Delete"]);
+  eq("…its transcript gone: both refused, with the reason", acts("ended", null, false, true), ["Fold now (Its transcript is gone.)", "Resume (Its transcript is gone.)", "Delete"]);
+  eq("…another chat folding", acts("ended", null, false, false, "Naming"), ["Fold now (“Naming” is folding. Close this one after.)", "Resume (A chat of this workspace is folding. Resume it after.)", "Delete"]);
+}
+
 // ── its name ──
 eq("the engine's own names", ["Chat 3", "Chat three", "Chat 3b", "Release order"].map(W.isDefaultTitle), [true, false, false, false]);
 eq("from the first line, whole", W.titleFrom("\n  Which   ships first?\nand why"), "Which ships first?");
@@ -162,6 +174,22 @@ eq("no server, or one that cannot run: said; read-only: said; installed: nothing
   eq("it carries the chat's bus address and how to read it", [r.includes(`workspace:${ws}/${conv}`), /place_status/.test(r), /read_chat/.test(r), /“Release order”/.test(r)], [true, true, true, true]);
   eq("a title cannot close the reference or break the line", W.chatReference(ws, conv, "a]b\nc[d"), `[workspace chat “a b c d” · workspace:${ws}/${conv} · its state: place_status; what it said: read_chat; message it: report]`);
   eq("no title: still named", /“a workspace chat”/.test(W.chatReference(ws, conv, "  ")), true);
+}
+
+// ── which harness a chat starts on (workspace-chat-provider.md) ──
+{
+  const core = read("../../crates/worktrees-core/src/workspacechats.rs");
+  const fn = core.slice(core.indexOf("pub fn harness_refusal"), core.indexOf("pub fn pick("));
+  const words = Object.fromEntries([...fn.matchAll(/"(\w+)" => Some\("([^"]+)"\)/g)].map((m) => [m[1], m[2]]));
+  eq("core refuses codex, kimi and pi in words", Object.keys(words), ["codex", "kimi", "pi"]);
+  const mock = read("../src/mock/install.ts");
+  const table = mock.slice(mock.indexOf("const MOCK_CHAT_REFUSAL"), mock.indexOf("};", mock.indexOf("const MOCK_CHAT_REFUSAL")));
+  for (const [h, w] of Object.entries(words)) eq(`the mock says core's words for ${h}`, table.includes(`${h}: "${w}"`), true);
+  eq("the last pick, while its harness can start", W.pickFor({ harness: "claude", model: "opus" }, [{ id: "claude", label: "Claude" }]), { harness: "claude", model: "opus" });
+  eq("…a pick whose harness is refused now falls back to Claude's default", W.pickFor({ harness: "codex", model: "x" }, [{ id: "codex", label: "Codex", why: "no" }]), { harness: "claude", model: "" });
+  eq("…none: Claude's default", [W.pickFor(undefined, undefined), W.pickFor({ harness: "codex", model: "" }, undefined)], [W.DEFAULT_PICK, W.DEFAULT_PICK]);
+  const c = chat("m", { session: "s~m", model: "claude-sonnet-5-5" });
+  eq("the header names the started model until it replies, then the reply's", [W.modelWords(c, ev({ live: ["s~m"] }), true), W.modelWords(c, ev({ live: ["s~m"], model: { "s~m": "Opus 5.5" } }), true), W.modelWords(chat("n"), null, false)], ["claude-sonnet-5-5", "Opus 5.5", null]);
 }
 
 if (failed) { console.log(`\nwschats-check: ${failed} failed`); process.exit(1); }

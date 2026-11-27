@@ -366,6 +366,9 @@ pub struct Launch<'a> {
     pub opener: Option<String>,
     /// `--settings` for this session alone (`AiLaunch::session_settings`).
     pub settings: Option<String>,
+    /// `--model`, on every launch of it; none is Claude's own default. A
+    /// value `choice::validate_model` passed, quoted for the shell here.
+    pub model: Option<&'a str>,
     /// `KEY=VALUE` the session's Claude is started with (`AiLaunch::env`), and
     /// every process it starts inherits: a workspace chat's name, which is how
     /// its MCP server learns which chat it serves.
@@ -400,6 +403,11 @@ impl Launch<'_> {
             return Err(format!("{} run Claude, and the configured command ({ai_cmd:?}) is not Claude", self.kinds));
         }
         let mut ai = crate::profile::AiLaunch::plain(ai_cmd);
+        if let Some(m) = self.model {
+            crate::choice::validate_model(m)?;
+            ai.cmd.push_str(" --model ");
+            ai.cmd.push_str(&crate::profile::shell_quote(m));
+        }
         ai.prompt_hook = prompt_hook;
         ai.session_settings = self.settings.clone();
         ai.env = self.env.clone();
@@ -498,7 +506,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let conv = crate::ulid::new();
         let sid = new_uuid();
-        let mut l = Launch { cwd: &dir, session: "worktrees~ws~x", conv: &conv, session_id: &sid, how: Start::Fresh, opener: None, settings: None, env: vec![("WT_PROBE".into(), "a b".into())], noun: "chat", a_kind: "a chat", kinds: "chats" };
+        let mut l = Launch { cwd: &dir, session: "worktrees~ws~x", conv: &conv, session_id: &sid, how: Start::Fresh, opener: None, settings: None, model: None, env: vec![("WT_PROBE".into(), "a b".into())], noun: "chat", a_kind: "a chat", kinds: "chats" };
         let pane = l.pane0("claude", vec![]).unwrap();
         // The inner `-ic` string, run by a plain sh with a fake claude.
         let inner = pane.split_once(" -ic ").unwrap().1;

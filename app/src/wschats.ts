@@ -12,7 +12,9 @@ export type ChatFold = { asked?: string; asked_ms?: number; left?: number; state
 export type FoldNow = { state: string; why: string | null; left?: number | null };
 /** `workspace_chats`' row. */
 export type WsChat = {
-  id: string; harness: string; session_id: string; title: string; started: string; last_activity: string; note: string;
+  id: string; harness: string; session_id: string; title: string;
+  /** The model it was started on; absent: the harness's default. */
+  model?: string; started: string; last_activity: string; note: string;
   fold?: ChatFold; fold_now?: FoldNow | null; session: string; state: ConvState; note_exists: boolean;
   /** Started by Tidy… (`workspacechats::Chat::tidy`). */
   tidy?: boolean;
@@ -27,7 +29,20 @@ export type ProjectRead = { root: string; name: string | null; registered: boole
 export type DocRead = { kind: "plan" | "idea"; id: string; live: string | null; title: string | null; path: string | null; reads: string; why?: string };
 export type WsChats = { id: string; name: string; folder: string; chats: WsChat[]; projects: ProjectRead[]; documents?: DocRead[];
   /** What its rules stop and what they do not. */
-  limits?: string };
+  limits?: string;
+  /** Each harness a chat could start on, and why it cannot (`workspacechats::harness_picks`). Absent from an older engine. */
+  harnesses?: HarnessPick[] };
+export type HarnessPick = { id: string; label: string; why?: string };
+/** What a new chat starts on. `model` "": the harness's own default. */
+export type ChatPick = { harness: string; model: string };
+export const DEFAULT_PICK: ChatPick = { harness: "claude", model: "" };
+/** The pick to start with: the workspace's last one while its harness can
+ *  still start a chat, else Claude on its default. */
+export function pickFor(last: ChatPick | undefined, picks: readonly HarnessPick[] | undefined): ChatPick {
+  if (!last) return DEFAULT_PICK;
+  const h = picks?.find((p) => p.id === last.harness);
+  return (h ? !h.why : last.harness === "claude") ? last : DEFAULT_PICK;
+}
 /** `workspaces:sessions`. */
 export type WsSessionsEv = DeskEv & {
   chat_of: Record<string, { workspace: string; chat: string }>;
@@ -42,6 +57,9 @@ export type WsSessionsEv = DeskEv & {
 
 /** The model a chat's header names: a live chat's, as the push last said it. */
 export const modelOf = (c: WsChat, ev: WsSessionsEv | null, live: boolean): string | null => (live ? ev?.model?.[c.session] ?? null : null);
+/** The header's model words: the model it last replied with, else the one it
+ *  was started on, else none. */
+export const modelWords = (c: WsChat, ev: WsSessionsEv | null, live: boolean): string | null => modelOf(c, ev, live) ?? c.model ?? null;
 
 /** What the workspaces' chats need a person for, from one push, as keys for
  *  notify.ts's set: `waiting|<session>` for a chat stopped on a prompt (its
@@ -153,6 +171,36 @@ export function endedLine(c: WsChat, transcriptGone: boolean): { text: string; f
   return { text: f.commit ? "Closed and folded into memory." : "Closed. No memory changes.", foldNow: false, resume: true };
 }
 export const transcriptGone = (reason: string | undefined): boolean => !!reason && /no longer on disk/.test(reason);
+
+/** One act on a chat. The chat's header and its rows' right-click menu offer
+ *  the same ones, from [`chatActs`]. */
+export type ChatAct = "close" | "close-none" | "fold-now" | "resume" | "delete";
+export type ChatActItem = { act: ChatAct; label: string; title: string;
+  /** Why it would be refused now: the item is shown and cannot be pressed. */
+  why: string | null };
+export const ACT_TITLE: Record<ChatAct, string> = {
+  close: "Close it: it writes what is worth keeping into the workspace's memory first. You can undo that.",
+  "close-none": "End it and write nothing. It stays here to read, and can be folded later.",
+  "fold-now": "Write what is worth keeping into the workspace's memory",
+  resume: "Start it again where it left off",
+  delete: "Forgets this chat and its folder here. Its note in memory stays, and so does Claude's own transcript.",
+};
+const ACT_LABEL: Record<ChatAct, string> = { close: "Close", "close-none": "Close without folding", "fold-now": "Fold now", resume: "Resume", delete: "Delete" };
+/** What may be done to chat `r`, by its state, and why an act would be refused.
+ *  `running`: its own fold has not ended. `gone`: its transcript is gone.
+ *  `other`: the title of another chat of its workspace that folds now (the
+ *  engine folds one at a time, `workspacefolds::free`). */
+export function chatActs(r: ChatRow, running: boolean, gone: boolean, other: string | null): ChatActItem[] {
+  const item = (act: ChatAct, why: string | null = null): ChatActItem => ({ act, label: ACT_LABEL[act], title: ACT_TITLE[act], why });
+  const busyElse = other ? `“${other}” is folding. Close this one after.` : null;
+  if (r.live) return [item("close", running ? "It is folding into memory." : busyElse), item("close-none"), item("delete")];
+  const e = endedLine(r.chat, gone);
+  const out: ChatActItem[] = [];
+  if (e.foldNow || gone) out.push(item("fold-now", gone ? "Its transcript is gone." : busyElse));
+  if (e.resume || gone) out.push(item("resume", gone ? "Its transcript is gone." : other ? "A chat of this workspace is folding. Resume it after." : null));
+  out.push(item("delete"));
+  return out;
+}
 /** A fold that failed, in the engine's own words. It never says more than they do. */
 export const failedWords = (f: FoldNow): string => `The fold did not finish: ${f.why ?? "no reason was given"}`.replace(/([^.!?])$/, "$1.");
 

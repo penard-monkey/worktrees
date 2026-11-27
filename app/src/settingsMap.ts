@@ -154,6 +154,8 @@ export const PLACE_MEMORY_KEYS = [
   "files_open", "files_open_at", "collapsed", "manual_order",
   // a named workspace's folding, and its projects' (workspaces.ts)
   "ws_collapsed",
+  // each workspace's last New chat pick (WorkspaceChat.tsx `NewChatMore`)
+  "ws_chat_pick",
   // which rows have their lanes folded (lane-children §5.1)
   "lane_folded",
 ] as const;

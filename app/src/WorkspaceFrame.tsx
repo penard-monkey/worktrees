@@ -124,7 +124,7 @@ export function WorkspaceFrame(props: {
   side: "chat" | "docs";
   setSide(side: "chat" | "docs"): void;
   /** In the bar, once there are chats. */
-  newChat: { busy: boolean; run(): void } | null;
+  newChat: { busy: boolean; run(): void; more?: React.ReactNode } | null;
   firstChat(): void;
   chatsTab: ReactNode;
   dockLeft: boolean;
@@ -180,7 +180,7 @@ export function WorkspaceFrame(props: {
                 <button className={"agent-view-b" + (one === "docs" ? " on" : "")} aria-pressed={one === "docs"} data-testid="ws-side-docs" onClick={() => props.setSide("docs")}>Documents</button>
               </span>
             )}
-            {props.newChat && <button className="enter-btn sm" data-testid="ws-frame-new-chat" data-track="workspace.chat.new" disabled={props.newChat.busy} onClick={props.newChat.run}>New chat</button>}
+            {props.newChat && <button className="enter-btn sm" data-testid="ws-frame-new-chat" data-track="workspace.chat.new" disabled={props.newChat.busy} onClick={props.newChat.run}>New chat</button>}{props.newChat?.more}
             <button className="icon-btn" data-testid="ws-frame-menu" data-track="nav.workspace.menu" title="workspace menu" onClick={props.onMenu}><Icons.Ellipsis size={15} /></button>
           </span>
         </header>
