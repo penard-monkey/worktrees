@@ -656,9 +656,15 @@ html[data-places-side="right"] .rail-group .rail-icon.active::before { left: aut
  * hover/selection targets don't shrink. Depths: project-h(0) → main row +
  * group headers(1) → group rows(2) → dormant subdiv(2) → dormant rows(2.5). */
 .kids > .places .row { padding-left: var(--dotcol); } /* (main): dot shares the project rollup's column */
-.group > .places .row { padding-left: calc(var(--s3) + var(--ind) * 2); }
+/* A tier's rows are a tree of lanes (lane-children §5): `--lbase` is the
+ * tier's own row indent, and a row adds `--lvl` steps of `--lstep` (the depth
+ * stop, `lanetree.indentOf`: 14px to level 4, 8px to level 3 under 280px). */
+.group > .places { --lbase: calc(var(--s3) + var(--ind) * 2); }
 /* depth-3 (dormant rows) takes a half-step: full 3× starves slugs at min nav width */
-.subgroup > .places .row { padding-left: calc(var(--s3) + var(--ind) * 2.5); }
+.subgroup > .places { --lbase: calc(var(--s3) + var(--ind) * 2.5); }
+.group > .places .row, .subgroup > .places .row {
+  padding-left: calc(var(--lbase) + var(--lvl, 0) * var(--lstep, 0px));
+}
 
 /* ── plumb lines: ancestor spines make depth DRAWN, not inferred ──
  * Each parent drops a 1px rail through its children's gutter; selecting a row
@@ -772,6 +778,9 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 .status-dot.done.unread::after {
   content: ""; position: absolute; inset: -6px; border-radius: var(--r-full);
   border: 1px solid color-mix(in srgb, var(--done) 60%, transparent);
+  /* It overhangs into the lane caret's column (lane-children §5.1): a press
+     there is the caret's, never the ring's. */
+  pointer-events: none;
 }
 /* a place being created — accent, not --ok: this is the app working, not a
    session. Same `breathe` as .busy so "something is happening" reads the same
@@ -4287,3 +4296,50 @@ body.dragging .ws-h { cursor: grabbing; }
   background: transparent; border-color: var(--line); color: var(--txt-mute);
   cursor: not-allowed; opacity: 0.7;
 }
+
+/* ── lanes started by a lane (docs/proposals/lane-children.md §5) ──
+ * Rails: one 1px line per level above the row, each under that ancestor's dot
+ * (a row's dot is the first 8px of its 14px column, so its centre is the
+ * indent + 4px). Drawn inside the row, so they paint over its hover fill. */
+.lane-rails {
+  position: absolute; top: 0; bottom: 0; pointer-events: none;
+  left: calc(var(--lbase) + 4px); width: calc(var(--lvl) * var(--lstep));
+  background: repeating-linear-gradient(to right, var(--guide) 0 1px, transparent 1px var(--lstep));
+}
+html[data-guides="off"] .lane-rails { display: none; }
+/* The caret: left of the dot, the row's full height, on its own level's rail. */
+.lane-caret {
+  position: absolute; top: 0; bottom: 0; width: 14px; z-index: 1;
+  left: calc(var(--lbase) + var(--lvl, 0) * var(--lstep, 0px) - 14px);
+  display: grid; place-items: center; padding: 0; border: 0; border-radius: var(--r-sm);
+  background: none; color: var(--txt-mute); cursor: pointer;
+}
+.lane-caret:hover { color: var(--txt-hi); }
+.lane-caret:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.lane-caret:disabled { opacity: 0.4; cursor: default; }
+/* Past the depth stop the level shows as a number before the name. */
+.lane-lvl {
+  font-size: var(--fs-micro); color: var(--txt-mute); margin-right: 4px;
+  font-variant-numeric: tabular-nums; font-style: normal;
+}
+/* A folded row's pill: how many lanes it hides, and their roll-up dot. Hue in
+ * the dot only; the number is text. */
+.lane-pill {
+  flex: none; display: inline-flex; align-items: center; gap: 3px;
+  padding: 0 5px; border-radius: var(--r-full); border: 1px solid var(--line-strong);
+  color: var(--txt-dim); font-variant-numeric: tabular-nums; line-height: 1.4;
+}
+.lane-pill-dot { width: 6px; height: 6px; border-radius: var(--r-full); flex: none; }
+.lane-pill-dot.waiting { background: var(--warn); }
+.lane-pill-dot.busy { background: var(--ok); }
+.lane-pill-dot.done { background: var(--done); }
+/* A ghost: a starter drawn where its real row is not (§5.4). */
+.row.ghost .row-name { font-style: italic; color: var(--txt-dim); }
+.lane-tier {
+  flex: none; font-size: var(--fs-micro); text-transform: uppercase; letter-spacing: 0.06em;
+  border: 1px solid var(--line-strong); border-radius: var(--r-sm); padding: 0 4px; color: var(--txt-dim);
+}
+/* The place header's line (§8): one ellipsised row, the rest in its tooltip. */
+.status-cluster .lane-line { min-width: 0; max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--txt-dim); }
+.status-cluster .lane-line.link { cursor: pointer; }
+.status-cluster .lane-line.link:hover { color: var(--txt-hi); }

@@ -467,6 +467,10 @@ export type Settings = {
   // `wsProjectKey(id, root)` — apart from `collapsed`, so folding a project in
   // a workspace leaves All projects alone.
   ws_collapsed: Record<string, boolean>;
+  // Lanes started by a lane (docs/proposals/lane-children.md §5.1): a row
+  // whose lanes are folded away, keyed `<repo>|<slug>`. Absent = open, the
+  // default. Per viewer, like the other folds.
+  lane_folded: Record<string, boolean>;
   // Settings → General → Beta features → Ideas (the Ideas window, its rail
   // button and ⌘⇧I). Off by default; read ONLY through `beta.ts`
   // (`ideasBeta`), and by the shim at launch (companion.rs `BETA`), which never
@@ -639,6 +643,7 @@ export const DEFAULTS: Settings = {
   collapsed: {},
   nav_view: "projects",
   ws_collapsed: {},
+  lane_folded: {},
   beta_ideas: false,
   beta_group_chat: false,
   beta_workspace_chats: false,
@@ -1002,6 +1007,7 @@ export async function loadSettings(): Promise<Settings> {
     if (typeof s.projects_parent !== "string") s.projects_parent = "";
     if (s.nav_view !== "workspaces") s.nav_view = "projects";
     if (!s.ws_collapsed || typeof s.ws_collapsed !== "object") s.ws_collapsed = {};
+    if (!s.lane_folded || typeof s.lane_folded !== "object") s.lane_folded = {};
     if (s.beta_ideas !== true) s.beta_ideas = false;
     if (s.beta_group_chat !== true) s.beta_group_chat = false;
     if (s.beta_workspace_chats !== true) s.beta_workspace_chats = false;

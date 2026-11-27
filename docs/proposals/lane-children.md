@@ -5,8 +5,10 @@ title: "Proposal: lanes started by a lane show under it"
 # Proposal: lanes started by a lane show under it
 
 **Status:** design, revision 2, 2026-11-25. **The engine half is built**
-(§11 steps 1 to 7, branch `feat/lane-children`, 2026-11-25); the nav, the
-header lines and the remove dialog wait for the workspace view. Where the
+(§11 steps 1 to 7, in #706). **The nav half is built** (steps 8 and 9,
+branch `feat/lane-children-nav`, 2026-11-27): the tree, ghosts, pills, the
+depth stop, folds, the menu, the header line and the remove dialog's
+sentence; step 10, the sandbox drive, is not done. Where the
 build departs from revision 2, this text now says what the code does, and
 §14 lists each change. The owner answered
 the twelve choices of revision 1 on 2026-11-25 (§12). Items marked **owner to
@@ -732,6 +734,23 @@ Changed in this text to match the code, 2026-11-25:
 | §8 MCP tool | `adopt_place { place, under? }` | Also `reset`; advertised only with `--mutations` |
 | §9 `place_status` | `lineage` and `started: [slugs]` | `started` is inside `lineage` |
 | §9 who sees what | Not specified | A starter in another project is the one cross-project reference a row can make. For a paired device whose scope is a list, and an MCP server whose cross-project reach is `off`, `lineage.starter` and `declared.started_by` are cut to `{at, elsewhere: true}` (`lineage::cut_foreign_starter`; serve's `scope`, MCP `list_places`/`place_status`). The scope is roots and the starter names a registry name, so even a project the device does see is cut. Every other lineage field names places of the row's own project, which such a caller may list anyway; `scope.rs` reads `Lineage` and fails on a field in neither list. |
+
+The nav half, 2026-11-27:
+
+| Where | Revision 2 said | The build does |
+|---|---|---|
+| §5.3 pill | Beside the name | At the head of the row's glyphs, before `↑`: the name column is two lines (name, branch). It takes 36 px from the name at 300 px, not 29. |
+| §5.4 ghost | Name in italics, the real tier in a label | Also for a starter in the SAME tier that the filter hides (§5.6's context rows): those have no tier label. A ghost has a caret and folds like a row; a fold on it counts only real rows. |
+| §5.6 drag | "A drop among another parent's rows is refused" | Refused with a hint naming the starter and the menu. The row just after the family counts as the family's end, because the gap for "after the last sibling" opens above it (found in WebKit: without it the end of a family refused itself). |
+| §5.5 project badge | Change to waiting first | Already waiting first on main (#706, `wsview.rollupOf`); the pill uses the same function. |
+| §8 header lines | One line each | One chip in the top bar's status cluster, the lines joined with " · " and all of them in its tooltip; a click selects the starter. The top bar is one row. "(closed)" means the starter's session is not up. |
+| §1 a lane a workspace chat started | Not covered | Drawn at the top level: `lineage.parent` names places only. |
+| §13 rails | Not tried | Drawn inside each row (`.lane-rails`), so they paint over the row's hover fill. |
+
+`app/src/lanetree.ts` lays a tier out from `lineage.parent` and holds the
+header and remove wording (`lanetree-check.mjs`, which reads
+`ops::handoff_sentence` for the second); `lanetree-browser.mjs` drives the
+mock in Chromium and WebKit at 300, 240 and 220 px.
 
 The mock (`app/src/mock/install.ts`, `?lanes`) carries a second copy of the
 rule, `lineageOf`. `app/scripts/lineage-check.mjs` holds it to core:
