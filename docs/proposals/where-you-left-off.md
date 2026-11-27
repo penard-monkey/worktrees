@@ -4,7 +4,12 @@ title: Where you left off, and the helper
 
 # Where you left off, and the helper
 
-**Investigation, 2026-11-27. Nothing is built.** The owner's idea
+**Investigation, 2026-11-27. Nothing is built. The owner answered the ten
+decisions the same day: §10 records the answers and §11 says what they
+change. Where §11 differs from an earlier section, §11 wins** (the character
+is now a Blender model, and the model may be a local one).
+
+The owner's idea
 ("Worktrees where you left off", 2026-11-10): on coming back after a while,
 a VERY short digest across every project's recent sessions, from a helper
 drawn from the app's icon that can point at things and be told "next" and
@@ -425,21 +430,170 @@ Rejected, a line each:
 
 Stage 1 is useful by itself. Stages 3 and 4 can swap.
 
-## 10. Decisions for the owner
+## 10. The owner's decisions (2026-11-27)
 
-1. **How long is "away"?** Four hours, first return of the day, or a setting.
-2. **Panel or dialog?** The note recommends a panel that does not take
-   focus; the idea says "dialog window".
-3. **May the app start a model by itself on return?** If yes, which model:
-   Haiku 5.5 (cheaper, about 11 s) or Sonnet 5.5 (about 5 s).
-4. **Should the Home list become the digest**, so the app has one answer?
-5. **Is the character worth one to two weeks**, and who draws the poses?
-6. **One tour at install, or tips that unlock** as the "evolve over time"
-   idea suggests?
-7. **Where do overarching goals live?** The digest can quote a workspace
-   plan's `## Goal` or its memory, and the one read here is empty. Should
-   the helper ask for a goal when it finds none?
-8. **Should it ever leave the app's windows?** The note says no.
-9. **Does the phone get the digest**, and does a return on the phone count
-   as a return on the desktop?
-10. **Does the helper have a name?**
+| # | Question | Decision |
+|---|---|---|
+| 1 | How long is "away"? | A gap of more than six hours; in practice the first return of the day. "For now". |
+| 2 | Panel or dialog? | The panel. |
+| 3 | May the app start a model by itself? Which? | Yes. The model should be configurable, and a small local one (the owner names Bonsai) is wanted. The feature may need a setup wizard. |
+| 4 | Should Home's list become the digest? | It can grow into it. The app must never switch to Home on return or move the owner from where they were. |
+| 5 | Is the character worth the time? Who makes the poses? | Yes, and it should look good. The owner has Unity experience and will build a jointed Blender model if needed. Poses may come from open or paid sites. |
+| 6 | One tour, or tips that unlock? | Both, with a list in Settings to see any of them again. |
+| 7 | Where do overarching goals live? | Undecided. They rest on knowledge about the owner that spans workspaces and is not collected yet. Ideas are asked for (§11.5). |
+| 8 | Should it leave the app's windows? | No. It can be hidden or shrunk to the rail, as the update notice is. |
+| 9 | Does the phone get the digest? | Eventually. The beta is for the main app. |
+| 10 | Does it have a name? | Choices wanted (§11.7); the user can rename him. |
+
+## 11. What the decisions change
+
+### 11.1 The return rule
+
+Show the panel when the gap since "last active" (§2.2) is more than six
+hours, at most once per calendar day, and only when something changed. This
+reads the answer as one rule; if "first return of the day" was meant as a
+second trigger for shorter gaps, the once-per-day gate becomes the trigger
+and the six hours go. The number stays one constant, not a setting, until
+the beta says otherwise.
+
+The panel opens over whatever the owner was looking at and never changes the
+selection. Closed, it shrinks to one icon in the rail, which reopens it, as
+`UpdateBubble` does. Home's "resume where you left off" list reads the same
+`digest` row, so Home and the panel give one answer.
+
+### 11.2 The model is a provider, and may be local
+
+The digest's writer becomes one setting with three kinds of value:
+
+| Provider | How it runs | Leaves the machine? |
+|---|---|---|
+| None | The list by rule only (stage 1) | No |
+| A harness | The headless run of §3.2, in the engine's own folder | Yes, to that harness's service |
+| A local endpoint | One POST of the cards to an OpenAI-style `/v1/chat/completions` URL with a model name | No |
+
+Bonsai is PrismML's family of 1-bit models (1.7B, 4B, 8B), run through
+PrismML's build of llama.cpp, whose `llama-server` exposes that endpoint; the
+8B is reported to need about 2 GB of memory (sourced, a DataCamp tutorial,
+one source: <https://www.datacamp.com/tutorial/run-bonsai-locally>). The same
+setting would reach Ollama or LM Studio. **Unmeasured:** no local model was
+run here, so its time and how much it invents are unknown. Both hosted models
+already added a little to 17 cards (§3.3), and a small model will likely add
+more, so two guards matter more with it:
+
+- The model returns card numbers and one line each. The engine builds every
+  link and drops a line whose number is not a card (§3.1).
+- The list by rule shows first and stays if the reply is late, malformed or
+  empty.
+
+A local endpoint also removes two costs of the harness run: the roughly 34K
+tokens of the harness's own prompt, and the question of hooks.
+
+The setting is the user's alone: host console only, and never read from a
+repository's config (ADR 0001), since it names a URL the engine will call.
+
+**The wizard** runs when the feature is first switched on, and again from
+Settings: choose the provider, run one real digest with it, and show the
+lines beside the list by rule with the time it took. It is the first content
+for the walkthrough's machinery (§6.3).
+
+### 11.3 The character: a Blender model, shown as rendered frames
+
+The owner chose quality over the SVG route, so §5.2's recommendation and the
+two "No" answers in §0 are replaced:
+
+- **3D first: yes.** Model the logo's figure in Blender with an armature.
+- **Motion capture: as reference and for a few clips,** not as the source of
+  every pose.
+
+How it reaches the app, two ways:
+
+| Way | Runtime | Points at a live target? | Cost |
+|---|---|---|---|
+| **Rendered frames** (recommended first) | None: transparent WebP sprite sheets drawn by CSS | In the directions rendered (say eight) | Assets of a few megabytes (unmeasured); a re-render for any change of look |
+| three.js with the model as glTF | A fourth admitted library, 742 KB, own chunk and boundary check | Yes, any angle | The library, plus lighting to match the interface |
+
+Start with frames: the `.blend` is the source either way, the app gains no
+library, and moving to three.js later reuses the same model and clips.
+Rendered frames are images, so `prefers-reduced-motion` shows one still.
+
+**A design question the rig forces.** The logo has a trunk, two arms, a head
+and one root. Captured human motion drives two legs, knees and elbows. Either
+the model gains them (and looks less like the logo), or it stays a
+one-stemmed figure and only the arms, head and lean take motion from a
+capture. The second keeps the mark recognisable; walking then becomes a hop
+or a slide, which is hand-keyed.
+
+**Where poses may come from** (licences as found; a paid or free licence that
+permits use in a product does not by that permit putting the files in a
+public repository):
+
+| Source | Terms found | Use here |
+|---|---|---|
+| Hand-keyed in Blender | Ours | Yes. Eight short gestures is days, not weeks, and has no licence question |
+| CMU Graphics Lab | Free, may be included in products, not resold as data (mirrors only, §5.3) | Yes |
+| 100STYLE | CC BY 4.0 | Yes, with credit |
+| Mixamo | Royalty free for commercial work when embedded in the project; the original files may not be redistributed (sourced: Adobe's FAQ, <https://helpx.adobe.com/creative-cloud/faq/mixamo-faq.html>, and Adobe community answers; the FAQ's full wording was not retrieved) | Yes for rendered frames. Keep the FBX files, and a `.blend` holding the retargeted clips, out of the public repository |
+| Rokoko Motion Library | "Export and use in any of your projects, including commercial ones"; 150 free moves, the rest $3 or $6 each (sourced, <https://rokoko.com/pricing/>). Redistribution terms not found | Likely as Mixamo; read its terms before buying |
+| Unity Asset Store | Assets may be used outside Unity, and the licence is reported to cover use "incorporated and embedded" in games and interactive media; rendered images are unclear and some publishers forbid them (forum quotes and a support article, not the licence text: <https://unity.com/legal/as-terms>) | Only with the publisher's written yes for that pack |
+| ActorCore (Reallusion) | Not found | Unverified |
+| AMASS, SFU, Bandai Namco, LAFAN1 | Non-commercial or research only | No |
+
+So the public repository holds the rendered sheets and a `.blend` with only
+our own or CC BY motion; anything from Mixamo or a paid library stays in a
+private working file.
+
+### 11.4 Tour and tips, and a list in Settings
+
+Both, on the one step list of §6.3: the tour at first install is the steps
+run in order, and a tip is one step shown when its condition first becomes
+true (the first project, the first lane, the first finished session). Each
+step has a stable id; a per-user record keeps which were seen. Settings gains
+a list of every step with "show again", which also restarts the tour.
+
+### 11.5 Overarching goals: ideas
+
+The digest can rank without goals, so this does not block stages 1 to 4.
+Options, not exclusive:
+
+| Idea | What it is | Risk |
+|---|---|---|
+| A. One goals document | A user-level file beside the workspaces, edited in the document pane, quoted by the digest | Empty until the owner writes it |
+| B. The helper proposes | From idea titles, workspace plans, briefs and pull-request titles of non-private projects, a model proposes three to five goals; nothing is saved until the owner accepts or edits a line | Guesses presented as the owner's aims; needs the accept step |
+| C. The helper asks | When a project has no goal, one question on return: "what is this for?" | Nagging; ask once per project |
+| D. Signals on digest rows | "Not now" and "this matters" on a row, kept as ranking weight | Opaque; the owner cannot read what it learned |
+
+Recommended start: A filled by B. One file the owner can read and correct,
+which the helper only ever proposes into. D only if ranking proves poor.
+Private projects never feed it. This is the first piece of the "evolve over
+time" idea's knowledge about the user, so it is worth its own idea file and
+decision before stage 2 quotes any goal.
+
+### 11.6 Stages, revised
+
+| Stage | Change | Size |
+|---|---|---|
+| 1. The digest by rule | Six hours and once a day; shrink to the rail; never changes the selection | About a week, unchanged |
+| 2. The model's lines | Provider setting with the local endpoint, the wizard, a measurement of one local model | About a week (was three to five days) |
+| 3. Walkthrough and tips | Tips with conditions, the seen record, the Settings list | One to two weeks (was about a week) |
+| 4. The character | Design and model, rig, eight clips, render pipeline, sprite playback and pointing | Three to five weeks, mostly in Blender (was one to two) |
+| 5. Talk to it | Unchanged | About a week |
+| 6. Later | The phone's digest; goals (§11.5) as its own work | Not sized |
+
+### 11.7 Names
+
+The figure is a small tree with raised arms. Default name choices, with the
+name a setting the user can change:
+
+- **Twig**: small, a branch, easy to say.
+- **Sprig**: the same, a little rarer.
+- **Rama**: "branch" in Spanish.
+- **Bud**: friendly, and something that grows.
+- **Arbor**: more formal.
+
+## 12. Still open
+
+1. Is the six-hour gap one rule with "once a day", or are they two triggers
+   (§11.1)?
+2. Does the model keep one stem, or gain legs (§11.3)?
+3. Which goals idea to try first (§11.5)?
+4. The default name (§11.7).
