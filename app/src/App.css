@@ -4116,7 +4116,7 @@ body.dragging .ws-h { cursor: grabbing; }
 .wsf-tab { flex: none; white-space: nowrap; padding: 7px var(--s2); border: 0; background: transparent; color: var(--txt); font-size: var(--fs-label); }
 .wsf-tab:hover { color: var(--txt-hi); }
 .wsf-tab.on { color: var(--txt-hi); font-weight: var(--fw-med); box-shadow: inset 0 -2px 0 var(--ws-hue); }
-.wsf-tab-n, .wsf-chip-n { margin-left: 5px; color: var(--txt-dim); font-size: var(--fs-meta); }
+.wsf-tab-n { margin-left: 5px; color: var(--txt-dim); font-size: var(--fs-meta); }
 .wsf-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 /* The Plan and Ideas tabs: their list, and the document. */
 .wsf-split { flex: 1 1 auto; min-height: 0; display: flex; }
@@ -4177,22 +4177,12 @@ body.dragging .ws-h { cursor: grabbing; }
 .wsf-attn { display: flex; align-items: center; gap: var(--s3); padding: var(--s2) var(--s3); border: 1px solid var(--line); border-left: 3px solid var(--warn); border-radius: 8px; background: var(--bg-panel); color: var(--txt-hi); font-size: var(--fs-label); }
 .wsf-attn-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); }
 .wsf-attn-t { flex: 1 1 0; min-width: 0; overflow-wrap: anywhere; }
-/* The documents row in a workspace's nav card. The row is its own container:
-   nothing in it is fixed. */
-.wsf-chips { display: flex; flex-wrap: wrap; gap: 4px; padding: 5px var(--s2) 4px; container-type: inline-size; border-bottom: 1px solid var(--line); }
-.wsf-chip {
-  flex: none; display: inline-block; white-space: nowrap; padding: 1px 7px; line-height: 1.5;
-  border: 1px solid var(--line-strong); border-radius: var(--r-sm); background: var(--bg-panel); color: var(--txt-hi); font-size: var(--fs-meta);
-}
-.wsf-chip:hover { background: var(--bg-elev); }
-.wsf-chip.none { border-style: dashed; background: transparent; color: var(--txt); }
 .wsf .ctrl:not(:disabled) { color: var(--txt-hi); }
-.wsf-chip.on { color: var(--txt-hi); background: var(--bg-elev); box-shadow: inset 0 -2px 0 var(--ws-hue); }
-.wsf-chip-i { margin-right: 4px; }
-.wsf-chip-i svg, .wsf-chip-f svg { display: inline-block; vertical-align: -2px; }
-.wsf-chip-f { margin-left: 4px; }
-.wsf-chip-dot { display: inline-block; width: 6px; height: 6px; margin-left: 5px; border-radius: 50%; background: var(--warn); vertical-align: 1px; }
-@container (max-width: 250px) { .wsf-chip-i { display: none; } .wsf-chip { padding: 1px 6px; } }
+/* A place whose session is up with no agent in it (App.tsx, place-no-agent). */
+.agent-stalled { margin: 0; padding: var(--s2) var(--s3); border-bottom: 1px solid var(--line); color: var(--txt-hi); font-size: var(--fs-label); background: var(--bg-panel); }
+/* A mark on a document's tab: text that is not saved, or (`.new`, in
+   WorkspaceMemory.css) a memory that changed since you looked. */
+.wsf-dot { display: inline-block; width: 6px; height: 6px; margin-left: 5px; border-radius: 50%; background: var(--warn); vertical-align: 1px; }
 
 /* ── a place's workspace (workspace-view-design.md §6; WorkspaceDock.tsx) ── */
 /* It gives way right after the project, down to its icon: the place keeps its name. */

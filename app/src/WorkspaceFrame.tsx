@@ -32,43 +32,6 @@ const splitNow = (): number => {
 /** A document that was floated: where it went, in its place. */
 export type Floated = { title: string; show(): void; here(): void };
 
-const TAB_ICON: Record<WsTab, ReactNode> = {
-  overview: null, memory: <Icons.BookText size={13} />, plan: <Icons.ListChecks size={13} />, ideas: <Icons.Lightbulb size={13} />, chats: <Icons.MessageSquare size={13} />,
-};
-
-/** The documents row in a workspace's nav card. A dashed chip has nothing
- *  behind it and still opens its tab. At the narrowest nav the icons go
- *  (App.css, by the row's own width). */
-export function DocChips(props: {
-  chips: readonly { tab: "memory" | "plan" | "ideas"; has: boolean; count?: number; on: boolean; floated: boolean; waits: boolean; fresh?: boolean }[];
-  open(tab: "memory" | "plan" | "ideas"): void;
-}) {
-  return (
-    <div className="wsf-chips" data-testid="ws-docs">
-      {props.chips.map((c) => {
-        const title = c.floated ? `${WS_TAB_LABEL[c.tab]}: in the Ideas window`
-          : c.waits ? `${WS_TAB_LABEL[c.tab]}: text that is not saved`
-          : c.fresh ? "Memory changed since you looked"
-          : c.has ? `Open ${WS_TAB_LABEL[c.tab]}` : c.tab === "memory" ? "No memory yet" : c.tab === "plan" ? "No plan" : "No linked ideas";
-        const inner = (
-          <>
-            <span className="wsf-chip-i" aria-hidden="true">{TAB_ICON[c.tab]}</span>
-            {WS_TAB_LABEL[c.tab]}
-            {c.count ? <span className="wsf-chip-n">{c.count}</span> : null}
-            {c.waits ? <span className="wsf-chip-dot" aria-hidden="true" /> : c.fresh ? <span className="wsf-chip-dot new" data-testid="memory-fresh" aria-hidden="true" /> : null}
-            {c.floated && <span className="wsf-chip-f" aria-hidden="true"><Icons.ExternalLink size={10} /></span>}
-          </>
-        );
-        const cls = "wsf-chip" + (c.on ? " on" : "") + (c.has ? "" : " none");
-        const act = { className: cls, title, "aria-current": c.on || undefined, onClick: () => props.open(c.tab) };
-        return c.tab === "memory" ? <button key={c.tab} data-testid="ws-doc-memory" data-track="nav.workspace.memory" {...act}>{inner}</button>
-          : c.tab === "plan" ? <button key={c.tab} data-testid="ws-doc-plan" data-track="nav.workspace.plan" {...act}>{inner}</button>
-          : <button key={c.tab} data-testid="ws-doc-ideas" data-track="nav.workspace.ideas" {...act}>{inner}</button>;
-      })}
-    </div>
-  );
-}
-
 /** The Plan tab's side: what the reader could not take, its Projects and Work. */
 function PlanSide(props: WsParts) {
   const { ov } = props;
@@ -132,6 +95,10 @@ export function WorkspaceFrame(props: {
   tabs: readonly WsTab[];
   tab: WsTab;
   counts: Partial<Record<WsTab, number>>;
+  /** A dot on a tab: `fresh` (the memory changed since you looked), `waits`
+   *  (its document holds text that is not saved). The nav's document chips
+   *  carried these until the owner took the chips out (2026-11-26). */
+  marks?: Partial<Record<WsTab, "fresh" | "waits">>;
   showTab(tab: WsTab): void;
   navButtons: ReactNode;
   onMenu(e: React.MouseEvent): void;
@@ -246,6 +213,8 @@ export function WorkspaceFrame(props: {
               {props.tabs.map((t) => (
                 <button key={t} role="tab" id={`wsf-tab-${t}`} aria-controls={t === tab ? `wsf-panel-${t}` : undefined} tabIndex={t === tab ? 0 : -1} className={"wsf-tab" + (t === tab ? " on" : "")} aria-selected={t === tab} data-testid="ws-tab" data-tab={t} onClick={() => props.showTab(t)}>
                   {WS_TAB_LABEL[t]}{props.counts[t] ? <span className="wsf-tab-n">{props.counts[t]}</span> : null}
+                  {props.marks?.[t] === "waits" ? <span className="wsf-dot" title="Text that is not saved" aria-label="text that is not saved" />
+                    : props.marks?.[t] === "fresh" ? <span className="wsf-dot new" data-testid="memory-fresh" title="Changed since you looked" aria-label="changed since you looked" /> : null}
                 </button>
               ))}
             </div>

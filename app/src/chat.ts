@@ -76,7 +76,7 @@ export type AskedStep = Extract<Step, { kind: "question" | "permission" | "plan"
 /** `agent_turns`' answer; `reason` only when no agent is running. */
 /** `ended`: an idea conversation read from its transcript with no session
  *  running (phase S), read-only. */
-export type AgentTurns = { harness?: string; session?: string; turns: Turn[]; more: boolean; note: string; reason?: string; ended?: boolean };
+export type AgentTurns = { harness?: string; session?: string; turns: Turn[]; more: boolean; note: string; reason?: string; ended?: boolean; not_started?: boolean };
 /** `prompt::Choice`. `checked` marks a multi-select's box; `text` a choice
  *  that takes free text: `field` IS a text field, `amend` takes an optional
  *  note. `host_only: "text"` on a field means it is empty. `preview` is what
@@ -199,6 +199,9 @@ export const AGENT_ERR = {
    *  <session> has written no session file yet`): its resume picker is up,
    *  or it is starting. */
   noSessionYet: "has written no session file yet",
+  /** A desk chat whose session is up with no Claude in it yet: pane 0 is
+   *  still the launch shell (`agents::ERR_NOT_STARTED`). */
+  notStarted: "claude has not started in this conversation yet; its terminal shows what it is waiting on",
 } as const;
 
 /** `harness::LINE_MAX`. */
@@ -366,6 +369,7 @@ export function sendWords(err: string, agent: string): SendWords {
     return { line: `${agent}’s input already has text in it, typed in the terminal. Send it or clear it there, then try again.`, terminal: true };
   }
   if (err === AGENT_ERR.noComposer) return { line: `${agent} isn’t at its prompt yet (starting up, or a screen this app doesn’t know). Try again in a moment.`, terminal: true };
+  if (err === AGENT_ERR.notStarted) return { line: "Claude hasn’t started here yet. Its terminal shows what it is waiting on.", terminal: true };
   if (err.startsWith(AGENT_ERR.noLanePrefix)) return { line: "No agent is running in this place." };
   // A host that takes one line here, whatever this client believed: an older
   // host's own words, and a dead end without the way out.

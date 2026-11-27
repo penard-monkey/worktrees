@@ -78,7 +78,7 @@ import { privacyArea, privacyWords } from "./privacypaths";
 import { PickPlace, StartReview } from "./StartWork";
 import { useGone } from "./useGone";
 import { NoMemory, WorkspaceOverview, type DocLite, type WsParts } from "./WorkspaceOverview";
-import { DocChips, WorkspaceFrame } from "./WorkspaceFrame";
+import { WorkspaceFrame } from "./WorkspaceFrame";
 import { ChatDot, ChatLines, ChatsTab, NavChats, RefusedStart, StartingChat, WorkspaceChatColumn } from "./WorkspaceChat";
 import { PickPlaceWs, WorkspaceDock, type DockDoc } from "./WorkspaceDock";
 import { useWsChats } from "./useWsChats";
@@ -10088,20 +10088,6 @@ function App() {
                 />
                 {open && (
                   <div className="ws-kids">
-                    {frameOn && (
-                      <DocChips
-                        chips={docChips({ ideas: ideasOn, chats: wsChatsOn }).map((tab) => ({
-                          tab,
-                          has: tab === "plan" ? !!w.plan : tab === "ideas" ? (w.ideas ?? []).length > 0 : !!wsMem.of(w.id)?.made,
-                          fresh: tab === "memory" && wsMem.unseen(w.id) && !(wsShown?.id === w.id && wsTabNow === "memory"),
-                          count: tab === "ideas" ? (w.ideas ?? []).length : undefined,
-                          on: !guestOpen && wsShown?.id === w.id && wsTabNow === tab,
-                          floated: !!floated && (tab === "memory" ? floated.source === memoryDocs(w.id) : tab === "plan" ? w.plan === floated.name : tab === "ideas" && (w.ideas ?? []).includes(floated.name)),
-                          waits: docStuck !== null && mainDoc?.ws === w.id && mainDoc.tab === tab,
-                        }))}
-                        open={(tab) => { void showWs(w.id, tab); setMenu(null); closeCtx(); hideNav(); }}
-                      />
-                    )}
                     {wsChatsOn && (
                       <NavChats
                         rows={chats}
@@ -10794,7 +10780,7 @@ function App() {
               />
             ) : selected && sel ? (
               <>
-                {liveHere.length === 0 && (
+                {liveHere.length === 0 && !selected.tmux_session.up && (
                   <div className="agent-actions" aria-label="Agents in this place">
                     {HARNESSES.map((provider) => (
                       <button key={provider} className="ctrl sm" onClick={() => requestOpenAgent(provider)}>
@@ -10856,6 +10842,30 @@ function App() {
                       </div>
                       );
                     })}
+                  </div>
+                ) : selected.tmux_session.up ? (
+                  /* A session with no agent in it: the launch stopped in the
+                     shell before the agent ran (an rc file's question, such as
+                     oh-my-zsh's update prompt, 2026-11-26). The snapshot's
+                     agent rows count agent panes only, so this used to fall
+                     through to "No live session" with no terminal, and nothing
+                     the user typed could reach the question. */
+                  <div className="agent-grid">
+                    <div className="agent-cell" data-testid="place-no-agent">
+                      <p className="agent-stalled" role="status">
+                        <b>The agent did not start here.</b> Its terminal is below. The shell may be waiting on a question, such as an update prompt. Answer it there.
+                      </p>
+                      <div className="agent-row">
+                        <div className="agent-body">
+                          <div className="agent-term">
+                            <TerminalPane key={selected.tmux_session.name + ":" + engineGen} session={selected.tmux_session.name}
+                              termVersion={termVersion} focusToken={termFocus}
+                              root={selected.path} onOpenPath={openPathFromTerm} onError={fail}
+                              findOpen={findOn === "main"} findToken={findToken} onFindClose={closeFind} />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 ) : (
                   /* No session, so nothing is competing for this space — and the
@@ -11032,6 +11042,10 @@ function App() {
                 tabs={tabsOf(wsShown?.id ?? null)}
                 tab={wsTabNow}
                 counts={{ ideas: wsShown?.ideas?.length ?? 0, chats: wsShown && wsChatsOn ? wsChats.of(wsShown.id)?.chats.length ?? 0 : 0 }}
+                marks={wsShown ? {
+                  ...(wsMem.unseen(wsShown.id) && wsTabNow !== "memory" ? { memory: "fresh" as const } : {}),
+                  ...(docStuck !== null && mainDoc?.ws === wsShown.id ? { [mainDoc.tab]: "waits" as const } : {}),
+                } : undefined}
                 newChat={wsShown && wsChatsOn && (wsChats.of(wsShown.id)?.chats.length ?? 0) > 0 ? { busy: wsStart?.ws === wsShown.id && wsStart.why === null, run: () => void startChat(wsShown.id) } : null}
                 middle={wsMiddle}
                 side={wsSide}

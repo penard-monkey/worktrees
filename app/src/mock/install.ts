@@ -7814,6 +7814,16 @@ let mockNotifyGranted = new URLSearchParams(location.search).get("notify") === "
   /** The agent replies in a place whose chat has been read (`mockAgentReply`):
    *  each text a reply block, then the turn stamped done so the chat re-reads.
    *  Returns the texts, or null when that place has no transcript yet. */
+  /** The place's session is up and no agent runs in it: pane 0 is still the
+   *  launch shell (an rc file's question stopped it). */
+  shellOnly(repo: string, slug: string) {
+    editPlace(repo, slug, (p) => {
+      if (p.agent_sessions) for (const h of Object.keys(p.agent_sessions) as (keyof typeof p.agent_sessions)[]) p.agent_sessions[h].up = false;
+      p.tmux_session = { name: p.tmux_session.name, up: true };
+      reconcile(p);
+    });
+    emitEvent("places:changed", {});
+  },
   agentReply(path: string, ...texts: string[]) {
     return mockAgentReply(path, texts);
   },

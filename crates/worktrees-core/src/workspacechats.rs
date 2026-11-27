@@ -1706,7 +1706,9 @@ pub fn chat_turns_at(root: &Path, claude_dir: &Path, ws: &str, c: &Chat, n: usiz
     let folder = folder_at(root, ws)?;
     let paths = crate::desksessions::transcript_paths(claude_dir, &folder, &c.session_id);
     let Some(path) = paths.iter().find(|p| p.is_file()) else { return Ok(Vec::new()) };
-    let lines = crate::activity::tail_lines_checked(path, crate::turns::TAIL_BYTES)?;
+    // `turns::window`, not a fixed tail: one long turn can fill a tail, and
+    // the turn before it would read back with no prompt (#711).
+    let lines = crate::turns::window(path, crate::provider::CLAUDE.id)?;
     Ok(crate::turns::claude_opened(&lines, n, &openers(&folder, c))
         .into_iter()
         .filter(|t| t.notice.is_none())
@@ -2791,6 +2793,30 @@ mod tests {
         add_made_at(&root, &ws, &c.id, "01JC90A1000000000000000001").unwrap();
         add_made_at(&root, &ws, &c.id, "01JC90A1000000000000000001").unwrap();
         assert_eq!(find_at(&root, &ws, &c.id).unwrap().made, vec!["01JC90A1000000000000000001".to_string()]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A chat whose last turn is longer than a fixed tail reads back with its
+    /// prompt (`turns::window`, #711), for `read_chat`.
+    #[test]
+    fn a_long_chat_reads_back_with_every_prompt() {
+        let root = std::env::temp_dir().join(format!("wt-longchat-{}", crate::ulid::new()));
+        let ws = crate::ulid::new();
+        let c = prepare_at(&root, &ws, |_| String::new()).unwrap();
+        let claude = root.join("claude");
+        let folder = folder_at(&root, &ws).unwrap();
+        let path = crate::desksessions::transcript_paths(&claude, &folder, &c.session_id).remove(0);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let big = "x".repeat(600 * 1024);
+        let mut lines = vec![r#"{"type":"user","uuid":"u1","timestamp":"2026-11-27T10:00:00Z","message":{"role":"user","content":"Where do backups go?"}}"#.to_string()];
+        for i in 0..5 {
+            lines.push(format!(r#"{{"type":"assistant","uuid":"a{i}","timestamp":"2026-11-27T10:00:0{i}Z","message":{{"role":"assistant","model":"m","content":[{{"type":"tool_use","id":"t{i}","name":"Read","input":{{"file_path":"/{big}"}}}}]}}}}"#));
+        }
+        lines.push(r#"{"type":"assistant","uuid":"z","timestamp":"2026-11-27T10:00:09Z","message":{"role":"assistant","model":"m","content":[{"type":"text","text":"To the NAS."}]}}"#.into());
+        fs::write(&path, lines.join("\n") + "\n").unwrap();
+        assert!(fs::metadata(&path).unwrap().len() > crate::turns::TAIL_BYTES, "longer than the old tail");
+        let t = chat_turns_at(&root, &claude, &ws, &c, 10).unwrap();
+        assert_eq!(t.last().and_then(|t| t.user.as_deref()), Some("Where do backups go?"), "{t:?}");
         let _ = fs::remove_dir_all(&root);
     }
 }

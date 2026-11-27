@@ -104,9 +104,11 @@ const tmuxTransport = (session: string, desk?: DeskTerm): Transport => {
   return {
     async open(cols, rows, onBytes) {
       // A desk chat's session is no place's, so it opens by the chat; what it
-      // answers is an attach like any other (a workspace's names the session too).
+      // answers is an attach id like any other. serve's rows answer the id
+      // alone: reading a workspace's as `[session, id]` left `id` undefined,
+      // and its terminal took no key (termopen-check.mjs).
       id = desk && "idea" in desk ? await invoke<number>("idea_term_open", { id: desk.idea.id, conv: desk.idea.conv, cols, rows, onBytes })
-        : desk ? (await invoke<[string, number]>("workspace_term_open", { id: desk.ws.id, conv: desk.ws.conv, cols, rows, onBytes }))[1]
+        : desk ? await invoke<number>("workspace_term_open", { id: desk.ws.id, conv: desk.ws.conv, cols, rows, onBytes })
         : await invoke<number>("term_open", { session, cols, rows, onBytes });
       return { replay: 0, replayCols: null };
     },
