@@ -11,6 +11,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 - **A workspace's view has a terminal.** With a workspace open (its chats, memory or overview, no place selected), the Terminal button in the right rail now works: its shells start in your home folder, and a new tab starts there too. Each workspace has its own tabs, and they are remembered like a place's: their names, the tab in front, the folder each was last in, its output and its command history all come back after a restart. Opening or closing the terminal in a workspace leaves every place's panels as they were. Files, Docs and Plan stay a place's. Removing a workspace closes its shells and forgets what they kept. These shells run on the computer worktrees runs on, so a paired device cannot open one.
 - A workspace chat that sits idle now hears a lane's report. When a report arrives, the app types one line into the chat: how many messages wait and who sent them, never their words. It does this only while the chat is idle, with nothing typed in its box and no question or fold up. It types once per batch and at most once a minute. A message from another chat never wakes it, so two chats cannot keep waking each other. Each line is kept in the audit log. Part of the Workspace chats beta.
 
+### Fixed
+
+- Workspace headers and the view switch no longer disappear when adding a project from the CLI coincides with a busy server. A failed workspace refresh keeps the last loaded list and retries automatically; a first load that fails can recover too.
+
 ## [0.55.0] - 2026-11-27
 
 ### Added

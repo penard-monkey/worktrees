@@ -200,8 +200,9 @@ ok(ungated("<NavViewSwitch"), "the Workspaces | All projects switch is behind no
 ok(ungated('testId="ctx-ws-add"') && ungated('data-testid="ctx-ws-remove"'), "a project's Add to workspace and Remove from workspace are behind no beta");
 ok(/const navView: NavView = wsList && settings\.nav_view === "workspaces"/.test(code), "the view follows nav_view once the list has loaded, whatever the beta says");
 ok(/navView === "workspaces" \? workspacesNav\(\)/.test(code), "the Workspaces view is drawn through navView");
-const eff = code.match(/useEffect\(\(\) => \{\s*let alive = true;\s*invoke<WsList>\("workspaces_list"\)[\s\S]*?\}, \[wsRegKey\]\);/)?.[0] ?? "";
-ok(eff.length > 0, "workspaces_list is fetched with no beta in its way (its effect keys on the registry alone)");
+const wsStart = code.indexOf("  const wsRegKey =");
+const eff = code.slice(wsStart, code.indexOf("}, [wsRegKey]);", wsStart) + "}, [wsRegKey]);".length);
+ok(/invoke<WsList>\("workspaces_list"\)/.test(eff) && /\}, \[wsRegKey\]\);/.test(eff) && !/ideasOn|frameOn|wsChatsOn/.test(eff), "workspaces_list is fetched with no beta in its way (its effect keys on the registry alone)");
 // The overview's own read (Ideas) keys on the list, so a changed plan is read
 // again; it never writes it. That one effect apart, no line ties the two.
 const ovEff = code.match(/useEffect\(\(\) => \{\s*if \(!ideasOn \|\| !wsFor\) \{ setWsOv\(null\); return; \}[\s\S]*?\}, \[ideasOn, wsFor, wsList, ideasTick\]\);/)?.[0] ?? "";
