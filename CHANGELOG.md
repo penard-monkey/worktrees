@@ -15,6 +15,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 - **Workspace chats use the same reference dock as lanes.** The right rail opens Overview, Memory, Plan, Ideas, Chats or Terminal. Use ⌘J, the active rail button or the dock’s close button to give the chat more room. The chat title menu holds read access, tool setup and Close. The chat still shows when it is folding or has no worktrees tools.
 
+### Fixed
+
+- **A Kimi lane that finished no longer shows as working.** Kimi Code 2.8 writes the end of a turn differently, and worktrees kept reading a finished Kimi lane as busy: a green dot with no done ring or age in the sidebar, `busy` from `place_status`, and a `wait` that never returned. It now reads both the old and the new log, so a Kimi lane is done when its turn ends, dated by Kimi's own record, and a turn that a background task's notice continues still counts as working.
+
+- **A long Kimi session shows its model again.** With Kimi Code 2.8, a Kimi lane whose log had grown past a few hundred kilobytes showed no model in the sidebar, the chat or `place_status`. worktrees now reads the model the session started on from the start of the log, once per session, and a `/model` switch made later still wins.
+
+- **`worktrees ls` shows a Kimi or Codex lane as open.** A lane whose agent runs in its own `~agent~kimi` or `~agent~codex` session, with no other session, showed `○` in the TMUX column while `ls --json` said its session was up. The column now uses the same rule as `--json`: `●` when the place has a session open, whichever it is.
+
 ## [0.55.0] - 2026-11-27
 
 ### Added
