@@ -38,6 +38,7 @@ fn applied(ctx: &Ctx) -> Option<Applied> {
 pub fn status_now(ctx: &Ctx) -> PresetStatus {
     let mut sources = serde_json::Map::new();
     sources.insert("codex_access".into(), json!(worktrees_core::codex::permissions_origin().1));
+    sources.insert("kimi_access".into(), json!(worktrees_core::kimi::permissions_origin().1));
     sources.insert("pi_trust".into(), json!(worktrees_core::trust::pi_trust_origin().1));
     PresetStatus { status: policy_presets::status_from(applied(ctx), policy_presets::current()), sources }
 }
@@ -79,6 +80,7 @@ pub fn apply_policy_preset(ctx: &Ctx, name: String, keys: Option<Vec<String>>) -
     };
     let result = (|| -> Result<(), String> {
         step("codex_access", &mut || crate::project::set_codex_permissions(ctx, v.codex_access.clone()))?;
+        step("kimi_access", &mut || crate::project::set_kimi_permissions(ctx, v.kimi_access.clone()))?;
         step("main_guard", &mut || {
             let s = worktrees_core::guidance::settings();
             crate::project::set_agent_guidance(s.enabled, v.main_guard).map(|_| ())

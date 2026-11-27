@@ -23,7 +23,8 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: u32 = 1;
+/// 2: Kimi permissions joined the set (2026-11-27).
+pub const VERSION: u32 = 2;
 
 /// The values a preset sets, in their own words and types.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -32,6 +33,8 @@ pub struct Values {
     /// `codex_permissions`: that is the window blob's mirror key, which
     /// hostpolicy-check.mjs keeps the frontend from reading anywhere else.
     pub codex_access: String,
+    /// `ask` / `ask-when-needed` / `never-ask` (`kimi::Permissions`).
+    pub kimi_access: String,
     /// `agent-guidance.json`'s `guard`.
     pub main_guard: bool,
     /// `never` / `ask` (`trust::PiTrust`).
@@ -46,8 +49,16 @@ pub struct Values {
 }
 
 /// Every key a preset sets, in the order `apply` sets them.
-pub const KEYS: [&str; 7] =
-    ["codex_access", "main_guard", "pi_trust", "cross_project", "quota_gate", "quota_weekly_pct", "max_live_agents"];
+pub const KEYS: [&str; 8] = [
+    "codex_access",
+    "kimi_access",
+    "main_guard",
+    "pi_trust",
+    "cross_project",
+    "quota_gate",
+    "quota_weekly_pct",
+    "max_live_agents",
+];
 
 impl Values {
     /// The keys whose values differ from `other`'s, in [`KEYS`] order.
@@ -55,6 +66,7 @@ impl Values {
         KEYS.into_iter()
             .filter(|k| match *k {
                 "codex_access" => self.codex_access != other.codex_access,
+                "kimi_access" => self.kimi_access != other.kimi_access,
                 "main_guard" => self.main_guard != other.main_guard,
                 "pi_trust" => self.pi_trust != other.pi_trust,
                 "cross_project" => self.cross_project != other.cross_project,
@@ -89,9 +101,10 @@ pub fn presets() -> Vec<Preset> {
         Preset {
             name: "cautious",
             label: "Cautious",
-            summary: "Codex asks before each command, Claude may not branch in (main), pi skips repo resources, agents see only their own project and stop at 80% of a weekly plan, and two may be live at once.",
+            summary: "Codex and Kimi ask before each command, Claude may not branch in (main), pi skips repo resources, agents see only their own project and stop at 80% of a weekly plan, and two may be live at once.",
             values: Values {
                 codex_access: "ask".into(),
+                kimi_access: "ask".into(),
                 main_guard: true,
                 pi_trust: "never".into(),
                 cross_project: "off".into(),
@@ -105,9 +118,10 @@ pub fn presets() -> Vec<Preset> {
         Preset {
             name: "balanced",
             label: "Balanced",
-            summary: "Codex's reviewer approves or refuses each command, pi skips repo resources, agents see only their own project and stop on a nearly spent plan, up to this machine's default number at once. Today's defaults.",
+            summary: "Codex's reviewer approves or refuses each command, Kimi asks only for risky ones, pi skips repo resources, agents see only their own project and stop on a nearly spent plan, up to this machine's default number at once. Today's defaults.",
             values: Values {
                 codex_access: "auto-review".into(),
+                kimi_access: "ask-when-needed".into(),
                 main_guard: false,
                 pi_trust: "never".into(),
                 cross_project: "off".into(),
@@ -121,9 +135,10 @@ pub fn presets() -> Vec<Preset> {
         Preset {
             name: "autonomous",
             label: "Autonomous",
-            summary: "Codex runs with no prompts and no sandbox, pi asks about each repo's resources, agents may read your other projects, and no plan check stops a launch.",
+            summary: "Codex runs with no prompts and no sandbox, Kimi never asks, pi asks about each repo's resources, agents may read your other projects, and no plan check stops a launch.",
             values: Values {
                 codex_access: "full".into(),
+                kimi_access: "never-ask".into(),
                 main_guard: false,
                 pi_trust: "ask".into(),
                 cross_project: "read".into(),
@@ -147,6 +162,7 @@ pub fn current() -> Values {
     let quota = crate::quota::policy_from(&text).policy;
     Values {
         codex_access: crate::codex::permissions().as_str().into(),
+        kimi_access: crate::kimi::permissions().as_str().into(),
         main_guard: crate::guidance::settings().guard,
         pi_trust: crate::trust::pi_trust().as_str().into(),
         cross_project: crate::reach::user_level().as_str().into(),
@@ -212,6 +228,7 @@ mod tests {
         let quota = crate::quota::policy_from("").policy;
         Values {
             codex_access: crate::codex::permissions_from(None, None).as_str().into(),
+            kimi_access: crate::kimi::permissions_origin_from(None, None, None).0.as_str().into(),
             main_guard: crate::guidance::settings_from(None, None).guard,
             pi_trust: crate::trust::pi_trust_origin_from(None, None, None).0.as_str().into(),
             cross_project: crate::reach::level_from(None).as_str().into(),
@@ -233,6 +250,7 @@ mod tests {
         for p in presets() {
             let v = &p.values;
             assert!(crate::codex::Permissions::parse(&v.codex_access).is_some(), "{}", p.name);
+            assert!(crate::kimi::Permissions::parse(&v.kimi_access).is_some(), "{}", p.name);
             assert!(crate::trust::PiTrust::parse(&v.pi_trust).is_some(), "{}", p.name);
             assert!(crate::reach::Level::parse(&v.cross_project).is_some(), "{}", p.name);
             if let Some(n) = v.quota_weekly_pct {

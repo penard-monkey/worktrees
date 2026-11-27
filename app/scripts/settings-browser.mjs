@@ -380,6 +380,7 @@ async function run(engine, name) {
   await pp.waitForSelector("[data-testid=preset-seg] button.on");
   const onPreset = () => pp.evaluate(() => document.querySelector("[data-testid=preset-seg] button.on")?.dataset.preset);
   const codexOn = () => pp.evaluate(() => document.querySelector("[data-testid=codex-permissions] button.on")?.dataset.testid);
+  const kimiOn = () => pp.evaluate(() => document.querySelector("[data-testid=kimi-permissions] button.on")?.dataset.testid);
   ok(await onPreset() === "balanced", `[${name}] a fresh host reads as Balanced (today's defaults)`);
   ok(await pp.locator("[data-testid=preset-modified]").count() === 0, `[${name}] …unmodified`);
   await pp.click("[data-testid=preset-compare]");
@@ -388,6 +389,7 @@ async function run(engine, name) {
   await pp.click("[data-preset=cautious]");
   await pp.waitForTimeout(500);
   ok(await onPreset() === "cautious", `[${name}] Cautious applies in one click`);
+  ok(await kimiOn() === "kimi-permissions-ask", `[${name}] …and sets Kimi to Always Ask`);
   ok(await codexOn() === "codex-permissions-ask", `[${name}] …and the section below re-reads what it wrote (Codex: Ask)`);
   await pp.click("[data-testid=codex-permissions-auto-review]");
   await pp.waitForTimeout(500);
@@ -405,6 +407,20 @@ async function run(engine, name) {
   await pp.click("[data-preset=autonomous]");
   await pp.waitForTimeout(500);
   ok(await onPreset() === "autonomous" && await codexOn() === "codex-permissions-full", `[${name}] …and a second click applies it`);
+  ok(await kimiOn() === "kimi-permissions-never-ask", `[${name}] …Kimi on Never Ask with it`);
+  // Kimi's own row: Never Ask is two clicks, like Full access; the others one.
+  await pp.click("[data-testid=kimi-permissions-ask-when-needed]");
+  await pp.waitForTimeout(400);
+  ok(await kimiOn() === "kimi-permissions-ask-when-needed", `[${name}] Kimi: Ask When Needed in one click`);
+  await pp.click("[data-testid=kimi-permissions-never-ask]");
+  await pp.waitForTimeout(150);
+  ok(await pp.locator("[data-testid=kimi-never-confirm]").count() === 1 && await kimiOn() === "kimi-permissions-ask-when-needed", `[${name}] Kimi: Never Ask asks first`);
+  await pp.click("[data-testid=kimi-permissions-never-ask]");
+  await pp.waitForTimeout(400);
+  ok(await kimiOn() === "kimi-permissions-never-ask", `[${name}] …and a second click sets it`);
+  ok(await pp.evaluate(() => { const b = document.querySelector("[data-testid=kimi-permissions-ask]")?.getBoundingClientRect(); return !!b && document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2)?.closest("[data-testid=kimi-permissions-ask]") != null; }),
+    `[${name}] Kimi: its buttons are reachable`);
+  if (SHOTS) await pp.locator("[data-sec=kimi-permissions]").screenshot({ path: `${SHOTS}/${name}-kimi-permissions.png` });
   if (SHOTS) await pp.locator(".settings-modal").screenshot({ path: `${SHOTS}/${name}-preset.png` });
 
   // ── Limits (§6 item 1) ───────────────────────────────────────────────────

@@ -24,6 +24,7 @@ readlink -f ~/.local/bin/codex   # the standalone installer lives under ~/.codex
 | §2 `prompt-input` (the fallback, AGENTS.md wins, repo skill roots), §6 `mcp add` overwrites | 0.171.0, 2026-11-23 | by hand, throwaway `CODEX_HOME`, no model call |
 | `--approve-for-me` and `--no-alt-screen` exist | 0.171.0, 2026-11-23 | `codex --help` only; no launch |
 | folder-trust screens | 0.160.1 | fixtures `codex-trust/0.160.1/` |
+| §3 auto-review in a linked worktree (both holes still needed; a TUI lane asked nothing in a 10-step run), §8 hooks review | 0.172.0, 2026-11-27 | by hand, scratch repo, own tmux server (`docs/proposals/harness-permission-modes.md`) |
 | everything else here | 0.157.1, 2026-09-26 | by hand; **not re-run since** |
 
 Use a SCRATCH repo for everything (e.g. `~/.cache/worktrees/worktrees/<tree>/probe`),
@@ -135,6 +136,23 @@ never a real project. Anything that pushes must point at a bare origin you made.
 - [ ] `/model` answered from the chat is for this session only: compare
       `~/.codex/config.toml` before and after. (In Codex's own picker, Enter on
       the effort list SAVES the pick there; `s` is the session-only key.)
+
+## 8. Hooks review
+
+Codex asks "Hooks need review" when a hook it would run (the user's plugins'
+`hooks/*.json`, e.g. planning-with-files and vercel) is new or its content
+changed since it was trusted. The answer is kept in `~/.codex/config.toml`
+under `[hooks.state."<plugin>:<file>:<event>:<i>:<j>"]` (`trusted_hash`,
+`trusted_content_hash`): once per hook, for every folder. worktrees passes no
+hook and never answers it.
+
+- [ ] With the hooks already trusted, a launch with worktrees' own flags (any
+      permission mode) shows NO hooks prompt in a brand-new scratch folder.
+      If it does, our flags changed what Codex hashes: that is our bug.
+- [ ] Note what triggers it on a fresh ask (a plugin update re-caching
+      `~/.codex/plugins/cache/...`). Do not answer it in a scratch run: every
+      answer writes the user's config. `--dangerously-bypass-hook-trust` /
+      `-c bypass_hook_trust=true` exist and must never be passed.
 
 ## Housekeeping
 
