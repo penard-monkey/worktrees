@@ -228,6 +228,7 @@ export const SECTIONS: readonly SectionDef[] = [
   // ── Layout
   { id: "sidebar", page: "layout", tier: "beginner", label: "Sidebar", keywords: ["nav", "navigation", "places list", "pin sidebar", "hide sidebar", "hover reveal"], keys: ["nav_pinned", "nav_hover_reveal"] },
   { id: "layout", page: "layout", tier: "beginner", label: "Layout", keywords: ["swap sides", "dock side", "places side", "move panels", "left", "right"], keys: ["places_side", "dock_side"] },
+  { id: "show-all", page: "layout", tier: "beginner", label: "Show all", keywords: ["quiet chrome", "sidebar details", "place header"], keys: ["quiet_chrome"] },
   { id: "nav-width", page: "layout", tier: "advanced", label: "Nav width", keywords: ["sidebar width", "places width", "wider sidebar", "nav size"], keys: ["nav_width"] },
   { id: "nav-tiers", page: "layout", tier: "advanced", label: "Nav tiers", keywords: ["hide idle places", "hide dormant places", "nav groups", "sidebar sections"], keys: ["hidden_tiers"] },
   { id: "dock-lower", page: "layout", tier: "advanced", label: "Terminal placement", keywords: ["terminal position", "terminal below", "split terminal", "reference column"], keys: ["dock_lower"] },

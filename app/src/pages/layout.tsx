@@ -126,6 +126,18 @@ export function LayoutPage() {
       </section>
     </Sec>
 
+    <Sec id="show-all">
+      <section className="setting">
+        <label className="tier-toggle setting-check">
+          <input type="checkbox" checked={!settings.quiet_chrome}
+            data-track="settings.layout.show_all"
+            onChange={(e) => onChange({ quiet_chrome: !e.currentTarget.checked })} />
+          Show all
+        </label>
+        <div className="hint">Keep secondary controls and details visible in Places and the place header.</div>
+      </section>
+    </Sec>
+
     <Sec id="nav-width">
       <section className="setting">
         <label>Nav width <span className="val">{settings.nav_width}px</span></label>

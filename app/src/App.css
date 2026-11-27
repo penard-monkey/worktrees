@@ -207,6 +207,8 @@ html[data-places-side="right"] .rail-group .rail-icon.active::before { left: aut
 }
 .icon-btn:hover { color: var(--txt-hi); background: var(--bg-elev); }
 .icon-btn.on { color: var(--pin); }
+.nav-show-all { white-space: nowrap; font-size: var(--fs-meta); }
+.nav-show-all[aria-pressed="true"] { color: var(--txt-hi); background: var(--bg-elev); }
 /* The Places header's attention filter: glyph + count on one line. `dim` is
    "nothing to look at" — still clickable, so the control never disappears out
    from under the eye that learned where it lives. */

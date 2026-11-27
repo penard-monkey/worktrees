@@ -10709,7 +10709,7 @@ function App() {
         SIBLING rather than a fifth row, because `.nav.overlay` is positioned
         `top: 0; bottom: 0` against `.app` — inside it, a revealed sidebar would
         cover the very thing the strip exists to keep on screen. */}
-    <div className="app" style={{ gridTemplateColumns: gridCols }}>
+    <div className="app" data-quiet-chrome={settings.quiet_chrome || undefined} style={{ gridTemplateColumns: gridCols }}>
       {/* ── activity rail ──
           ONE destination icon now (Places). The rail used to carry three lenses
           plus a separate hide button — four controls for two states, and the
@@ -10810,6 +10810,10 @@ function App() {
         <div className="nav-head">
           <button {...gripProps("places")}><Icons.GripVertical size={13} /></button>
           <span className="nav-title">PLACES</span>
+          <button type="button" className="icon-btn nav-show-all" aria-pressed={!settings.quiet_chrome}
+            data-track="nav.show_all" onClick={() => updateSettings({ quiet_chrome: !settings.quiet_chrome })}>
+            Show all
+          </button>
           {/* Attention is a FILTER here, not a lens of its own: the count is the
               whole answer most of the time, and the rows it would list are the
               rows already on screen. The count is over the WHOLE workspace. */}
