@@ -30,6 +30,16 @@ mk_wt() {
   git -C "$REPO" show-ref --verify --quiet refs/heads/feat-x
 }
 
+@test "close: a lane whose agent runs only in its sidecar session closes the sidecar" {
+  run_wt new feat-z --no-tmux
+  printf 'cwd=%s\ncmd0=kimi\n' "$REPO/.worktrees/feat-z" > "$TMUX_STATE/repo-feat-z~agent~kimi"
+  run_wt close feat-z
+  [ "$status" -eq 0 ]
+  grep -qF "closed Kimi tmux repo-feat-z~agent~kimi" <<<"$output"
+  ! tmux_session_exists "repo-feat-z~agent~kimi" || false
+  [ -d "$REPO/.worktrees/feat-z" ]
+}
+
 @test "close: no live session → friendly no-op, exit 0" {
   mk_wt feat-x
   run_wt close feat-x

@@ -400,11 +400,6 @@ this repo's settings in `.claude/close-out.md`).
   `kimi web`'s SIGTERM → exit against `kimi_usage::GRACE` (2 s, never
   measured; §9b only states it). See docs/sessions/2026-10-19-kimi-harness/
   and [2026-10-21 server-edition](docs/sessions/2026-10-21-server-edition/summary.md).
-- **`worktrees ls` shows `○` for a lane whose agent runs in a sidecar.** The
-  TMUX cell asks `owns_session(session_name(slug))` (`project.rs`), the
-  canonical name only, so a kimi (or Codex, pi) lane up in its `~agent~<id>`
-  session reads as down, while `ls --json` names the sidecar `up: true`.
-  Found by `fix/kimi-done-not-seen`.
 - **Copying an MCP server to Codex puts its literal env values on argv.**
   `mcpmigrate.rs:180` turns each literal `env` entry of a Claude user-scope
   stdio server (status `CopyLiteralEnv`, usually an API key) into

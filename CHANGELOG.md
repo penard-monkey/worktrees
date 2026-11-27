@@ -15,6 +15,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 - **A long Kimi session shows its model again.** With Kimi Code 2.8, a Kimi lane whose log had grown past a few hundred kilobytes showed no model in the sidebar, the chat or `place_status`. worktrees now reads the model the session started on from the start of the log, once per session, and a `/model` switch made later still wins.
 
+- **`worktrees ls` shows a Kimi or Codex lane as open.** A lane whose agent runs in its own `~agent~kimi` or `~agent~codex` session, with no other session, showed `○` in the TMUX column while `ls --json` said its session was up. The column now uses the same rule as `--json`: `●` when the place has a session open, whichever it is.
+
 ## [0.55.0] - 2026-11-27
 
 ### Added
