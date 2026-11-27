@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.55.0] - 2026-11-27
+
 ### Added
 
 - **Lanes started by a lane are drawn under it in the sidebar, at any depth.** A lane you or an agent start from inside another lane now sits under that lane, with a line from its starter and a caret to fold its lanes away. A folded row shows how many lanes it hides and one dot for them: amber when any of them waits for you, so folding never hides a question. A lane whose starter is closed stays in its own group, under a dim copy of the starter that says where the starter is. Filtering shows a match with its starters above it. In a narrow sidebar deep rows stop indenting and show their level as a number. Right-click a lane for **Move to top level**, **Move under…** and **Back to its starter**: they change only where it is drawn, not who started it or where its reports go. Dragging reorders a lane among its siblings, and its own lanes move with it. The place header says who started it, where it was moved, where its reports go and how many lanes it started, and the remove dialog says where a place's lanes go when it is removed.
