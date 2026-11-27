@@ -590,10 +590,15 @@ name a setting the user can change:
 - **Bud**: friendly, and something that grows.
 - **Arbor**: more formal.
 
-## 12. Still open
+## 12. Settled after §11 (2026-11-27)
 
-1. Is the six-hour gap one rule with "once a day", or are they two triggers
-   (§11.1)?
-2. Does the model keep one stem, or gain legs (§11.3)?
-3. Which goals idea to try first (§11.5)?
-4. The default name (§11.7).
+Nothing in this note is open any more.
+
+1. **The return rule is one rule** (§11.1): a gap of more than six hours, at
+   most once a day.
+2. **The model gains legs**, to see how it looks; they can be hidden if it
+   stops reading as the logo (§11.3). The rig is then a full human skeleton,
+   so captured clips retarget whole.
+3. **Goals start with A filled by B** (§11.5): one user-level goals document
+   that the helper proposes into and the owner accepts line by line.
+4. **The default name is Rama**, for now; the user can rename him (§11.7).
