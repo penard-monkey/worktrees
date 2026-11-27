@@ -22,8 +22,11 @@ const until = (page, fn, arg, ms = 6000) => page.waitForFunction(fn, arg, { time
 const call = (page, cmd, args) => page.evaluate(([c, a]) => window.__TAURI_INTERNALS__.invoke(c, a), [cmd, args]);
 const row = (page, title) => page.locator("[data-testid=ws-chat-row]", { hasText: title }).first();
 const colOf = (page, title) => until(page, (t) => document.querySelector("[data-testid=ws-chat-col] .wsc-name-t")?.textContent === t, title);
-const tab = (page, t) => page.click(`[data-testid=ws-tab][data-tab=${t}]`);
-const isTab = (page, t) => until(page, (t) => document.querySelector("[data-testid=ws-tab].on")?.dataset.tab === t, t, 2000);
+const tab = async (page, t) => {
+  const button = page.locator(`[data-workspace-panel=${t}]`);
+  if (await button.getAttribute("aria-pressed") !== "true") await button.click();
+};
+const isTab = (page, t) => until(page, (t) => document.querySelector("[data-testid=ws-frame]:not([hidden])")?.dataset.panel === t, t, 2000);
 const text = (page, id) => page.evaluate((id) => document.querySelector(`[data-testid=${id}]`)?.textContent ?? "", id);
 const fold = (page, ws, conv, st, why) => page.evaluate(([w, c, s, y]) => window.__mock.wsFold(w, c, s, y), [ws, conv, st, why ?? null]);
 
@@ -46,7 +49,7 @@ async function unsent(page, tag) {
   const named = () => page.evaluate(() => document.querySelector("[data-testid=ws-chat-col] .wsc-name-t")?.textContent ?? "");
   await until(page, () => /^Chat \d+$/.test(document.querySelector("[data-testid=ws-chat-col] .wsc-name-t")?.textContent ?? "") && document.querySelector("[data-testid=ws-chat-col]").dataset.state === "running", null, 10000);
   const was = await named();
-  await page.click("[data-testid=ws-chat-close]");
+  await page.click("[data-testid=ws-chat-menu]"); await page.click("[data-testid=ws-chat-close]");
   ok(await until(page, () => /^Closed and folded/.test(document.querySelector("[data-testid=ws-chat-ended]")?.textContent ?? ""), null, 10000), `${tag} a chat with no message is folded`);
   await page.waitForTimeout(400);
   ok(await named() === was && /^Chat \d+$/.test(was), `${tag} …and keeps its name (${await named()})`);
@@ -73,7 +76,7 @@ async function land(page, tag, name) {
   await tab(page, "plan");
   // (That the list's own word is drawn before a slower push is wschats-check.mjs's:
   // the mock pushes at once.)
-  await page.click("[data-testid=ws-chat-close]");
+  await page.click("[data-testid=ws-chat-menu]"); await page.click("[data-testid=ws-chat-close]");
   ok(await until(page, () => /Folding into memory…/.test(document.querySelector("[data-testid=ws-chat-folding]")?.textContent ?? ""), null, 700), `${tag} Close folds, and says so at once`);
   ok(await page.locator("[data-testid=ws-chat-col] textarea").count() === 0 && !!(await page.$("[data-testid=chat-list] li")) && await page.locator("[data-testid=ws-chat-folding] button").evaluateAll((b) => b.map((x) => x.textContent).join()) === "Show the terminal,Stop the fold", `${tag} the composer gives way to one line, the steps stay`);
   ok(/folding…/.test(await row(page, "Release order").innerText()) && await row(page, "Release order").getAttribute("data-state") === "folding" && await row(page, "Release order").locator(".wsc-dot.folding").evaluate((e) => getComputedStyle(e).boxShadow !== "none"), `${tag} its row says folding, with the halo`);
@@ -120,7 +123,7 @@ async function land(page, tag, name) {
   ok(await until(page, () => /Noted: “One more thing”/.test(document.querySelector("[data-testid=chat-list]")?.textContent ?? ""), null, 10000), `${tag} resumed, it goes on`);
   ok(await page.evaluate(() => { const r = document.querySelector("[data-testid=ws-chat-receipt]"), all = [...document.querySelectorAll("[data-testid=chat-list] [data-testid=chat-user]")]; return !!(r.compareDocumentPosition(all.at(-1)) & Node.DOCUMENT_POSITION_FOLLOWING); }), `${tag} …after the receipt, which stays where the fold was`);
   await until(page, () => document.querySelector("[data-testid=ws-chat-col]")?.dataset.state === "running", null, 8000);
-  await page.click("[data-testid=ws-chat-close]");
+  await page.click("[data-testid=ws-chat-menu]"); await page.click("[data-testid=ws-chat-close]");
   await page.waitForSelector("[data-testid=ws-chat-folding]");
   await page.evaluate((w) => window.__mock.memoryEdit(w, "topics/second.md", "# What the second fold wrote\n"), ws);
   ok(await until(page, () => !!document.querySelector("[data-testid=ws-chat-ended]"), null, 8000) && await log() === first + 1, `${tag} closed again, it folds again: one more change, and no double`);
@@ -133,11 +136,10 @@ async function edits(page, tag) {
   await colOf(page, "Release order");
   await tab(page, "memory");
   await page.waitForSelector("[data-testid=main-doc] [data-testid=ideas-mode-edit]");
-  await page.click("[data-testid=ws-side-toggle]");
   await page.click("[data-testid=memory-file][data-path='topics/nas-layout.md']");
   await page.click("[data-testid=main-doc] [data-testid=ideas-mode-edit]");
   await until(page, () => !!document.querySelector("[data-testid=main-doc] .cm-content"));
-  await page.click("[data-testid=ws-chat-close]");
+  await page.click("[data-testid=ws-chat-menu]"); await page.click("[data-testid=ws-chat-close]");
   ok(await until(page, () => /^Closed and folded/.test(document.querySelector("[data-testid=ws-chat-ended]")?.textContent ?? "")), `${tag} a fold lands while you edit`);
   await page.waitForTimeout(500);
   ok(!(await page.$("[data-testid=memory-history]")) && await page.evaluate(() => document.querySelector("[data-testid=main-doc]").dataset.doc === "topics/nas-layout.md"), `${tag} …and your document stays: no diff over it`);
@@ -158,7 +160,7 @@ async function edits(page, tag) {
   await colOf(page, "Who can see what");
   await tab(page, "overview");
   await page.evaluate((id) => window.__mock.memoryEdit(id, "topics/guests.md", "# Guests\n\nLeft behind.\n"), ws);
-  await page.click("[data-testid=ws-chat-close-menu]");
+  await page.click("[data-testid=ws-chat-menu]");
   await page.click("[data-testid=ws-chat-close-item]");
   ok(await until(page, () => /^Closed, not folded\./.test(document.querySelector("[data-testid=ws-chat-ended]")?.textContent ?? "")) && await until(page, () => /Changed: Chat closed: Who can see what/.test(document.querySelector("[data-testid=memory-change]")?.textContent ?? "")), `${tag} closed without a fold, what it left is shown the same way`);
 }
@@ -169,7 +171,7 @@ async function states(page, tag, name) {
   // ── refused ──
   await row(page, "Who can see what").click();
   await colOf(page, "Who can see what");
-  await page.click("[data-testid=ws-chat-close]");
+  await page.click("[data-testid=ws-chat-menu]"); await page.click("[data-testid=ws-chat-close]");
   ok(await until(page, () => /^It is waiting on you: answer it first\./.test(document.querySelector("[data-testid=ws-chat-said]")?.textContent ?? "")), `${tag} a chat that waits is not folded, in the engine's words`);
   await row(page, "Release order").click();
   await colOf(page, "Release order");
@@ -177,7 +179,7 @@ async function states(page, tag, name) {
   await page.locator("[data-testid=ws-chat-col] textarea").fill("Work on it");
   await page.locator("[data-testid=ws-chat-col] textarea").press("Enter");
   await until(page, () => document.querySelector("[data-testid=ws-chat-col]")?.dataset.state === "busy");
-  await page.click("[data-testid=ws-chat-close]");
+  await page.click("[data-testid=ws-chat-menu]"); await page.click("[data-testid=ws-chat-close]");
   ok(await until(page, () => /^It is working: stop it or wait\./.test(document.querySelector("[data-testid=ws-chat-said]")?.textContent ?? "")) && !(await page.$("[data-testid=ws-chat-folding]")), `${tag} nor is one that works: nothing closes`);
   await page.click("[data-testid=ws-chat-said-stop]");
   ok(await until(page, () => document.querySelector("[data-testid=ws-chat-col]")?.dataset.state === "running", null, 8000), `${tag} …with Stop beside it`);
@@ -221,7 +223,7 @@ async function states(page, tag, name) {
   // ── Stop ──
   await page.click("[data-testid=ws-chat-resume]");
   await until(page, () => !!document.querySelector("[data-testid=ws-chat-col] textarea"));
-  await page.click("[data-testid=ws-chat-close]");
+  await page.click("[data-testid=ws-chat-menu]"); await page.click("[data-testid=ws-chat-close]");
   await page.waitForSelector("[data-testid=ws-chat-fold-stop]");
   await page.click("[data-testid=ws-chat-fold-stop]");
   ok(await until(page, () => /^Closed, not folded\./.test(document.querySelector("[data-testid=ws-chat-ended]")?.textContent ?? "")), `${tag} Stop the fold ends it: closed, not folded`);
@@ -241,7 +243,7 @@ async function terminal(page, tag) {
   await page.click("[data-testid=ws-chat-view-terminal]");
   await until(page, () => window.__opens > 0 && !!document.querySelector("[data-testid=ws-chat-term] .xterm"));
   const before = await page.evaluate(() => window.__opens);
-  await page.click("[data-testid=ws-chat-close]");
+  await page.click("[data-testid=ws-chat-menu]"); await page.click("[data-testid=ws-chat-close]");
   ok(await until(page, (n) => window.__opens > n, before) && !!(await page.$("[data-testid=ws-chat-term] .xterm")), `${tag} the terminal stays on, and attaches again`);
 }
 
@@ -254,13 +256,11 @@ async function lists(page, tag) {
   await fold(page, ws, await id("Subtitles pipeline"), null);
   await row(page, "Release order").click();
   await colOf(page, "Release order");
-  await page.click("[data-testid=ws-chat-readsb]");
+  await page.click("[data-testid=ws-chat-menu]"); await page.click("[data-testid=ws-chat-readsb]");
   ok(await until(page, () => [...document.querySelectorAll("[data-testid=ws-chat-reads-doc]")].map((l) => l.textContent).join("|") === "Plan: Jellyplan · read|Jellyfin on the home serveridea · read"), `${tag} its reads menu lists the plan and the linked ideas, under the projects (${await page.locator("[data-testid=ws-chat-reads-doc]").allInnerTexts()})`);
   await page.keyboard.press("Escape");
   // ── a change's live chats ──
   await tab(page, "memory");
-  await page.waitForSelector("[data-testid=ws-side-toggle]");
-  await page.click("[data-testid=ws-side-toggle]");
   await page.evaluate((w) => window.__mock.memoryEdit(w, "topics/live.md", "# Live\n\nWritten.\n"), ws);
   await page.click("[data-testid=memory-file][data-path='MEMORY.md']");
   await page.waitForTimeout(1200);
@@ -299,7 +299,6 @@ async function themes(page, tag, name) {
     for (const w of [1440, 900]) {
       await page.setViewportSize({ width: w, height: 800 });
       await page.waitForTimeout(250);
-      if (await page.$("[data-testid=ws-side-chat]")) await page.click("[data-testid=ws-side-chat]");
       const bad = await page.evaluate(() => [...document.querySelectorAll(".wsc-ended button:not(:disabled), .wsc-said button:not(:disabled), .wsc-receipt button:not(:disabled), .wsc-head button:not(:disabled)")].filter((b) => { b.scrollIntoView({ block: "nearest" }); const q = b.getBoundingClientRect(), hit = document.elementFromPoint(q.x + q.width / 2, q.y + q.height / 2); return !q.width || !(hit && (b === hit || b.contains(hit))); }).map((b) => b.dataset.testid));
       ok(bad.length === 0, `${tag} ${w}px ${st}: every control is reachable${bad.length ? `: ${bad}` : ""}`);
     }

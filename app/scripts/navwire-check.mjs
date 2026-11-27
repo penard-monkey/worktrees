@@ -40,7 +40,7 @@ const a = at("const frontHere =");
 const b = at("const navKey =", a);
 if (a < 0 || b < 0) { console.log("not ok — App.tsx: `const frontHere =` … `const navKey =` markers are gone"); process.exit(1); }
 const LOC = lines.slice(a, b).join("\n");
-const ENV1 = ["sel", "selected", "eff", "dockShown", "dockFile", "dockAt", "termFront", "settings", "placeKey", "navSeenFront", "shownTab", "lowerOn", "wsShown", "wsTabNow", "tabDoc", "wsChat", "diskOpen", "diskPath", "docsPick", "docShown", "mainDoc", "memHistOpen", "memHistAt", "memPath"];
+const ENV1 = ["sel", "selected", "eff", "dockShown", "dockFile", "dockAt", "termFront", "settings", "placeKey", "navSeenFront", "shownTab", "lowerOn", "wsShown", "wsTabNow", "wsTerminal", "tabDoc", "wsChat", "diskOpen", "diskPath", "docsPick", "docShown", "mainDoc", "memHistOpen", "memHistAt", "memPath"];
 const { build: buildLoc } = await load(`
 export function build(env: any) {
   const { ${ENV1.join(", ")} } = env;
@@ -53,7 +53,7 @@ const P1 = { repo: "/r", slug: "p1" };
 const navLoc = (o) => buildLoc({
   sel: P1, selected: {}, dockFile: null, dockAt: null, settings: {}, placeKey, termFront: null,
   navSeenFront: { current: {} },
-  wsShown: null, wsTabNow: "overview", tabDoc: () => null, wsChat: {},
+  wsShown: null, wsTabNow: "overview", wsTerminal: false, tabDoc: () => null, wsChat: {},
   diskOpen: null, diskPath: null,
   docsPick: {}, docShown: false, mainDoc: null, memHistOpen: false, memHistAt: null, memPath: () => "MEMORY.md",
   ...o,
@@ -95,6 +95,7 @@ eq("a workspace's Overview", navLoc({ sel: null, open: false, tab: "files", wsSh
 eq("…its Plan", navLoc({ sel: null, open: false, tab: "files", wsShown: W, wsTabNow: "plan", tabDoc: (_id, t) => doc(t) }), { place: null, ws: { id: "w1", tab: "plan" } });
 eq("…an idea on its Ideas tab", navLoc({ sel: null, open: false, tab: "files", wsShown: W, wsTabNow: "ideas", tabDoc: (_id, t) => doc(t) }), { place: null, ws: { id: "w1", tab: "ideas", doc: "i1" } });
 eq("…with a chat in the middle", navLoc({ sel: null, open: false, tab: "files", wsShown: W, wsTabNow: "plan", wsChat: { w1: "c1" } }), { place: null, ws: { id: "w1", tab: "plan", chat: "c1" } });
+eq("…with its Terminal in the dock", navLoc({ sel: null, open: true, tab: "files", wsShown: W, wsTabNow: "plan", wsChat: { w1: "c1" }, wsTerminal: true }), { place: null, ws: { id: "w1", tab: "plan", terminal: true, chat: "c1" } });
 eq("a place over a workspace is the place", navLoc({ open: false, tab: "files", wsShown: W })?.place, P1);
 // The Terminal below the reference panel: a strip is up under ANY upper tab,
 // so the location carries its front shell — and the upper tab it is under.

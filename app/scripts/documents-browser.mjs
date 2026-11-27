@@ -58,8 +58,11 @@ const openChip = async (page, id) => {
   return until(page, (id) => document.querySelector("[data-testid=main-doc]")?.dataset.doc === id && document.querySelector("[data-testid=main-doc] .cm-content"), id);
 };
 /** A tab of the workspace view. */
-const tab = (page, t) => page.click(`[data-testid=ws-tab][data-tab=${t}]`);
-const onTab = (page, t) => page.evaluate((t) => document.querySelector("[data-testid=ws-tab].on")?.dataset.tab === t, t);
+const tab = async (page, t) => {
+  const button = page.locator(`[data-workspace-panel=${t}]`);
+  if (await button.getAttribute("aria-pressed") !== "true") await button.click();
+};
+const onTab = (page, t) => page.evaluate((t) => document.querySelector("[data-testid=ws-frame]:not([hidden])")?.dataset.panel === t, t);
 const overview = async (page) => { await tab(page, "overview"); return until(page, () => !!document.querySelector("[data-testid=ws-overview]")); };
 /** An act in the pane's menu. */
 const act = async (page, testId) => { await page.click("[data-testid=main-doc] [data-testid=doc-menu-open]"); await page.click(`[data-testid=doc-menu] [data-testid=${testId}]`); };
@@ -375,7 +378,7 @@ async function broken(page, tag) {
 /** A document that is only read fetches no editor; the choice is kept per kind. */
 async function readFirst(page, tag) {
   const { plan } = await setup(page);
-  await page.click("[data-testid=ws-tab][data-tab=plan]");
+  await page.click("[data-workspace-panel=plan]");
   ok(await until(page, () => !!document.querySelector("[data-testid=main-doc] [data-testid=ideas-read] .md-h1")), `${tag} a plan opens in Read`);
   await page.waitForTimeout(500);
   ok(!(await fetched(page)) && await page.locator("[data-testid=main-doc] [data-testid=ideas-editor]").count() === 0, `${tag} …which fetches no editor, and mounts none`);

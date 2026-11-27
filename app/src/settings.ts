@@ -77,6 +77,8 @@ export type PlacePanels = {
    *  spreads only the keys that are there). */
   dock_tab?: "files" | "terminal" | "docs" | "plan" | "prs" | "workspace";
   dock_width?: number;
+  /** Workspace dock selection. Older workspace records only had Terminal. */
+  workspace_terminal?: boolean;
   /** Markdown reading size for THIS place. Seeds from the flat last-used value
    *  (unlike `dock_open`, which deliberately does not seed — see `panelsFor`):
    *  a size you just chose is the best guess for the next place's docs, and
@@ -144,7 +146,7 @@ export function panelsFor(s: Settings, key: string | null): Settings {
   // Settings object carrying it would make one the first time it was spread
   // back into `settings`.
   if (p) {
-    const { agent_view: _view, ...dock } = p;
+    const { agent_view: _view, workspace_terminal: _terminal, ...dock } = p;
     return { ...s, ...dock, files_md_zoom: p.files_md_zoom ?? s.files_md_zoom, files_diff: p.files_diff ?? s.files_diff };
   }
   // A place you have never opened the dock in starts CLOSED — the global

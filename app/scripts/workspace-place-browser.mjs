@@ -141,7 +141,7 @@ async function dock(page, tag, name) {
   await page.waitForTimeout(800);
   ok(/^Edit in Everything ▸$/.test(await page.locator("[data-testid=dock-ws-edit]").innerText()), `${tag} Edit in Everything`);
   await page.click("[data-testid=dock-ws-edit]");
-  ok(await until(page, (id) => document.querySelector("[data-testid=ws-tab].on")?.dataset.tab === "ideas" && document.querySelector("[data-testid=main-doc]")?.dataset.doc === id && !!document.querySelector("[data-testid=main-doc] .cm-content"), GPU), `${tag} …opens it in the workspace view, in Edit`);
+  ok(await until(page, (id) => document.querySelector("[data-testid=ws-frame]:not([hidden])")?.dataset.panel === "ideas" && document.querySelector("[data-testid=main-doc]")?.dataset.doc === id && !!document.querySelector("[data-testid=main-doc] .cm-content"), GPU), `${tag} …opens it in the workspace view, in Edit`);
   await page.waitForTimeout(800);
   await back(page);
   ok(await isCrumb(page, "Everything") && await until(page, () => document.querySelector("[data-testid=dock-ws]")?.dataset.tab === "ideas"), `${tag} and Back is the place, its dock as it was`);
@@ -156,7 +156,7 @@ async function dock(page, tag, name) {
   ok(await until(page, () => /TYPED THERE/.test(document.querySelector("[data-testid=dock-ws-read]")?.innerText ?? "")), `${tag} what was typed there is read here`);
   // ── the crumb ──
   await page.click("[data-testid=place-ws]");
-  ok(await until(page, () => document.querySelector("[data-testid=ws-tab].on")?.dataset.tab === "memory" && document.querySelector("[data-testid=main-doc]")?.dataset.doc === "topics/nas-layout.md"), `${tag} the crumb goes back to where you were in it`);
+  ok(await until(page, () => document.querySelector("[data-testid=ws-frame]:not([hidden])")?.dataset.panel === "memory" && document.querySelector("[data-testid=main-doc]")?.dataset.doc === "topics/nas-layout.md"), `${tag} the crumb goes back to where you were in it`);
   // With a chat: it is where you were, and never in the place.
   await card(page, "Everything").locator("[data-testid=ws-chat-row]").first().click();
   await page.waitForSelector("[data-testid=ws-chat-col]");
