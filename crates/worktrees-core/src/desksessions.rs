@@ -422,7 +422,7 @@ impl Launch<'_> {
     pub fn pane0(&self, ai_cmd: &str, prompt_hook: Vec<String>) -> Result<String, String> {
         let (prefix, cmd) = self.parts(ai_cmd, prompt_hook)?;
         let inner = if prefix.is_empty() { format!("exec {cmd}") } else { format!("exec env {prefix}{cmd}") };
-        Ok(format!("exec \"${{SHELL:-/bin/sh}}\" -ic {}", crate::tmux::sq(&inner)))
+        Ok(crate::tmux::rc_launch(&inner))
     }
 
     /// Whether [`Launch::run`] would be refused for anything but its own
@@ -513,7 +513,7 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "probe=a b", "{}", String::from_utf8_lossy(&out.stderr));
         assert!(pane.contains("exec env WT_PROBE="), "{pane}");
         l.env.clear();
-        assert!(l.pane0("claude", vec![]).unwrap().contains(" -ic 'exec claude "), "no env: as before");
+        assert!(l.pane0("claude", vec![]).unwrap().contains(" -ic 'unset DISABLE_AUTO_UPDATE; exec claude "), "no env: as before");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

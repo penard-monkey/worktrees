@@ -121,7 +121,8 @@ async function place(page, tag) {
 
 async function doc(page, tag) {
   await boot(page);
-  await page.locator("[data-testid=ws-doc-memory]").first().click();
+  await page.locator("[data-testid=ws-name]").first().click();
+  await page.click("[data-testid=ws-tab][data-tab=memory]");
   await until(page, () => document.querySelector("[data-testid=main-doc]")?.dataset.doc === "MEMORY.md");
   await page.locator("[data-testid=ws-chat-row]").first().click();
   await page.waitForSelector("[data-testid=doc-menu-open]");

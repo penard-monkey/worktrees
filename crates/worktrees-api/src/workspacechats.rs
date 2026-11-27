@@ -429,7 +429,7 @@ mod tests {
     }
 
     /// No lanes, and a transcript read by id. Anything else is a failure.
-    struct Ended(Option<Vec<String>>, std::path::PathBuf);
+    struct Ended(Option<Vec<String>>, std::path::PathBuf, bool);
 
     impl agents::AgentIo for Ended {
         fn lanes(&self, _: &Locus) -> Vec<agents::Lane> {
@@ -475,6 +475,28 @@ mod tests {
             Err("none".into())
         }
         fn sleep(&self, _: u64) {}
+        fn session_up(&self, _: &str) -> bool {
+            self.2
+        }
+    }
+
+    /// A chat whose session is up with no Claude in it (pane 0 is still the
+    /// shell: an rc file's question, 2026-11-26) is not ended: it says
+    /// Claude has not started, and a send says so too, never "no agent".
+    #[test]
+    fn a_chat_whose_claude_never_started_says_so_and_is_not_ended() {
+        let top = std::env::temp_dir().join(format!("wt-wschat-shell-{}", worktrees_core::ulid::new()));
+        let dir = top.join("workspaces");
+        let ws = worktrees_core::ulid::new();
+        let c = chats::prepare_at(&dir, &ws, |_| String::new()).unwrap();
+        let ctx = Ctx::new(top.join("cfg"), Arc::new(crate::tests::Recorder::default()))
+            .with_agents(agents::Agents::new(Arc::new(Ended(None, dir.join(&ws), true))))
+            .with_workspaces_dir(dir.clone());
+        let t = workspace_turns(&ctx, ws.clone(), c.id.clone(), None).unwrap();
+        assert_eq!((t["ended"].clone(), t["not_started"].clone(), t["reason"].clone()), (json!(false), json!(true), json!(agents::ERR_NOT_STARTED)), "{t}");
+        assert_eq!(workspace_send(&ctx, ws.clone(), c.id.clone(), "hello".into()), Err(agents::ERR_NOT_STARTED.to_string()));
+        assert_eq!(workspace_prompt(&ctx, ws.clone(), c.id.clone()).unwrap()["waiting"], json!(false));
+        let _ = std::fs::remove_dir_all(&top);
     }
 
     /// An ended chat reads from its transcript, found by the record's id in
@@ -490,7 +512,7 @@ mod tests {
         let lines: Vec<String> = include_str!("../../worktrees-core/tests/fixtures/transcripts/claude-2.1.309.jsonl").lines().map(str::to_string).collect();
         let ctx = |t: Option<Vec<String>>| {
             Ctx::new(top.join("cfg"), Arc::new(crate::tests::Recorder::default()))
-                .with_agents(agents::Agents::new(Arc::new(Ended(t, dir.join(&ws)))))
+                .with_agents(agents::Agents::new(Arc::new(Ended(t, dir.join(&ws), false))))
                 .with_workspaces_dir(dir.clone())
         };
         let t = workspace_turns(&ctx(Some(lines)), ws.clone(), c.id.clone(), None).unwrap();

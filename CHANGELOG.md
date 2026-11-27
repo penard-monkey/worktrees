@@ -5,6 +5,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed
+
+- **A workspace's card in the sidebar no longer has the Memory, Plan and Ideas buttons (beta).** Clicking the workspace already opens its documents as tabs in the main window, so the card keeps its chats and its projects. The purple dot for a memory that changed since you looked is now on the **Memory** tab, and a document with text that is not saved marks its own tab. ⌘K still finds a workspace's documents.
+
+### Fixed
+
+- **A workspace chat's terminal takes keys again (Workspace chats, beta).** It showed Claude's screen but nothing you typed reached it, so a question in it could not be answered. Lanes and a place's terminal were not affected.
+- **A shell's update question no longer stops an agent from starting.** Lanes and workspace chats start in your shell, so your PATH and the rest come from your rc files. oh-my-zsh's update check could ask "Would you like to update? [Y/n]" there, and the agent never started. That shell now starts with oh-my-zsh's own `DISABLE_AUTO_UPDATE`, and the agent itself starts with your environment as before. A `zstyle ':omz:update' mode` in your `.zshrc` still wins, and another rc file's question can still stop it.
+- **A place whose agent did not start shows its terminal.** When a launch stopped in the shell, the place said "No live session" and had no terminal, so the question the shell asked could not be answered from the app. It now says the agent did not start and shows the terminal, which takes keys.
+- **A workspace chat whose Claude has not started says so (Workspace chats, beta).** It used to say its transcript was no longer on disk, and its field "No agent is running in this place." Now it says Claude has not started yet, with **Open the terminal**, where the question it waits on can be answered.
+
 ## [0.54.0] - 2026-11-26
 
 ### Added
