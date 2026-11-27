@@ -219,11 +219,14 @@ async function workspaces(browser, tag) {
   await page.keyboard.press("Enter");
   ok(await until(page, () => [...document.querySelectorAll("[data-testid=ws-name]")].some((n) => n.textContent === "Everything here")), `${tag} …Enter saves it`);
 
-  // The workspace's dock Terminal (#721): F2 typed into its shell is the
-  // shell's, and a chat row's menu still renames beside it.
-  await page.keyboard.press("Meta+j");
+  // The shell still owns F2 when selected through the workspace's rail.
   const term = page.locator("[data-testid=ws-dock] .xterm-helper-textarea").first();
-  ok(await term.waitFor({ timeout: 6000 }).then(() => true, () => false), `${tag} ⌘J opens the workspace's Terminal`);
+  await page.locator("[data-workspace-panel=terminal]").click();
+  await term.waitFor({ timeout: 6000 });
+  await page.keyboard.press("Meta+j");
+  await page.getByTestId("ws-dock").waitFor({ state: "hidden" });
+  await page.keyboard.press("Meta+j");
+  ok(await term.waitFor({ timeout: 6000 }).then(() => true, () => false), `${tag} ⌘J reopens the workspace's selected Terminal`);
   await term.focus();
   await page.keyboard.press("F2");
   await page.waitForTimeout(200);

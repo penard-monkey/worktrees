@@ -13,6 +13,7 @@
  *  idea dragged there is linked. Every drag has its menu path here too (Link a
  *  plan ▸, Link an idea ▸). The rules and calls are `plans.ts`'s. */
 import { useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { STATE_WORDS, itemFree, itemPlace, problemLine, workStatus, type Activity, type Overview, type Snap, type WorkItem } from "./plans";
 import type { Attention } from "./wsview";
 
@@ -291,6 +292,7 @@ export function NoChats({ newChat }: { newChat: () => void }) {
  *  (its memory; its work while there are no chats), then the rest. Under
  *  `WIDE` px of room it is one column (App.css), memory last. */
 export function WorkspaceOverview(props: WsParts & {
+  dock?: HTMLElement | null;
   ideasOn: boolean;
   chatsOn: boolean;
   attention: readonly Attention[];
@@ -309,6 +311,14 @@ export function WorkspaceOverview(props: WsParts & {
   newChat(): void;
 }) {
   const work = props.ideasOn && <WorkCard {...props} />;
+  const reference = (
+    <div className="wsf-col wsf-col-side">
+      {props.chatsOn && <Card name="Chats" testId="ws-ov-card-chats" act={props.chatCount > 0 && <button className="ctrl sm" data-testid="ws-ov-chats-all" onClick={() => props.showTab("chats")}>All {props.chatCount}</button>}>{props.chatCount > 0 ? props.chats : <NoChats newChat={props.newChat} />}</Card>}
+      {props.chatsOn && work}
+      {props.ideasOn && <IdeasCard {...props} />}
+      <ProjectsCard projects={props.projects} takeOut={props.takeOut} addProject={props.addProject} />
+    </div>
+  );
   return (
     <div className="wsf-ov" data-testid="ws-overview">
       {props.error && <p className="ws-ov-err" role="alert">{props.error}</p>}
@@ -325,12 +335,8 @@ export function WorkspaceOverview(props: WsParts & {
             ? <Card name="Memory" testId="ws-ov-card-memory" className="wsf-card-tall" side={props.memorySide} act={<button className="ctrl sm" data-testid="ws-ov-memory-open" onClick={() => props.showTab("memory")}>Open ▸</button>}>{props.memory}</Card>
             : work}
         </div>
-        <div className="wsf-col wsf-col-side">
-          {props.chatsOn && <Card name="Chats" testId="ws-ov-card-chats" act={props.chatCount > 0 && <button className="ctrl sm" data-testid="ws-ov-chats-all" onClick={() => props.showTab("chats")}>All {props.chatCount}</button>}>{props.chatCount > 0 ? props.chats : <NoChats newChat={props.newChat} />}</Card>}
-          {props.chatsOn && work}
-          {props.ideasOn && <IdeasCard {...props} />}
-          <ProjectsCard projects={props.projects} takeOut={props.takeOut} addProject={props.addProject} />
-        </div>
+        {!props.dock && reference}
+        {props.dock && createPortal(<div className="wsf-scroll wsf-ov-reference">{reference}</div>, props.dock)}
       </div>
     </div>
   );

@@ -114,8 +114,8 @@ async function memory(engine, name) {
     // document chips since #712.
     await page.waitForSelector("[data-testid=ws-name]");
     await page.locator("[data-testid=ws-name]", { hasText: "Everything" }).first().click();
-    await page.waitForSelector("[data-testid=ws-tab][data-tab=memory]");
-    await page.click("[data-testid=ws-tab][data-tab=memory]");
+    await page.waitForSelector("[data-workspace-panel=memory]");
+    await page.click("[data-workspace-panel=memory]");
     await settle(page);
     await page.click("[data-testid=memory-file][data-path='topics/nas-layout.md']");
     await settle(page);

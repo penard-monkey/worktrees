@@ -34,20 +34,15 @@
 .wsc-col { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; background: var(--bg-abyss); }
 .wsc-head { flex: none; display: flex; align-items: center; gap: var(--s2); min-height: 36px; box-sizing: border-box; padding: 2px var(--s3); border-bottom: 1px solid var(--line); background: var(--bg-panel); }
 .wsc-name { flex: 0 1 auto; min-width: 0; border: 0; background: transparent; padding: 3px 4px; border-radius: var(--r-sm); color: var(--txt-hi); font: inherit; font-size: var(--fs-label); font-weight: var(--fw-bold); text-align: left; }
-.wsc-name:hover, .wsc-readsb:hover { background: var(--bg-elev); }
+.wsc-name:hover { background: var(--bg-elev); }
 .wsc-name-in { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
 .wsc-name-in > svg { flex: none; }
 .wsc-name-t { min-width: 2ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wsc-rename { flex: 1 1 auto; min-width: 0; }
-.wsc-readsb { flex: none; border: 0; background: transparent; padding: 3px 4px; border-radius: var(--r-sm); color: var(--txt); font-size: var(--fs-meta); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* The model, as a place's agent label names it ("Claude Opus 5.5"): words in a
    text token, and the first thing to give way when the header is narrow. */
 .wsc-model { flex: 0 2 auto; min-width: 0; color: var(--txt); font-size: var(--fs-meta); }
 .wsc-acts { flex: none; margin-left: auto; display: flex; align-items: center; gap: var(--s2); }
-.wsc-close { display: inline-flex; }
-.wsc-close > .ctrl:first-child { border-radius: var(--r-sm) 0 0 var(--r-sm); }
-.wsc-close > .ctrl:last-child { border-radius: 0 var(--r-sm) var(--r-sm) 0; border-left: 0; padding-left: 6px; padding-right: 6px; }
-.wsc-close .armed { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 16%, var(--bg-elev)); }
 .wsc-body { position: relative; flex: 1 1 auto; min-height: 0; }
 .wsc-term { position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--term-bg); }
 .wsc-ended { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; padding: var(--s2) var(--s3); border-top: 1px solid var(--line); color: var(--txt-hi); font-size: var(--fs-label); background: var(--bg-panel); }
@@ -91,8 +86,6 @@
 
 /* ── a live chat whose rules are not what a launch now would get ── */
 /* The no-tools chip gives up its room before the model's name does: its words are in its title. */
-.wsc-stale-b.wsc-nomcp { flex-shrink: 8; }
-.wsc-stale-b { flex: 0 1 auto; min-width: 0; border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line)); border-radius: var(--r-sm); background: color-mix(in srgb, var(--warn) 12%, var(--bg-panel)); color: var(--txt-hi); font: inherit; font-size: var(--fs-meta); padding: 1px var(--s2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wsc-stale { max-width: 22rem; padding: var(--s2) var(--s3); border-bottom: 1px solid var(--line); color: var(--txt-hi); font-size: var(--fs-meta); }
 .wsc-stale p { margin: 0; }
 .wsc-stale ul { margin: var(--s1) 0; padding-left: var(--s4); }
@@ -107,3 +100,5 @@ p.wsc-stale { margin: 0; }
 /* A row renamed in place (RowNameField): the field takes the title's room. */
 .wsc-row.naming:hover { background: transparent; }
 .wsc-row .wsc-row-name { flex: 1 1 0; max-width: none; font-size: var(--fs-label); font-weight: var(--fw-med); }
+
+.wsc-status { flex: none; display: flex; flex-wrap: wrap; gap: var(--s2); padding: var(--s1) var(--s3); color: var(--warn); font-size: var(--fs-meta); border-bottom: 1px solid var(--line); }
