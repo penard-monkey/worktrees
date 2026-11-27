@@ -1114,6 +1114,7 @@ pub fn record_origin(p: &Project, ui: &mut dyn Ui, slug: &str) {
             .map(|r| crate::store::Link::to(&r.slug, now)),
         StartedFrom::Place { slug: from, project } => (from != crate::lineage::MAIN && (project.is_some() || from != slug))
             .then(|| crate::store::Link { project, ..crate::store::Link::to(&from, now) }),
+        StartedFrom::Chat { conv, address } => Some(crate::store::Link { chat: Some(address), ..crate::store::Link::to(&conv, now) }),
     };
     let stale = crate::store::read_lenient(&p.main_root)
         .places
@@ -1122,9 +1123,10 @@ pub fn record_origin(p: &Project, ui: &mut dyn Ui, slug: &str) {
     if starter.is_none() && !stale {
         return;
     }
-    let said = starter.as_ref().map(|l| match &l.project {
-        Some(pn) => format!("{pn}:{}", l.place),
-        None => l.place.clone(),
+    let said = starter.as_ref().map(|l| match (&l.chat, &l.project) {
+        (Some(addr), _) => format!("the workspace chat {addr}"),
+        (None, Some(pn)) => format!("{pn}:{}", l.place),
+        (None, None) => l.place.clone(),
     });
     if let Err(e) = crate::store::edit(&p.main_root, slug, |d| {
         d.started_by = starter;

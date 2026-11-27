@@ -4,7 +4,8 @@ title: Workspace chats and a workspace's memory
 
 # Workspace chats and a workspace's memory
 
-**Proposal, revision 3, 2026-11-24. Being built.** A design lane's answer to
+**Proposal, revision 3, 2026-11-24. Being built.** **§1.4 and §5.4 are reversed** by the owner's decision of
+2026-11-27: a chat now does what a lane does (`workspace-chat-powers.md`). A design lane's answer to
 the owner's ask of 2026-11-23:
 
 > "Workspaces need chats that aren't tied to a project. These would be

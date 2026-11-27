@@ -447,7 +447,7 @@ ws_fixture() {
   grep -qF "not one of this workspace's chats" <<<"$output"
 }
 
-@test "a named workspace chat gets the workspace tools and nothing that drives a lane" {
+@test "a named workspace chat gets a lane's tools, scoped to its workspace, and never remove_worktree" {
   ws_fixture
   printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"x"}}}' >> "$BATS_TEST_TMPDIR/in.jsonl"
   run bash -c "cd '$WORKTREES_WORKSPACES_DIR/$WS_ID' && WORKTREES_WORKSPACE_CHAT='$WS_CONV' '$WT_BIN' mcp --mutations < '$BATS_TEST_TMPDIR/in.jsonl' 2>/dev/null"
@@ -456,9 +456,11 @@ ws_fixture() {
 for l in sys.stdin:
     m=json.loads(l)
     if m.get("id")==2: print(",".join(t["name"] for t in m["result"]["tools"]))')
-  [ "$names" = "workspace,place_status,ideas_list,idea_read,idea_related,plan_propose_work" ]
+  [ "$names" = "workspace,place_status,list_places,read_chat,report,messages,wait,plan_read,ideas_list,idea_read,idea_related,create_worktree,open_place,close_session,send,set_note,set_pin,set_lifecycle,plan_make,plan_add_work,plan_write,plan_start_work,plan_propose_work,idea_create,idea_append,idea_write,workspace_link_idea,remember,forget" ]
   grep -qF 'Workspace mode' <<<"$output"
-  grep -qF 'unknown tool: create_worktree' <<<"$output"
+  # The call named no project: refused in words, before anything runs.
+  grep -qF 'project is required' <<<"$output"
+  ! grep -qF 'remove_worktree' <<<"$names" || false
 }
 
 # The setup verbs run OUTSIDE a repository too — they are about this machine's

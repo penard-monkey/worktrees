@@ -148,6 +148,8 @@ check(at(it(), st()).kind === "none" && P.workStatus(it(), at(it(), st())) === "
   const prop = it({ proposed: "Chat 2 · 01JC90A1000000000000000000 · 2026-11-25 10:00", proposal: { by: "Chat 2", chat: "01JC90A1000000000000000000", at: "2026-11-25 10:00" } });
   check(P.workStatus(prop, at(prop, st())) === "proposed by Chat 2 · not started", "a chat's proposal says who proposed it, and that nothing started");
   check(P.itemFree(at(prop, st())), "a proposal has Review… and Start like any item not started");
+  const made = it({ made: "Chat 2 · 01JC90A1000000000000000000 · 2026-11-27 10:00", maker: { by: "Chat 2", chat: "01JC90A1000000000000000000", at: "2026-11-27 10:00" } });
+  check(P.workStatus(made, at(made, st())) === "made by Chat 2 · not started", "a chat's own item says which chat made it");
 }
 check(at(started("role"), done).kind === "there" && P.workStatus(started("role"), at(started("role"), done)) === "started 2026-11-12 09:30 · there", "its place is there");
 check(at(started("role"), done, snap, { busy: new Set([`${R}/.worktrees/role`]), waiting: none }).kind === "busy", "…busy, from the same activity the nav dots use");

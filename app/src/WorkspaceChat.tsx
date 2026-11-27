@@ -45,6 +45,8 @@ export function NavChats(props: {
   start(): void;
   all(): void;
   retry(): void;
+  /** Arm a drag of a row: into a place's chat, it is a reference. */
+  arm?(e: React.PointerEvent, conv: string, title: string): void;
 }) {
   const { rows, rest } = navRows(props.rows, props.q);
   const live = props.rows.filter((r) => r.live).length;
@@ -62,7 +64,8 @@ export function NavChats(props: {
         const age = ageWords(r, props.ago(activeAt(r.chat)));
         return (
           <button key={r.chat.id} className={"wsc-row" + (r.state === "ended" ? " closed" : "") + (r.chat.id === props.on ? " on" : "")} data-testid="ws-chat-row" data-track="nav.workspace.chat"
-            data-chat={r.chat.id} data-state={r.state} title={`${r.chat.title} · ${stateWords(r)}`} aria-current={r.chat.id === props.on || undefined} onClick={() => props.open(r.chat.id)}>
+            data-chat={r.chat.id} data-state={r.state} title={`${r.chat.title} · ${stateWords(r)}`} aria-current={r.chat.id === props.on || undefined} onClick={() => props.open(r.chat.id)}
+            data-drag-handle="" onPointerDown={props.arm ? (e) => props.arm!(e, r.chat.id, r.chat.title) : undefined}>
             <span className="wsc-row-in">
               <ChatDot state={r.state} />
               <span className="wsc-title">{r.chat.title}</span>

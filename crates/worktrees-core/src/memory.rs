@@ -829,6 +829,13 @@ impl Repo {
     /// held, and whatever was slipped in between the walk and the add (a link
     /// where a file was), is put back as HEAD has it.
     fn stage(&self) -> Result<Vec<String>, String> {
+        self.stage_only(None)
+    }
+
+    /// [`Repo::stage`], keeping in the index only the changes to `only`'s
+    /// paths when it is given: every other change stays in the folder, for a
+    /// later commit, exactly as it was.
+    fn stage_only(&self, only: Option<&HashSet<String>>) -> Result<Vec<String>, String> {
         let w = walk(&self.place.mem).map_err(|e| format!("the memory's folder: {e}"))?;
         let on: HashSet<&str> = w.files.iter().map(|f| f.path.as_str()).collect();
         let inos: HashSet<u64> = w.files.iter().map(|f| f.sig.ino).collect();
@@ -855,6 +862,7 @@ impl Repo {
             let m: Vec<&str> = meta.trim_start_matches(':').split(' ').collect();
             let [old_mode, new_mode, old, _, status] = m[..] else { continue };
             let ours = if status == "D" { name_kept(path) && gone(path) } else { new_mode.starts_with("100") && on.contains(path) };
+            let ours = ours && only.is_none_or(|o| o.contains(path));
             if ours {
                 dirty.push(path.to_string());
             } else {
@@ -1444,6 +1452,31 @@ pub fn commit_if_dirty_at(root: &Path, id: &str, message: Option<&str>) -> Resul
     wsfolder::refuse_real(root)?;
     let Some((_held, repo)) = to_commit(root, id)? else { return Ok(None) };
     commit_held(&repo, message)
+}
+
+/// Commit the changes to `paths` alone, now, under `subject`: what a chat's
+/// `remember` and `forget` do (`workspace-chat-powers.md` §8), so each is its
+/// own change in History, undone on its own. Any other change in the folder is
+/// left for a later commit. `None` back: none of `paths` had changed.
+pub fn commit_paths_at(root: &Path, id: &str, subject_line: &str, paths: &[String]) -> Result<Option<Change>, String> {
+    wsfolder::refuse_real(root)?;
+    if subject(subject_line).is_empty() {
+        return Err("a change needs a subject".into());
+    }
+    if paths.is_empty() {
+        return Err("name the memory files you changed".into());
+    }
+    for p in paths {
+        rel_ok(p)?;
+    }
+    let Some((_held, repo)) = to_commit(root, id)? else { return Err("this workspace has no memory yet".into()) };
+    let only: HashSet<String> = paths.iter().cloned().collect();
+    if repo.stage_only(Some(&only))?.is_empty() {
+        return Ok(None);
+    }
+    let msg = format!("--message={}", subject(subject_line));
+    repo.bytes(&["commit", "--quiet", "--no-verify", "--cleanup=whitespace", &msg])?;
+    head(&repo)
 }
 
 /// The quiet minute's commit: [`commit_if_dirty_at`] with no message, and the
@@ -2680,6 +2713,38 @@ mod tests {
         assert_eq!(find(&a).unwrap().commit, c.commit);
         assert_eq!(find(&b), None);
         assert!(fold_commit_at(&s.root, &s.id, ".*").is_err() && commit_fold_at(&s.root, &s.id, "x", "a\nb").is_err());
+    }
+
+    /// `remember` and `forget` commit what they name, at once, under their
+    /// own subject; another change in the folder (the person's, another
+    /// chat's) stays for a later commit, and Undo takes back only theirs.
+    #[test]
+    fn a_change_to_named_files_is_its_own_commit_and_leaves_the_rest() {
+        let s = Scratch::made("paths");
+        s.put("topics/other.md", "someone else's draft\n");
+        s.put(INDEX, "# Memory\n\n- Backups go to the NAS ([topic](topics/backups.md))\n");
+        s.put("topics/backups.md", "Nightly, to the NAS.\n");
+        let names = vec![INDEX.to_string(), "topics/backups.md".to_string()];
+        let c = commit_paths_at(&s.root, &s.id, "Remembered: backups go to the NAS", &names).unwrap().unwrap();
+        assert_eq!(c.subject, "Remembered: backups go to the NAS");
+        let mut files: Vec<String> = c.files.iter().map(|f| f.path.clone()).collect();
+        files.sort();
+        assert_eq!(files, vec![INDEX.to_string(), "topics/backups.md".to_string()], "only what it named");
+        assert_eq!(status_at(&s.root, &s.id).unwrap().dirty, vec!["topics/other.md".to_string()], "the rest waits");
+        assert_eq!(commit_paths_at(&s.root, &s.id, "Remembered: again", &names).unwrap(), None, "nothing changed: no commit");
+        // Forget: the line and its file go, as one change; the history keeps them.
+        s.put(INDEX, "# Memory\n");
+        fs::remove_file(s.mem().join("topics/backups.md")).unwrap();
+        let f = commit_paths_at(&s.root, &s.id, "Forgot: backups go to the NAS", &names).unwrap().unwrap();
+        assert_eq!((f.subject.as_str(), f.files.len()), ("Forgot: backups go to the NAS", 2));
+        assert_eq!(read_commit_at(&s.root, &s.id, "topics/backups.md", &c.commit).unwrap().content, "Nightly, to the NAS.\n", "History still holds it");
+        revert_at(&s.root, &s.id, &f.commit).unwrap();
+        assert_eq!(s.text("topics/backups.md"), "Nightly, to the NAS.\n", "Undo of the forget alone brings it back");
+        assert_eq!(s.text("topics/other.md"), "someone else's draft\n");
+        for bad in [vec![], vec!["../x".to_string()]] {
+            assert!(commit_paths_at(&s.root, &s.id, "Remembered: x", &bad).is_err(), "{bad:?}");
+        }
+        assert!(commit_paths_at(&s.root, &s.id, "  ", &names).is_err());
     }
 
     #[test]

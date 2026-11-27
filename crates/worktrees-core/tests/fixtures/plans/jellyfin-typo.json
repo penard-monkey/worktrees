@@ -57,7 +57,7 @@
       "line": 24,
       "section": "work",
       "text": "projet: homelab-ansible",
-      "words": "unknown key `projet:`: expected `project:`, `branch:`, `brief:`, `ai:`, `model:`, `proposed:` or `started:`"
+      "words": "unknown key `projet:`: expected `project:`, `branch:`, `brief:`, `ai:`, `model:`, `proposed:`, `made:` or `started:`"
     }
   ]
 }

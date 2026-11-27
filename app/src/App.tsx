@@ -87,7 +87,7 @@ import { useWsMemory } from "./useWsMemory";
 import { fileOf, longIndex, memoryPicks, nameAt, sizeWords, trailStart, trailStep, trailTo, type Trail } from "./wsmemory";
 import { memoryDocs, type MemoryView } from "./doc/memory";
 import { linkTo, memoryLink } from "./doc/memorypath";
-import { navRows, needsYouKeys, needsYouWords, tidyBar, type ChatRow } from "./wschats";
+import { chatReference, navRows, needsYouKeys, needsYouWords, tidyBar, type ChatRow } from "./wschats";
 import { attentionOf, chatActivity, placeActivity, docChips, LAST_VIEW_KEY, lastView, placeWorkspace, placeWorkspaces, PLACE_WS_KEY, placeWsRead, placeWsSet, rollupOf, tabsWith, tabOr, wsCounts, wsFrameOn, wsTabs, type LastView, type Rollup } from "./wsview";
 import { answer, ask, DOCK, FLOAT, take, windowEnv, type Ask, type HandDoc } from "./doc/handoff";
 import { MainDocument, type MainDocApi } from "./doc/MainDocument";
@@ -8006,7 +8006,10 @@ function App() {
     // CHAT (`intoPath`) it goes into the draft at the cursor instead, and the
     // person sends it with the rest of their message.
     | { kind: "mention"; repo: string; slug: string; intoRepo: string; intoSlug: string; intoSession: string; name: string; intoPath: string | null;
-        provider: Harness; foreign: boolean; token: boolean; label: string; intoName: string };
+        provider: Harness; foreign: boolean; token: boolean; label: string; intoName: string }
+    // A workspace chat's row onto a place's chat: its reference goes into the
+    // draft (`wschats.ts::chatReference`).
+    | { kind: "chat-ref"; intoPath: string; text: string; intoName: string };
 
   const placeAt = (repo: string, slug: string) =>
     ws?.projects.find((v) => v.root === repo)?.snapshot?.places.find((p) => p.slug === slug) ?? null;
@@ -8049,6 +8052,15 @@ function App() {
 
   const resolveDrop = (item: DragItem, x: number, y: number): DropTarget | null => {
     const el = document.elementFromPoint(x, y) as HTMLElement | null;
+    if (item.kind === "chat") {
+      // Only a chat's draft takes it; a work item or the nav takes none.
+      const into = el?.closest<HTMLElement>("[data-drop-into]");
+      if (!into) return null;
+      // A workspace chat's own view shares the chat pane, and `selected` is
+      // then the place behind it: only a place's chat on screen takes it.
+      if (into.dataset.dropInto !== "chat" || !selected || wsShown) return { kind: "reject", hint: "drop a chat into a place's chat, where it goes into your message" };
+      return { kind: "chat-ref", intoPath: selected.path, text: chatReference(item.ws, item.conv, item.title), intoName: nameOf(selected) };
+    }
     if (item.kind === "plan" || item.kind === "idea") {
       const hit = wsHitAt(el);
       if (hit?.kind !== "group") return null;
@@ -8211,6 +8223,8 @@ function App() {
     if (target.kind === "ws-plan") { void wsCall(setPlanCall(target.id, target.plan)); return; }
     if (target.kind === "ws-idea") { void wsCall(linkIdeaCall(target.id, target.idea)); return; }
     if (target.kind === "work") { void linkPlaceToItem(target.item, target.repo, target.slug); return; }
+    if (target.kind === "chat-ref") { insertReference(target.intoPath, target.text); return; }
+    if (item.kind === "chat") return;
     if (item.kind === "plan" || item.kind === "idea") return;
     if (target.kind === "ws-remove") { wsRemoveProject(target.id, target.root); return; }
     if (target.kind === "ws-move") { wsMoveProject(target.id, target.root, target.before); return; }
@@ -10101,6 +10115,7 @@ function App() {
                         start={() => { void startChat(w.id); setMenu(null); closeCtx(); hideNav(); }}
                         all={() => { void showWs(w.id, "chats"); setMenu(null); closeCtx(); hideNav(); }}
                         retry={() => void wsChats.refresh(w.id)}
+                        arm={(e, conv, title) => arm(e, { kind: "chat", ws: w.id, conv, title })}
                       />
                     )}
                     {w.projects.length === 0 && (
@@ -11612,7 +11627,7 @@ function App() {
         >
           {drag.item.kind === "project" ? basename(drag.item.root)
             : drag.item.kind === "workspace" ? (wsById(drag.item.id)?.name ?? "")
-            : drag.item.kind === "plan" || drag.item.kind === "idea" ? drag.item.title
+            : drag.item.kind === "plan" || drag.item.kind === "idea" || drag.item.kind === "chat" ? drag.item.title
               : nameOf({ slug: drag.item.slug, declared: placeAt(drag.item.repo, drag.item.slug)?.declared })}
           {drag.target?.kind === "reject" && <span className="drag-why">{drag.target.hint}</span>}
           {drag.target?.kind === "tier" && <span className="drag-why">→ {TIER_LABEL[drag.target.lands]}</span>}
@@ -11620,6 +11635,7 @@ function App() {
           {drag.target?.kind === "ws-plan" && <span className="drag-why">→ {wsById(drag.target.id)?.name}'s plan</span>}
           {drag.target?.kind === "ws-idea" && <span className="drag-why">→ link to {wsById(drag.target.id)?.name}</span>}
           {drag.target?.kind === "work" && <span className="drag-why">→ “{drag.target.item.title}”'s place</span>}
+          {drag.target?.kind === "chat-ref" && <span className="drag-why">→ reference in your message to {drag.target.intoName}</span>}
           {drag.target?.kind === "ws-remove" && <span className="drag-why">→ take out of {wsById(drag.target.id)?.name}</span>}
           {drag.target?.kind === "ws-move" && <span className="drag-why">→ move within {wsById(drag.target.id)?.name}</span>}
           {drag.target?.kind === "mention" && <span className="drag-why">{drag.target.intoPath

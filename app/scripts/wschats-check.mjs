@@ -143,5 +143,14 @@ eq("…a document, the rules, and what this build does not know", [...["unlinked
   eq("a chat this window has not read yet is still told", W.needsYouWords("waiting|s~z", ev({ waiting: ["s~z"], chat_of: { "s~z": { workspace: "W9", chat: "z" } } }), names), { title: "A workspace chat is waiting for you", body: "A chat of a workspace stopped on a question." });
 }
 
+// ── a dragged chat row's reference (workspace-chat-powers §3) ──
+{
+  const ws = "01JC90A1000000000000000000", conv = "01JC90A1000000000000000001";
+  const r = W.chatReference(ws, conv, "Release order");
+  eq("it carries the chat's bus address and how to read it", [r.includes(`workspace:${ws}/${conv}`), /place_status/.test(r), /read_chat/.test(r), /“Release order”/.test(r)], [true, true, true, true]);
+  eq("a title cannot close the reference or break the line", W.chatReference(ws, conv, "a]b\nc[d"), `[workspace chat “a b c d” · workspace:${ws}/${conv} · its state: place_status; what it said: read_chat; message it: report]`);
+  eq("no title: still named", /“a workspace chat”/.test(W.chatReference(ws, conv, "  ")), true);
+}
+
 if (failed) { console.log(`\nwschats-check: ${failed} failed`); process.exit(1); }
 console.log("wschats-check: all ok");

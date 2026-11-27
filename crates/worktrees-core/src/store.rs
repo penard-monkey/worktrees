@@ -178,11 +178,18 @@ pub struct Link {
     /// (`owner`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
+    /// `started_by` only: the starter is a WORKSPACE CHAT, at this bus
+    /// address (`workspace:<ws id>/<chat id>`, `workspacechats::Address`);
+    /// `place` is then the chat's id. Such a link is shown, and never nests
+    /// or routes through the place tree: a chat is no place
+    /// (`docs/proposals/workspace-chat-powers.md` §1.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<String>,
 }
 
 impl Link {
     pub fn to(place: &str, at: i64) -> Link {
-        Link { place: place.to_string(), at, project: None, from: None, by: None }
+        Link { place: place.to_string(), at, project: None, from: None, by: None, chat: None }
     }
 }
 

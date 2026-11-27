@@ -14,6 +14,9 @@ export type Link = {
   from?: string;
   /** `under` only: who moved it — `(main)` (its agent) or a principal. */
   by?: string;
+  /** `started_by` only: the starter is a workspace chat, at this bus address
+   *  (`workspace:<ws>/<chat>`); `place` is then the chat's id. */
+  chat?: string;
 };
 
 /** What a caller that may not see other projects gets in place of a starter
@@ -28,6 +31,8 @@ export type Starter = Elsewhere | {
   place: string;
   at: number;
   project?: string;
+  /** A workspace chat's bus address, when a chat started it. */
+  chat?: string;
   /** The place it names is gone (removed, or its slug reused). */
   removed?: boolean;
 };

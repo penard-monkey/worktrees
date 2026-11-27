@@ -248,6 +248,30 @@ struct Server {
     /// Why a server started in a workspace's folder pinned no chat: zero
     /// tools, and this said.
     ws_refusal: Option<String>,
+    /// Where workspace chats live, for a place's server reaching one by its
+    /// bus address (`workspace-chat-powers.md` §2). A test's own.
+    chat_files: ChatFiles,
+}
+
+/// The workspaces' folder, `workspaces.json` and Claude's own folder: what a
+/// place's server reads to reach a workspace chat.
+struct ChatFiles {
+    root: std::path::PathBuf,
+    ws_file: std::path::PathBuf,
+    claude_dir: std::path::PathBuf,
+}
+
+impl ChatFiles {
+    fn user() -> ChatFiles {
+        ChatFiles { root: worktrees_core::wsfolder::root(), ws_file: worktrees_core::workspaces::path(), claude_dir: worktrees_core::profile::default_claude_dir() }
+    }
+
+    /// A test's: nothing there, so no chat is ever reached.
+    #[cfg(test)]
+    fn none() -> ChatFiles {
+        let t = std::env::temp_dir().join("wt-no-chats-here");
+        ChatFiles { root: t.join("workspaces"), ws_file: t.join("workspaces.json"), claude_dir: t.join("claude") }
+    }
 }
 
 /// What `handle_line` knows about the request it is answering.
@@ -804,7 +828,7 @@ pub fn cmd_mcp(args: &[String]) -> i32 {
         }),
         None => worktrees_core::reach::Reach::none(),
     };
-    let mut server = Server { stale: crate::stale::Stale::current(), project, mutations, here: Some(root), ready: ready.clone(), inflight: Default::default(), reach, cap_said: false, registry_src: None, launched_by, ideas_dir: worktrees_core::ideas::dir(), ws, ws_refusal };
+    let mut server = Server { stale: crate::stale::Stale::current(), project, mutations, here: Some(root), ready: ready.clone(), inflight: Default::default(), reach, cap_said: false, registry_src: None, launched_by, ideas_dir: worktrees_core::ideas::dir(), ws, ws_refusal, chat_files: ChatFiles::user() };
 
     // With reach on, the `@` menu lists other projects' places too, so their
     // membership is watched as well (proposal §7: one `read_dir` + one small
@@ -872,7 +896,7 @@ fn workspace_mode_at(
     use worktrees_core::workspacechats as chats;
     let Some(ws) = chats::workspace_of_folder(&root, dir) else { return (None, None) };
     match chats::pin_at(&root, &ws_file, &ws, conv) {
-        Ok((_, c)) => (Some(wsmode::WsMode { root, ws_file, reg_src, ws, conv: c.id }), None),
+        Ok((_, c)) => (Some(wsmode::WsMode { root, ws_file, reg_src, ws, conv: c.id, claude_dir: worktrees_core::profile::default_claude_dir() }), None),
         Err(e) => (None, Some(e)),
     }
 }
@@ -1150,7 +1174,7 @@ impl Server {
                  planning-with-files plan summary (goal, phases, progress) when the place has one.",
                 serde_json::json!({
                     "type": "object",
-                    "properties": { "slug": { "type": "string", "description": "Place slug, or (main)." } },
+                    "properties": { "slug": { "type": "string", "description": "Place slug, or (main). Also a workspace chat's address, workspace:<ws>/<chat>: its title, state and SendMessage session." } },
                     "required": ["slug"],
                     "additionalProperties": false
                 }),
@@ -1234,7 +1258,7 @@ impl Server {
                     "type": "object",
                     "properties": {
                         "text": { "type": "string", "description": "The message. Up to 8 KB." },
-                        "to": { "type": "string", "description": "Place slug to send to. Default: the asker of reply_to, else the nearest live lane above yours, else (main)." },
+                        "to": { "type": "string", "description": "Place slug to send to, or a workspace chat's address (workspace:<ws>/<chat>) when this project is in its workspace. Default: the asker of reply_to, else the workspace chat that started you while it runs, else the nearest live lane above yours, else (main)." },
                         "reply_to": { "type": "string", "description": "The id of the message this answers. Optional." }
                     },
                     "required": ["text"],
@@ -1259,6 +1283,24 @@ impl Server {
                     "additionalProperties": false
                 }),
                 false,
+                false,
+            ),
+            tool(
+                "read_chat",
+                "What a workspace chat said: its last turns, each the prompt and the reply's text (no tool \
+                 input or output). Takes the chat's bus address, workspace:<ws>/<chat> (a dragged chat \
+                 reference carries it). Answered when this project is one of that chat's workspace's \
+                 projects and is not private. place_status takes the same address for its state.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "chat": { "type": "string", "description": "workspace:<ws>/<chat>." },
+                        "n": { "type": "integer", "description": "How many turns, newest last. Default 10, at most 50." }
+                    },
+                    "required": ["chat"],
+                    "additionalProperties": false
+                }),
+                true,
                 false,
             ),
             tool(
@@ -1594,7 +1636,7 @@ impl Server {
         };
 
         if let Some(ws) = &self.ws {
-            return Ok(ws.call(name, &a, &self.ideas_dir));
+            return Ok(ws.call(name, &a, &self.ideas_dir, &self.inflight));
         }
 
         // Guard A on this surface. The CLI refuses every mutating command inside
@@ -1632,6 +1674,19 @@ impl Server {
                 let mut out = text_ok(&serde_json::to_string_pretty(&v).unwrap_or_default());
                 self.say_capability(&mut out);
                 Ok(out)
+            }
+            "place_status" if worktrees_core::workspacechats::Address::claims(&s("slug")) => match self.reach_chat(&s("slug")) {
+                Ok(r) => Ok(text_ok(&serde_json::to_string_pretty(&wsmode::chat_status(&r.addr, &r.ws, &r.chat)).unwrap_or_default())),
+                Err(e) => Ok(text_err(&e)),
+            },
+            "read_chat" => {
+                let root = self.proj()?.main_root.clone();
+                let reg = self.fresh_registry();
+                let f = &self.chat_files;
+                Ok(match wsmode::read_chat_from(&f.root, &f.ws_file, &reg, &f.claude_dir, &root, &a) {
+                    Ok(v) => text_ok(&serde_json::to_string_pretty(&v).unwrap_or_default()),
+                    Err(e) => text_err(&e),
+                })
             }
             "place_status" => {
                 let slug = match self.target(&s("slug")) {
@@ -1894,6 +1949,14 @@ impl Server {
                         Some(format!("{} answered your message with no `to`, so it came back to you", me.slug)),
                         Some(format!("No `to`: sent to {asker}, who sent the message you answer.")),
                     )
+                } else if let Some((addr, title)) = self.chat_starter(project, &me.slug) {
+                    // Started by a workspace chat that is live: its reports
+                    // go there (workspace-chat-powers §1.3).
+                    (
+                        addr.clone(),
+                        Some(format!("{} was started by this chat and reported with no `to`, so it came to you", me.slug)),
+                        Some(format!("No `to`: sent to the workspace chat that started you, “{title}” ({addr}). Pass to: \"(main)\" to reach (main).")),
+                    )
                 } else {
                     let live = report_live(project);
                     let (route, mine) = worktrees_core::lineage::route_in(project, &me.slug, &live);
@@ -1912,6 +1975,36 @@ impl Server {
                 // qualified with this project's REGISTRY name — derived here,
                 // never an argument. A self-qualified address is local, so the
                 // own-place guard below compares like with like.
+                // A workspace chat, by its bus address: filed in its inbox,
+                // signed `<this project>:<slug>`.
+                if worktrees_core::workspacechats::Address::claims(&to) {
+                    let r = match self.reach_chat(&to) {
+                        Ok(r) => r,
+                        Err(e) => return Ok(text_err(&e)),
+                    };
+                    let Some(my_name) = self.my_name_now() else {
+                        return Ok(text_err("this project has no registry name to sign a message to a workspace chat with"));
+                    };
+                    let dir = match worktrees_core::workspacechats::inbox_at(&self.chat_files.root, &r.addr.ws) {
+                        Ok(d) => d,
+                        Err(e) => return Ok(text_err(&e)),
+                    };
+                    let from = format!("{my_name}:{}", me.slug);
+                    return match messages::post_routed(&dir, &own_log, &from, &r.addr.conv, &s("text"), reply_to, None, routed.as_deref(), messages::now_ms()) {
+                        Ok(m) => Ok(text_ok(
+                            &serde_json::to_string_pretty(&serde_json::json!({
+                                "id": m.id,
+                                "from": m.from,
+                                "to": r.addr.text(),
+                                "created": m.created,
+                                "reply_to": m.reply_to,
+                                "note": routed_note.as_deref().unwrap_or("Filed in the workspace chat's inbox. Its agent sees it with messages, or wakes from wait, and replies to your qualified address."),
+                            }))
+                            .unwrap_or_default(),
+                        )),
+                        Err(e) => Ok(text_err(&e)),
+                    };
+                }
                 let (dir, from, to, foreign) = match self.target(&to) {
                     Ok(Target::Local(t)) => {
                         if t == me.slug {
@@ -2457,79 +2550,7 @@ impl Server {
         };
         let shown = foreign.map_or_else(|| slug.clone(), |n| format!("{n}:{slug}"));
         let text = a.get("text").and_then(|v| v.as_str()).unwrap_or("");
-        if let Err(e) = send_text_ok(text) {
-            return Ok(text_err(&e));
-        }
-        let path = project.place_dir(&slug);
-        let Some(all) = tmux::PaneList::fetch() else {
-            return Ok(text_err("tmux is not available, so no agent session can be reached"));
-        };
-        let panes = &*project.place_panes(&slug, &all);
-        let canonical = project.session_name(&slug);
-        let exclude = (slug == "(main)").then(|| project.wt_root_dir().to_string());
-        let probes = agent::live_probes_in(Some(&all));
-        let scan = harness::Scan { probes: &probes, panes: Some(panes) };
-        let typed = attributed(&from, text);
-        // Every harness running here is asked in turn. One that takes typed
-        // input answers for the place; one with its own bus (Claude) only
-        // says where to send instead, and is heard only if nobody else was.
-        let mut elsewhere = None;
-        for a in harness::ALL {
-            let Some(reading) = a.activity(&scan, &canonical, &path) else { continue };
-            let req = harness::SendRequest {
-                panes,
-                canonical: &canonical,
-                path: &path,
-                exclude: exclude.as_deref(),
-                typed: &typed,
-                reading: &reading,
-            };
-            match a.send(&req) {
-                harness::Delivery::Refused(e) => return Ok(text_err(&e)),
-                harness::Delivery::Elsewhere(e) => {
-                    elsewhere.get_or_insert(e);
-                }
-                harness::Delivery::Typed { session, outcome } => {
-                    // Keep an unread fallback unless the harness confirmed it
-                    // consumed the input. A successful send-keys is not a receipt.
-                    let dir = messages::dir(std::path::Path::new(&project.git_common));
-                    let id = record_send(&dir, &from, &slug, text, &outcome);
-                    let submitted = outcome.confirmed();
-                    let note = outcome.note_for(a.provider().id);
-                    return Ok(text_ok(
-                        &serde_json::to_string_pretty(&serde_json::json!({
-                            "delivered": submitted, "provider": a.provider().id, "session": session, "id": id, "typed": typed,
-                            "queued": outcome == SendOutcome::Queued,
-                            "note": note,
-                            "reason": if submitted { None } else { Some(note.clone()) },
-                        }))
-                        .unwrap_or_default(),
-                    ));
-                }
-            }
-        }
-        if let Some(e) = elsewhere {
-            return Ok(text_err(&format!("{shown} {e}")));
-        }
-        // Something is running there, but not in a session this project
-        // created: adopted, or under another prefix. Not ours to type into.
-        let owned: Vec<String> = std::iter::once(canonical.clone())
-            .chain(worktrees_core::provider::PROVIDERS.iter().map(|p| p.sidecar_name(&canonical)))
-            .collect();
-        if let Some((name, provider)) = panes
-            .agents_in(&path, exclude.as_deref())
-            .into_iter()
-            .find(|(n, _)| !owned.contains(n))
-        {
-            return Ok(text_err(&format!(
-                "{shown}'s {provider} runs in tmux session {name}, which its project did not create \
-                 (adopted, or another prefix). send only types into sessions that project owns; \
-                 use report instead."
-            )));
-        }
-        Ok(text_err(&format!(
-            "no agent is running in {shown}. Post with report and it is read when an agent starts there."
-        )))
+        Ok(send_into(project, &slug, &from, &shown, text))
     }
 
     /// A slug that is flag-safe AND names a place that actually exists.
@@ -2690,6 +2711,32 @@ impl Server {
             Some(e) if e.private => Err(format!("this project ('{}') is now private, so it reaches no other project", e.name)),
             Some(_) => Ok(()),
         }
+    }
+
+    /// The workspace chat `raw` names, reached from this project
+    /// (`workspacechats::reach_at`): this project is one of its workspace's,
+    /// and not private.
+    fn reach_chat(&self, raw: &str) -> Result<worktrees_core::workspacechats::Reached, String> {
+        use worktrees_core::workspacechats as chats;
+        let addr = chats::Address::parse(raw).ok_or_else(|| format!("{:?} is not a chat's address: workspace:<ws>/<chat>", raw.trim()))?;
+        let root = self.proj()?.main_root.clone();
+        chats::reach_at(&self.chat_files.root, &self.chat_files.ws_file, &self.fresh_registry(), &addr, &root)
+    }
+
+    /// The workspace chat that started place `slug`, when it is still
+    /// reachable from here and its Claude is running: its address and title.
+    fn chat_starter(&self, project: &Project, slug: &str) -> Option<(String, String)> {
+        let link = store::read_lenient(&project.main_root).places.get(slug)?.started_by.clone()?;
+        let r = self.reach_chat(link.chat.as_deref()?).ok()?;
+        let live = match test_chat_live() {
+            Some(v) => v,
+            None => {
+                let panes = tmux::PaneList::fetch();
+                let probes = agent::live_probes_in(panes.as_ref());
+                worktrees_core::lineage::counts_as_live(worktrees_core::workspacechats::chat_activity(&probes, &r.chat.id).state)
+            }
+        };
+        live.then(|| (r.addr.text(), clip(&r.chat.title, 80)))
     }
 
     /// This project's registry name as it is NOW — what a header or a label
@@ -3197,6 +3244,21 @@ fn report_live(project: &Project) -> Box<dyn Fn(&str) -> bool + '_> {
     Box::new(worktrees_core::lineage::live_reader(project))
 }
 
+/// A test's answer to "is the chat that started this lane running".
+#[cfg(test)]
+fn test_chat_live() -> Option<bool> {
+    TEST_CHAT_LIVE.with(|t| *t.borrow())
+}
+#[cfg(not(test))]
+fn test_chat_live() -> Option<bool> {
+    None
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CHAT_LIVE: std::cell::RefCell<Option<bool>> = const { std::cell::RefCell::new(None) };
+}
+
 #[cfg(test)]
 thread_local! {
     static TEST_LIVE: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
@@ -3395,6 +3457,87 @@ fn model_ok(harness: &str, model: &str, options: &[worktrees_core::choice::Model
         )),
         None => Err(format!("pi does not offer {model}. Ready: {listed}")),
     }
+}
+
+/// `send`'s body once the target is resolved and the sender named: type
+/// `text`, labelled as `from`'s, into `slug`'s agent in `project`, or say how
+/// to reach it. `shown` is how the target is named in a refusal. Shared by a
+/// place's server and a workspace chat's (`wsmode`).
+fn send_into(project: &Project, slug: &str, from: &str, shown: &str, text: &str) -> serde_json::Value {
+    if let Err(e) = send_text_ok(text) {
+        return text_err(&e);
+    }
+    let slug = slug.to_string();
+    let path = project.place_dir(&slug);
+    let Some(all) = tmux::PaneList::fetch() else {
+        return text_err("tmux is not available, so no agent session can be reached");
+    };
+    let panes = &*project.place_panes(&slug, &all);
+    let canonical = project.session_name(&slug);
+    let exclude = (slug == "(main)").then(|| project.wt_root_dir().to_string());
+    let probes = agent::live_probes_in(Some(&all));
+    let scan = harness::Scan { probes: &probes, panes: Some(panes) };
+    let typed = attributed(&from, text);
+    // Every harness running here is asked in turn. One that takes typed
+    // input answers for the place; one with its own bus (Claude) only
+    // says where to send instead, and is heard only if nobody else was.
+    let mut elsewhere = None;
+    for a in harness::ALL {
+        let Some(reading) = a.activity(&scan, &canonical, &path) else { continue };
+        let req = harness::SendRequest {
+            panes,
+            canonical: &canonical,
+            path: &path,
+            exclude: exclude.as_deref(),
+            typed: &typed,
+            reading: &reading,
+        };
+        match a.send(&req) {
+            harness::Delivery::Refused(e) => return text_err(&e),
+            harness::Delivery::Elsewhere(e) => {
+                elsewhere.get_or_insert(e);
+            }
+            harness::Delivery::Typed { session, outcome } => {
+                // Keep an unread fallback unless the harness confirmed it
+                // consumed the input. A successful send-keys is not a receipt.
+                let dir = messages::dir(std::path::Path::new(&project.git_common));
+                let id = record_send(&dir, &from, &slug, text, &outcome);
+                let submitted = outcome.confirmed();
+                let note = outcome.note_for(a.provider().id);
+                return text_ok(
+                    &serde_json::to_string_pretty(&serde_json::json!({
+                        "delivered": submitted, "provider": a.provider().id, "session": session, "id": id, "typed": typed,
+                        "queued": outcome == SendOutcome::Queued,
+                        "note": note,
+                        "reason": if submitted { None } else { Some(note.clone()) },
+                    }))
+                    .unwrap_or_default(),
+                );
+            }
+        }
+    }
+    if let Some(e) = elsewhere {
+        return text_err(&format!("{shown} {e}"));
+    }
+    // Something is running there, but not in a session this project
+    // created: adopted, or under another prefix. Not ours to type into.
+    let owned: Vec<String> = std::iter::once(canonical.clone())
+        .chain(worktrees_core::provider::PROVIDERS.iter().map(|p| p.sidecar_name(&canonical)))
+        .collect();
+    if let Some((name, provider)) = panes
+        .agents_in(&path, exclude.as_deref())
+        .into_iter()
+        .find(|(n, _)| !owned.contains(n))
+    {
+        return text_err(&format!(
+            "{shown}'s {provider} runs in tmux session {name}, which its project did not create \
+             (adopted, or another prefix). send only types into sessions that project owns; \
+             use report instead."
+        ));
+    }
+    text_err(&format!(
+        "no agent is running in {shown}. Post with report and it is read when an agent starts there."
+    ))
 }
 
 /// What `send` will type: `harness::typed_line_ok`, the rule serve's
@@ -3703,6 +3846,11 @@ fn idea_joined(content: &str, text: &str) -> String {
 /// it replaces is not the user's text. It is refused if anyone wrote the file
 /// in between.
 fn idea_create(dir: &std::path::Path, a: &serde_json::Value) -> Result<serde_json::Value, String> {
+    idea_create_by(dir, a, None)
+}
+
+/// [`idea_create`], marked made by a workspace chat when `by` names one.
+fn idea_create_by(dir: &std::path::Path, a: &serde_json::Value, by: Option<&worktrees_core::plans::Proposed>) -> Result<serde_json::Value, String> {
     let title = idea_arg(a, "title")?;
     let text = match a.get("text") {
         None | Some(serde_json::Value::Null) => "",
@@ -3710,7 +3858,10 @@ fn idea_create(dir: &std::path::Path, a: &serde_json::Value) -> Result<serde_jso
         Some(_) => return Err("text must be a string".into()),
     };
     idea_fits(text)?;
-    let d = ideas::create_at(dir, title)?;
+    let d = match by {
+        Some(b) => ideas::create_made_at(dir, title, b)?,
+        None => ideas::create_at(dir, title)?,
+    };
     if text.is_empty() {
         return Ok(idea_row(&d.idea));
     }
@@ -3973,7 +4124,7 @@ mod tests {
     #[test]
     fn with_no_project_it_still_handshakes_and_advertises_no_tools() {
         use serde_json::json;
-        let mut server = Server { stale: Default::default(), project: None, mutations: true, here: None, ready: Default::default(), inflight: Default::default(), reach: worktrees_core::reach::Reach::none(), cap_said: false, registry_src: None, launched_by: None, ideas_dir: no_ideas(), ws: None, ws_refusal: None };
+        let mut server = Server { stale: Default::default(), project: None, mutations: true, here: None, ready: Default::default(), inflight: Default::default(), reach: worktrees_core::reach::Reach::none(), cap_said: false, registry_src: None, launched_by: None, ideas_dir: no_ideas(), ws: None, ws_refusal: None, chat_files: ChatFiles::none() };
 
         let init = server
             .handle_line(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }).to_string())
@@ -4036,7 +4187,7 @@ mod tests {
         .unwrap();
 
         let project = Project::discover(&root).expect("a git repo");
-        let mut server = Server { stale: Default::default(), project: Some(project), mutations: true, here: None, ready: Default::default(), inflight: Default::default(), reach: worktrees_core::reach::Reach::none(), cap_said: false, registry_src: None, launched_by: None, ideas_dir: no_ideas(), ws: None, ws_refusal: None };
+        let mut server = Server { stale: Default::default(), project: Some(project), mutations: true, here: None, ready: Default::default(), inflight: Default::default(), reach: worktrees_core::reach::Reach::none(), cap_said: false, registry_src: None, launched_by: None, ideas_dir: no_ideas(), ws: None, ws_refusal: None, chat_files: ChatFiles::none() };
 
         // Reading is how you find out WHAT this tree is — never refused.
         let r = server.call(&json!({ "name": "list_places", "arguments": {} })).unwrap();
@@ -4146,7 +4297,7 @@ mod tests {
 
         let names = |m: bool| -> Vec<String> {
             let p = Project::discover(&root).expect("a git repo");
-            Server { stale: Default::default(), project: Some(p), mutations: m, here: None, ready: Default::default(), inflight: Default::default(), reach: worktrees_core::reach::Reach::none(), cap_said: false, registry_src: None, launched_by: None, ideas_dir: no_ideas(), ws: None, ws_refusal: None }
+            Server { stale: Default::default(), project: Some(p), mutations: m, here: None, ready: Default::default(), inflight: Default::default(), reach: worktrees_core::reach::Reach::none(), cap_said: false, registry_src: None, launched_by: None, ideas_dir: no_ideas(), ws: None, ws_refusal: None, chat_files: ChatFiles::none() }
                 .tools()
                 .iter()
                 .map(|t| t["name"].as_str().unwrap_or_default().to_string())
@@ -4156,7 +4307,7 @@ mod tests {
         assert!(names(true).contains(&"show_doc".to_string()), "--mutations server must offer it");
 
         let p = Project::discover(&root).expect("a git repo");
-        let mut server = Server { stale: Default::default(), project: Some(p), mutations: true, here: None, ready: Default::default(), inflight: Default::default(), reach: worktrees_core::reach::Reach::none(), cap_said: false, registry_src: None, launched_by: None, ideas_dir: no_ideas(), ws: None, ws_refusal: None };
+        let mut server = Server { stale: Default::default(), project: Some(p), mutations: true, here: None, ready: Default::default(), inflight: Default::default(), reach: worktrees_core::reach::Reach::none(), cap_said: false, registry_src: None, launched_by: None, ideas_dir: no_ideas(), ws: None, ws_refusal: None, chat_files: ChatFiles::none() };
 
         // Relative resolves against the repo root, not the process cwd.
         let r = server.call(&json!({ "name": "show_doc", "arguments": { "path": "CLAUDE.md" } })).unwrap();
@@ -4196,7 +4347,7 @@ mod tests {
             .expect("git init")
             .success());
         let project = Project::discover(&base).expect("a git repo");
-        let server = Server { stale: Default::default(), project: Some(project), mutations: false, here: None, ready: Default::default(), inflight: Default::default(), reach: worktrees_core::reach::Reach::none(), cap_said: false, registry_src: None, launched_by: None, ideas_dir: no_ideas(), ws: None, ws_refusal: None };
+        let server = Server { stale: Default::default(), project: Some(project), mutations: false, here: None, ready: Default::default(), inflight: Default::default(), reach: worktrees_core::reach::Reach::none(), cap_said: false, registry_src: None, launched_by: None, ideas_dir: no_ideas(), ws: None, ws_refusal: None, chat_files: ChatFiles::none() };
 
         let caps = server.initialize(&json!({ "protocolVersion": LATEST }))["capabilities"].clone();
         assert_eq!(caps["resources"]["listChanged"], json!(true));
@@ -4376,6 +4527,7 @@ mod tests {
             ideas_dir: no_ideas(),
             ws: None,
             ws_refusal: None,
+            chat_files: ChatFiles::none(),
         }
     }
 
@@ -4493,6 +4645,7 @@ mod tests {
             ideas_dir: no_ideas(),
             ws: None,
             ws_refusal: None,
+            chat_files: ChatFiles::none(),
         }
     }
 
@@ -5292,6 +5445,7 @@ mod tests {
                 ideas_dir: no_ideas(),
                 ws: None,
                 ws_refusal: None,
+                chat_files: ChatFiles::none(),
             }
         }
     }
@@ -6025,6 +6179,7 @@ mod tests {
             ideas_dir: f.ideas.clone(),
             ws,
             ws_refusal,
+            chat_files: ChatFiles { root: f.root.clone(), ws_file: f.ws_file.clone(), claude_dir: f.sc.base.join("claude") },
         }
     }
 
@@ -6037,27 +6192,33 @@ mod tests {
     }
 
     /// The mode's tools, exactly: any other name fails this. Without
-    /// `--mutations` the one write is not offered. Nothing that drives a lane
-    /// is callable, advertised or not.
+    /// `--mutations` nothing that starts, types or writes a document is
+    /// offered. `remove_worktree` is never a chat's, and neither is anything
+    /// that names this repository's own place (`show_doc`, `apply_rules`).
     #[test]
-    fn workspace_mode_offers_exactly_its_six_tools() {
+    fn workspace_mode_offers_exactly_its_tools() {
         let f = ws_fix("ws-tools");
         let mut s = ws_server(&f, Some(&f.conv), true);
         assert_eq!(names(&s), wsmode::TOOLS.to_vec(), "exactly these, in this order");
-        assert_eq!(names(&s), ["workspace", "place_status", "ideas_list", "idea_read", "idea_related", "plan_propose_work"]);
         let ro = ws_server(&f, Some(&f.conv), false);
-        assert_eq!(names(&ro), ["workspace", "place_status", "ideas_list", "idea_read", "idea_related"]);
+        assert_eq!(names(&ro), wsmode::TOOLS[..wsmode::READ_TOOLS].to_vec());
         for t in s.tools() {
-            let write = t["name"] == "plan_propose_work";
-            assert_eq!(t["annotations"]["readOnlyHint"], serde_json::json!(!write), "{}", t["name"]);
+            let read = ["workspace", "place_status", "list_places", "read_chat", "wait", "plan_read", "ideas_list", "idea_read", "idea_related"].contains(&t["name"].as_str().unwrap());
+            assert_eq!(t["annotations"]["readOnlyHint"], serde_json::json!(read), "{}", t["name"]);
+            assert_eq!(t["annotations"]["destructiveHint"], serde_json::json!(false), "{}", t["name"]);
         }
-        for other in ["list_places", "create_worktree", "open_place", "send", "report", "messages", "wait", "set_note", "set_pin", "set_lifecycle", "remove_worktree", "close_session", "idea_write", "idea_create", "idea_append", "show_doc", "list_projects"] {
+        for other in ["remove_worktree", "show_doc", "list_projects", "apply_rules", "adopt_place", "doctor", "rules_status"] {
             let r = call(&mut s, other, serde_json::json!({}));
             assert!(says(&r).contains("unknown tool"), "{other}: {}", says(&r));
+        }
+        let mut ro = ro;
+        for write in ["create_worktree", "send", "plan_write", "idea_create", "set_note"] {
+            assert!(says(&call(&mut ro, write, serde_json::json!({}))).contains("unknown tool"), "{write} without --mutations");
         }
         let init = s.initialize(&serde_json::json!({}));
         let text = init["instructions"].as_str().unwrap();
         assert!(text.contains("Workspace mode") && text.contains("“Chat 1”") && text.contains("“Home”"), "{text}");
+        assert!(text.contains(&format!("workspace:{}/{}", f.ws, f.conv)) && text.contains("never removes a place"), "{text}");
         assert_eq!(s.resources()["resources"], serde_json::json!([]));
     }
 
@@ -6177,6 +6338,310 @@ mod tests {
         worktrees_core::workspaces::set_plan_at(&f.ws_file, &f.ws, None).unwrap();
         let r = call(&mut s, "plan_propose_work", serde_json::json!({ "title": "Y", "project": "proj", "branch": "y", "brief": "b" }));
         assert!(says(&r).contains("has no plan"), "{}", says(&r));
+    }
+
+    // ── a workspace chat is a first-class agent (workspace-chat-powers) ────
+
+    /// A place's server in `root` (a project of the fixture's registry), with
+    /// the fixture's chats reachable.
+    fn lane_server(f: &WsFix, root: &std::path::Path, mutations: bool) -> Server {
+        Server {
+            registry_src: Some(f.reg.clone()),
+            chat_files: ChatFiles { root: f.root.clone(), ws_file: f.ws_file.clone(), claude_dir: f.sc.base.join("claude") },
+            ideas_dir: f.ideas.clone(),
+            ..server_in(root, root, mutations)
+        }
+    }
+
+    fn chat_addr(f: &WsFix) -> String {
+        format!("workspace:{}/{}", f.ws, f.conv)
+    }
+
+    /// Every version a document's history holds, oldest first.
+    fn history_of(f: &WsFix, id: &str) -> Vec<String> {
+        let mut p: Vec<_> = std::fs::read_dir(f.ideas.join(ideas::HISTORY_DIR).join(id)).into_iter().flatten().flatten().map(|e| e.path()).collect();
+        p.sort();
+        p.iter().map(|p| std::fs::read_to_string(p).unwrap()).collect()
+    }
+
+    /// Messages both ways: the chat reports to a place of its workspace (filed
+    /// in that project's log, signed with the chat's address); the place
+    /// answers with no `to` and it lands in the chat's inbox, signed
+    /// `<project>:<slug>`; the chat reads it and answers back by `reply_to`.
+    #[test]
+    fn a_chat_and_a_lane_talk_both_ways_on_the_bus() {
+        let f = ws_fix("ws-bus");
+        let mut chat = ws_server(&f, Some(&f.conv), false);
+        let me = chat_addr(&f);
+        let r = call(&mut chat, "report", serde_json::json!({ "to": "proj:(main)", "text": "Can you look at the docs?" }));
+        assert_eq!(r["isError"], serde_json::json!(false), "{}", says(&r));
+        assert_eq!(body(&r)["from"], serde_json::json!(me));
+        let mut lane = lane_server(&f, &f.sc.root, false);
+        let got = body(&call(&mut lane, "messages", serde_json::json!({})));
+        let m = &got["messages"][0];
+        assert_eq!((m["from"].as_str(), m["text"].as_str()), (Some(me.as_str()), Some("Can you look at the docs?")), "{got}");
+        let id = m["id"].as_str().unwrap().to_string();
+        let a = call(&mut lane, "report", serde_json::json!({ "text": "Done: docs/x.md", "reply_to": id }));
+        assert_eq!(a["isError"], serde_json::json!(false), "{}", says(&a));
+        assert_eq!(body(&a)["to"], serde_json::json!(me), "a reply with no `to` returns to the chat");
+        let inbox = body(&call(&mut chat, "messages", serde_json::json!({})));
+        let back = &inbox["messages"][0];
+        assert_eq!((back["from"].as_str(), back["text"].as_str()), (Some("proj:(main)"), Some("Done: docs/x.md")), "{inbox}");
+        let again = call(&mut chat, "report", serde_json::json!({ "text": "Thanks", "reply_to": back["id"].as_str().unwrap() }));
+        assert_eq!(body(&again)["to"], serde_json::json!("proj:(main)"), "{}", says(&again));
+        // wait sees the next one at once.
+        call(&mut lane, "report", serde_json::json!({ "to": me, "text": "one more" }));
+        let w = body(&call(&mut chat, "wait", serde_json::json!({ "until": "message", "timeout_s": 0 })));
+        assert_eq!(w["event"], serde_json::json!("message"), "{w}");
+        // The chat reaches only its own workspace's places, never a private one.
+        for (to, want) in [("outside:(main)", "not one of this workspace's projects"), ("secret:(main)", "private"), ("proj:nope", "no place nope"), (me.as_str(), "this chat")] {
+            let r = call(&mut chat, "report", serde_json::json!({ "to": to, "text": "x" }));
+            assert!(r["isError"] == serde_json::json!(true) && says(&r).contains(want), "{to}: {}", says(&r));
+        }
+    }
+
+    /// A place of a project outside the chat's workspace, or of a private
+    /// one, cannot post to it, see it or read it: one refusal, which says
+    /// nothing of whether the workspace or the chat exists.
+    #[test]
+    fn only_the_workspaces_projects_reach_its_chat() {
+        let f = ws_fix("ws-bus-reach");
+        let me = chat_addr(&f);
+        let secret = f.sc.base.join("secret").canonicalize().unwrap();
+        for root in [&f.outside, &secret] {
+            let mut s = lane_server(&f, root, false);
+            for (tool, args) in [
+                ("report", serde_json::json!({ "to": me, "text": "hi" })),
+                ("place_status", serde_json::json!({ "slug": me })),
+                ("read_chat", serde_json::json!({ "chat": me })),
+            ] {
+                let r = call(&mut s, tool, args);
+                assert!(r["isError"] == serde_json::json!(true) && says(&r).contains("not a chat of a workspace this project belongs to"), "{} {tool}: {}", root.display(), says(&r));
+            }
+        }
+        let ghost = format!("workspace:{}/{}", f.ws, worktrees_core::ulid::new());
+        let mut s = lane_server(&f, &f.sc.root, false);
+        assert!(says(&call(&mut s, "report", serde_json::json!({ "to": ghost, "text": "hi" }))).contains("not a chat of a workspace"));
+        assert!(says(&call(&mut s, "report", serde_json::json!({ "to": "workspace:nope/x", "text": "hi" }))).contains("not a chat's address"));
+        let st = body(&call(&mut s, "place_status", serde_json::json!({ "slug": me })));
+        assert_eq!((st["title"].as_str(), st["session"].as_str()), (Some("Chat 1"), Some(worktrees_core::workspacechats::session_name(&f.conv).as_str())), "{st}");
+    }
+
+    /// `read_chat` gives a chat's prompts and reply text only, from its
+    /// transcript through `turns`; a tool's input never comes out.
+    #[test]
+    fn read_chat_gives_prompts_and_replies_only() {
+        let f = ws_fix("ws-read");
+        let c = worktrees_core::workspacechats::find_at(&f.root, &f.ws, &f.conv).unwrap();
+        let folder = worktrees_core::wsfolder::make_at(&f.root, &f.ws).unwrap();
+        let claude = f.sc.base.join("claude");
+        let path = worktrees_core::desksessions::transcript_paths(&claude, &folder, &c.session_id).remove(0);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let lines = [
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-11-27T10:00:00Z","message":{"role":"user","content":"Where do backups go?"}}"#,
+            r#"{"type":"assistant","uuid":"a1","timestamp":"2026-11-27T10:00:05Z","message":{"role":"assistant","model":"m","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cat SECRET-INPUT"}},{"type":"text","text":"To the NAS."}]}}"#,
+        ];
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        let mut s = lane_server(&f, &f.sc.root, false);
+        let r = call(&mut s, "read_chat", serde_json::json!({ "chat": chat_addr(&f) }));
+        assert_eq!(r["isError"], serde_json::json!(false), "{}", says(&r));
+        let v = body(&r);
+        assert_eq!(v["turns"][0]["user"], serde_json::json!("Where do backups go?"), "{v}");
+        assert_eq!(v["turns"][0]["reply"], serde_json::json!("To the NAS."), "{v}");
+        assert!(!v.to_string().contains("SECRET-INPUT"), "no tool input: {v}");
+        assert!(says(&call(&mut s, "read_chat", serde_json::json!({ "chat": chat_addr(&f), "n": 0 }))).contains("from 1 to 50"));
+    }
+
+    /// A lane a chat started records it (`started_by.chat`); its report with
+    /// no `to` goes to the chat while the chat runs, else up the place tree
+    /// to (main) as before; the link never nests the lane under a place.
+    #[test]
+    fn a_lane_a_chat_started_reports_to_it_while_it_runs() {
+        let f = ws_fix("ws-starter");
+        let project = Project::discover(&f.sc.root).unwrap();
+        let wt = f.sc.root.join(".worktrees").join("kid");
+        assert!(std::process::Command::new("git").arg("-C").arg(&f.sc.root).args(["worktree", "add", "-q", "-b", "kid"]).arg(&wt).status().unwrap().success());
+        let mut ui = CaptureUi { started_from: StartedFrom::Chat { conv: f.conv.clone(), address: chat_addr(&f) }, ..CaptureUi::default() };
+        ops::record_origin(&project, &mut ui, "kid");
+        let d = store::read_lenient(&project.main_root).places.get("kid").cloned().unwrap();
+        let link = d.started_by.unwrap();
+        assert_eq!((link.place.as_str(), link.chat.as_deref()), (f.conv.as_str(), Some(chat_addr(&f).as_str())));
+        let lin = worktrees_core::lineage::route_in(&project, "kid", &|_| true).1;
+        assert_eq!(lin.starter.as_ref().and_then(|s| s.chat.as_deref()), Some(chat_addr(&f).as_str()));
+        assert!(lin.parent.is_none() && !lin.starter.unwrap().removed, "shown, never nested");
+        let mut lane = Server { here: Some(wt.clone()), ..lane_server(&f, &f.sc.root, false) };
+        TEST_CHAT_LIVE.with(|t| *t.borrow_mut() = Some(true));
+        let r = with_live(&[], || call(&mut lane, "report", serde_json::json!({ "text": "done" })));
+        assert_eq!(body(&r)["to"], serde_json::json!(chat_addr(&f)), "{}", says(&r));
+        assert!(says(&r).contains("the workspace chat that started you"), "{}", says(&r));
+        let mut chat = ws_server(&f, Some(&f.conv), false);
+        let got = body(&call(&mut chat, "messages", serde_json::json!({})));
+        assert_eq!(got["messages"][0]["from"], serde_json::json!("proj:kid"), "{got}");
+        assert!(got["messages"][0]["routed"].as_str().is_some_and(|w| w.contains("started by this chat")), "{got}");
+        TEST_CHAT_LIVE.with(|t| *t.borrow_mut() = Some(false));
+        let r = with_live(&[], || call(&mut lane, "report", serde_json::json!({ "text": "done again" })));
+        assert_eq!(body(&r)["to"], serde_json::json!("(main)"), "not running: (main), as before: {}", says(&r));
+        TEST_CHAT_LIVE.with(|t| *t.borrow_mut() = None);
+    }
+
+    /// The lane tools are refused, in words, outside the workspace's
+    /// answered projects, before anything runs.
+    #[test]
+    fn a_chats_lane_tools_reach_its_own_projects_only() {
+        let f = ws_fix("ws-lanes");
+        let mut s = ws_server(&f, Some(&f.conv), true);
+        for (tool, args, want) in [
+            ("create_worktree", serde_json::json!({ "project": "outside", "branch": "x" }), "not one of this workspace's projects"),
+            ("create_worktree", serde_json::json!({ "project": "secret", "branch": "x" }), "private"),
+            ("create_worktree", serde_json::json!({ "branch": "x" }), "project is required"),
+            ("create_worktree", serde_json::json!({ "project": "proj", "branch": "--upload-pack=x" }), "flag"),
+            ("open_place", serde_json::json!({ "place": "outside:(main)" }), "not one of this workspace's projects"),
+            ("close_session", serde_json::json!({ "place": "secret:(main)" }), "private"),
+            ("send", serde_json::json!({ "place": "proj:nope", "text": "hi" }), "no place nope"),
+            ("set_note", serde_json::json!({ "place": chat_addr(&f), "note": "x" }), "is a chat, not a place"),
+            ("set_lifecycle", serde_json::json!({ "place": "proj:(main)", "lifecycle": "gone" }), "invalid lifecycle"),
+        ] {
+            let r = call(&mut s, tool, args.clone());
+            assert!(r["isError"] == serde_json::json!(true) && says(&r).contains(want), "{tool} {args}: {}", says(&r));
+        }
+        let r = call(&mut s, "set_note", serde_json::json!({ "place": "proj:(main)", "note": "chat was here" }));
+        assert_eq!(r["isError"], serde_json::json!(false), "{}", says(&r));
+        assert_eq!(store::read_lenient(&Project::discover(&f.sc.root).unwrap().main_root).places["(main)"].note.as_deref(), Some("chat was here"));
+        let v = body(&call(&mut s, "list_places", serde_json::json!({ "project": "proj" })));
+        assert_eq!(v["places"][0]["address"], serde_json::json!("proj:(main)"), "{v}");
+    }
+
+    /// Every change a chat makes to a plan lands in the plan's history as its
+    /// own version (the owner, 2026-11-27): an added item, a rewrite, an
+    /// edited item. A rewrite over a save it did not read is refused.
+    #[test]
+    fn a_chats_plan_writes_each_keep_the_version_they_replace() {
+        let f = ws_fix("ws-plan");
+        let mut s = ws_server(&f, Some(&f.conv), true);
+        let text = || ideas::read_at(&f.ideas, &f.plan).unwrap().content;
+        let v0 = text();
+        let r = call(&mut s, "plan_add_work", serde_json::json!({ "title": "Docs", "project": "proj", "branch": "docs", "brief": "Write them." }));
+        assert_eq!(r["isError"], serde_json::json!(false), "{}", says(&r));
+        let w = worktrees_core::plans::read(&text()).work.unwrap();
+        let it = w.last().unwrap();
+        assert!(it.proposal.is_none() && it.maker.as_ref().is_some_and(|m| m.chat == f.conv && m.by == "Chat 1"), "made, not proposed: {it:?}");
+        assert_eq!(history_of(&f, &f.plan).last(), Some(&v0), "adding an item kept the plan before it");
+        let v1 = text();
+        let read = body(&call(&mut s, "plan_read", serde_json::json!({})));
+        let mtime = read["mtime_ms"].as_u64().unwrap();
+        let edited = v1.replace("Write them.", "Write them, then stop.");
+        let r = call(&mut s, "plan_write", serde_json::json!({ "content": edited, "expected_mtime": mtime }));
+        assert_eq!(r["isError"], serde_json::json!(false), "{}", says(&r));
+        assert_eq!(history_of(&f, &f.plan).last(), Some(&v1), "editing an item kept the plan before it");
+        let v2 = text();
+        let mtime = body(&call(&mut s, "plan_read", serde_json::json!({})))["mtime_ms"].as_u64().unwrap();
+        let rewrite = v2.replace("## Work", "## Notes\n\nRewritten by the chat.\n\n## Work");
+        assert_eq!(call(&mut s, "plan_write", serde_json::json!({ "content": rewrite, "expected_mtime": mtime }))["isError"], serde_json::json!(false));
+        assert_eq!(history_of(&f, &f.plan).last(), Some(&v2), "a rewrite kept the plan before it");
+        let h = history_of(&f, &f.plan);
+        assert!(h.contains(&v0) && h.contains(&v1) && h.contains(&v2), "each its own version");
+        let stale = call(&mut s, "plan_write", serde_json::json!({ "content": v0, "expected_mtime": mtime }));
+        assert_eq!(stale["isError"], serde_json::json!(true), "a save it did not read is never written over");
+        let unplan = v2.replace("plan_of:", "planned:");
+        let mtime = body(&call(&mut s, "plan_read", serde_json::json!({})))["mtime_ms"].as_u64().unwrap();
+        assert!(says(&call(&mut s, "plan_write", serde_json::json!({ "content": unplan, "expected_mtime": mtime }))).contains("not a plan any more"));
+        // plan_start_work refuses an item of a project it does not answer for.
+        call(&mut s, "plan_add_work", serde_json::json!({ "title": "Far", "project": "proj", "branch": "far", "brief": "b" }));
+        let far = worktrees_core::plans::read(&text()).work.unwrap().into_iter().find(|w| w.title == "Far").unwrap();
+        let moved = text().replace("project: proj\nbranch: far", "project: outside\nbranch: far");
+        let mtime = body(&call(&mut s, "plan_read", serde_json::json!({})))["mtime_ms"].as_u64().unwrap();
+        call(&mut s, "plan_write", serde_json::json!({ "content": moved, "expected_mtime": mtime }));
+        let r = call(&mut s, "plan_start_work", serde_json::json!({ "line": far.line, "title": "Far" }));
+        assert!(says(&r).contains("not one of this workspace's projects"), "{}", says(&r));
+    }
+
+    /// With no plan, the chat makes one (from the linked ideas, none
+    /// needed), marked made by it, and it is the workspace's plan; a second
+    /// is refused.
+    #[test]
+    fn a_chat_makes_the_workspaces_plan_when_it_has_none() {
+        let f = ws_fix("ws-make");
+        worktrees_core::workspaces::set_plan_at(&f.ws_file, &f.ws, None).unwrap();
+        let mut s = ws_server(&f, Some(&f.conv), true);
+        assert!(says(&call(&mut s, "plan_read", serde_json::json!({}))).contains("no plan yet"));
+        let r = call(&mut s, "plan_make", serde_json::json!({ "title": "Plan: storage" }));
+        assert_eq!(r["isError"], serde_json::json!(false), "{}", says(&r));
+        let id = body(&r)["plan"].as_str().unwrap().to_string();
+        let w = worktrees_core::workspaces::read_at(&f.ws_file).unwrap().workspaces.remove(0);
+        assert_eq!(w.plan.as_deref(), Some(id.as_str()));
+        let doc = ideas::read_at(&f.ideas, &id).unwrap();
+        assert!(doc.content.contains(&format!("made_by: Chat 1 · {} ·", f.conv)) && doc.content.contains("plan_of: []"), "{}", doc.content);
+        assert!(call(&mut s, "plan_add_work", serde_json::json!({ "title": "A", "project": "proj", "branch": "a", "brief": "b" }))["isError"] == serde_json::json!(false));
+        assert!(says(&call(&mut s, "plan_make", serde_json::json!({ "title": "Another" }))).contains("has a plan already"));
+    }
+
+    /// Ideas: a chat creates one (made by it, recorded in the engine's
+    /// record) and edits it; it edits a linked one, and no other. Every write
+    /// and every append keeps the version it replaces.
+    #[test]
+    fn a_chat_edits_the_ideas_it_made_or_the_workspace_links_and_keeps_each_version() {
+        let f = ws_fix("ws-ideas");
+        let mut s = ws_server(&f, Some(&f.conv), true);
+        let r = call(&mut s, "idea_create", serde_json::json!({ "title": "Backups", "text": "First thought." }));
+        assert_eq!(r["isError"], serde_json::json!(false), "{}", says(&r));
+        let mine = body(&r)["id"].as_str().unwrap().to_string();
+        assert!(worktrees_core::workspacechats::find_at(&f.root, &f.ws, &f.conv).unwrap().made.contains(&mine));
+        let v0 = ideas::read_at(&f.ideas, &mine).unwrap();
+        assert!(v0.content.contains("made_by: Chat 1"), "{}", v0.content);
+        assert_eq!(call(&mut s, "idea_append", serde_json::json!({ "id": mine, "text": "Second." }))["isError"], serde_json::json!(false));
+        assert_eq!(history_of(&f, &mine).last(), Some(&v0.content), "an append kept the version before it");
+        let v1 = ideas::read_at(&f.ideas, &mine).unwrap();
+        let w = call(&mut s, "idea_write", serde_json::json!({ "id": mine, "content": v1.content.replace("Second.", "Rewritten."), "expected_mtime": v1.idea.mtime_ms }));
+        assert_eq!(w["isError"], serde_json::json!(false), "{}", says(&w));
+        assert_eq!(history_of(&f, &mine).last(), Some(&v1.content), "a write kept the version before it");
+        // Someone else's idea: refused until it is linked to the workspace.
+        let theirs = ideas::create_at(&f.ideas, "Theirs").unwrap().idea.id.unwrap();
+        let r = call(&mut s, "idea_append", serde_json::json!({ "id": theirs, "text": "x" }));
+        assert!(says(&r).contains("neither linked to this workspace nor made by this chat"), "{}", says(&r));
+        assert_eq!(call(&mut s, "workspace_link_idea", serde_json::json!({ "id": theirs }))["isError"], serde_json::json!(false));
+        let before = ideas::read_at(&f.ideas, &theirs).unwrap().content;
+        assert_eq!(call(&mut s, "idea_append", serde_json::json!({ "id": theirs, "text": "Linked now." }))["isError"], serde_json::json!(false));
+        assert_eq!(history_of(&f, &theirs).last(), Some(&before));
+        // The plan is never edited as an idea.
+        assert!(says(&call(&mut s, "idea_append", serde_json::json!({ "id": f.plan, "text": "x" }))).contains("is a plan"));
+    }
+
+    /// "Remember X" and "forget X" are each their own change in the memory's
+    /// History, made at once and named for what they were; another change in
+    /// the folder waits for the quiet minute. A forget says the History still
+    /// holds the old text.
+    #[test]
+    fn remember_and_forget_are_each_their_own_change() {
+        use worktrees_core::memory;
+        let f = ws_fix("ws-remember");
+        memory::init_at(&f.root, &f.ws, "Home").unwrap();
+        let mem = memory::dir_at(&f.root, &f.ws).unwrap();
+        let mut s = ws_server(&f, Some(&f.conv), true);
+        std::fs::write(mem.join("draft.md"), "the person's draft\n").unwrap();
+        std::fs::write(mem.join(memory::INDEX), "# Memory\n\n- Backups go to the NAS ([more](topics/backups.md))\n").unwrap();
+        std::fs::create_dir_all(mem.join("topics")).unwrap();
+        std::fs::write(mem.join("topics/backups.md"), "Nightly.\n").unwrap();
+        let abs = mem.join("topics/backups.md").to_string_lossy().into_owned();
+        let r = call(&mut s, "remember", serde_json::json!({ "what": "backups go to the NAS", "files": ["MEMORY.md", abs] }));
+        assert_eq!(r["isError"], serde_json::json!(false), "{}", says(&r));
+        assert_eq!(body(&r)["subject"], serde_json::json!("Remembered: backups go to the NAS"));
+        let log = memory::log_at(&f.root, &f.ws, None, None, None).unwrap().changes;
+        assert_eq!(log[0].subject, "Remembered: backups go to the NAS", "made at once");
+        assert!(!log[0].files.iter().any(|x| x.path == "draft.md"), "the person's draft is not in it");
+        assert_eq!(memory::status_at(&f.root, &f.ws).unwrap().dirty, vec!["draft.md".to_string()]);
+        std::fs::write(mem.join(memory::INDEX), "# Memory\n").unwrap();
+        std::fs::remove_file(mem.join("topics/backups.md")).unwrap();
+        let r = call(&mut s, "forget", serde_json::json!({ "what": "backups go to the NAS", "files": ["memory/MEMORY.md", "topics/backups.md"] }));
+        assert_eq!(r["isError"], serde_json::json!(false), "{}", says(&r));
+        assert_eq!(body(&r)["subject"], serde_json::json!("Forgot: backups go to the NAS"));
+        assert!(body(&r)["note"].as_str().unwrap().contains("History still holds the old text"), "{}", says(&r));
+        let log = memory::log_at(&f.root, &f.ws, None, None, None).unwrap().changes;
+        assert_eq!(log[0].subject, "Forgot: backups go to the NAS");
+        let r = call(&mut s, "remember", serde_json::json!({ "what": "x", "files": ["MEMORY.md"] }));
+        assert!(says(&r).contains("changed: write the change"), "nothing changed: {}", says(&r));
+        assert!(says(&call(&mut s, "remember", serde_json::json!({ "what": "x", "files": [] }))).contains("files is required"));
+        assert!(says(&call(&mut s, "forget", serde_json::json!({ "what": "x", "files": ["../../etc"] }))).len() > 0);
+        assert_eq!(call(&mut s, "forget", serde_json::json!({ "what": "x", "files": ["../../etc"] }))["isError"], serde_json::json!(true));
     }
 
     fn ideas_server(sc: &Scratch, here: &std::path::Path, mutations: bool) -> Server {

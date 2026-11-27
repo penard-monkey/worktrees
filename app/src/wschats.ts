@@ -177,6 +177,16 @@ export const accessWords = (c: AccessChange): string =>
   c.kind === "rules" ? "its other rules changed" : (CHANGES[c.change] ?? ((n: string) => `${n}: ${c.change}`))(c.name || c.path.slice(c.path.lastIndexOf("/") + 1) || "something");
 
 /** The engine's own name for a chat nobody has named. */
+/** What a workspace chat's row puts in a draft when it is dragged into a
+ *  place's chat: its bus address (`workspace:<ws>/<chat>`, core's
+ *  `workspacechats::Address`) and how the receiving agent reads it, through its
+ *  own worktrees tools (workspace-chat-powers.md §3). The title is the
+ *  person's, one line, without the brackets that close the reference. */
+export function chatReference(ws: string, conv: string, title: string): string {
+  const t = title.replace(/[\u0000-\u001f\u007f[\]]/g, " ").replace(/\s+/g, " ").trim().slice(0, 80) || "a workspace chat";
+  return `[workspace chat “${t}” · workspace:${ws}/${conv} · its state: place_status; what it said: read_chat; message it: report]`;
+}
+
 export const isDefaultTitle = (t: string): boolean => /^Chat \d+$/.test(t);
 /** A chat's name from the person's first message: its first line, cut at a word. */
 export function titleFrom(message: string): string | null {

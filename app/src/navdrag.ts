@@ -29,7 +29,10 @@ export type DragItem =
   // Idea board phase 4 (`plans.ts`): a plan or an idea from a workspace's
   // overview, onto a workspace in the nav (set its plan; link the idea).
   | { kind: "idea"; id: string; title: string }
-  | { kind: "plan"; id: string; title: string };
+  | { kind: "plan"; id: string; title: string }
+  // A workspace chat's row, into a place's chat as a reference
+  // (`wschats.ts::chatReference`).
+  | { kind: "chat"; ws: string; conv: string; title: string };
 
 export type DragSession<T, I extends { kind: string } = DragItem> = { item: I; x: number; y: number; target: T | null };
 

@@ -25,7 +25,8 @@
 //!
 //! A link that fails is read as absent. Nothing here rewrites the store.
 //! A link into another project (`started_by.project`) is shown as the
-//! starter and never nests or routes (§3, §6 K).
+//! starter and never nests or routes (§3, §6 K), and so is one to a
+//! workspace chat (`started_by.chat`).
 //!
 //! Labels, never grants: nothing may read these to decide what a caller can do.
 
@@ -46,6 +47,10 @@ pub struct Starter {
     /// Set when the starter is in another registered project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
+    /// Set when the starter is a workspace chat: its bus address. `place` is
+    /// then the chat's id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<String>,
     /// The place it names is gone (removed, or its slug now belongs to a
     /// place made later). Never set for another project's starter, which this
     /// snapshot cannot see.
@@ -120,7 +125,7 @@ impl<'a> Index<'a> {
 
     /// Rules 1 and 2 for a link of `slug`'s.
     fn names_live_place(&self, slug: &str, l: &Link) -> bool {
-        if l.project.is_some() || l.place == slug {
+        if l.project.is_some() || l.chat.is_some() || l.place == slug {
             return false;
         }
         if l.place == MAIN {
@@ -219,11 +224,12 @@ impl<'a> Index<'a> {
     /// chain.
     pub fn lineage(&self, slug: &str, live: &dyn Fn(&str) -> bool) -> Lineage {
         let d = self.decl(slug);
-        let starter = d.and_then(|d| d.started_by.as_ref()).filter(|l| l.project.is_some() || l.place != slug).map(|l| Starter {
+        let starter = d.and_then(|d| d.started_by.as_ref()).filter(|l| l.project.is_some() || l.chat.is_some() || l.place != slug).map(|l| Starter {
             place: l.place.clone(),
             at: l.at,
             project: l.project.clone(),
-            removed: l.project.is_none() && !self.names_live_place(slug, l),
+            chat: l.chat.clone(),
+            removed: l.project.is_none() && l.chat.is_none() && !self.names_live_place(slug, l),
         });
         // All three rules: a link a loop voids is not shown, or a header would
         // say "moved under X" for a move that draws nothing.
@@ -340,7 +346,9 @@ pub fn live_reader(p: &crate::project::Project) -> impl Fn(&str) -> bool + '_ {
 pub fn cut_foreign_starter(place: &mut serde_json::Value) {
     for ptr in ["/lineage/starter", "/declared/started_by"] {
         if let Some(v) = place.pointer_mut(ptr) {
-            if v.get("project").is_some_and(|p| !p.is_null()) {
+            // A chat starter names a workspace, which such a caller may not
+            // see either.
+            if ["project", "chat"].iter().any(|k| v.get(*k).is_some_and(|p| !p.is_null())) {
                 let at = v.get("at").cloned().unwrap_or(serde_json::Value::Null);
                 *v = serde_json::json!({ "at": at, "elsewhere": true });
             }
@@ -371,7 +379,7 @@ pub fn route_note(route: &Route, me: &Lineage) -> Option<String> {
         return None;
     }
     let first = route.skipped.first().unwrap_or(&route.to);
-    let starter = me.starter.as_ref().filter(|s| s.project.is_none() && !s.removed).map(|s| s.place.as_str());
+    let starter = me.starter.as_ref().filter(|s| s.project.is_none() && s.chat.is_none() && !s.removed).map(|s| s.place.as_str());
     let named = if starter == Some(first.as_str()) {
         format!("your starter {first}")
     } else {
@@ -671,5 +679,16 @@ mod tests {
         assert!(i.check_under("c", "c").is_err());
         let e = i.check_under("a", "c").unwrap_err();
         assert!(e.contains("cycle") || e.contains("under itself"), "{e}");
+    }
+
+    /// A starter that is a workspace chat names a workspace, so a caller that
+    /// may not see other projects gets it cut like another project's.
+    #[test]
+    fn a_chat_starter_is_cut_like_another_projects() {
+        let chat = "workspace:01JC90A1000000000000000000/01JC90A1000000000000000001";
+        let mut row = serde_json::json!({ "lineage": { "starter": { "place": "01JC90A1000000000000000001", "at": 5, "chat": chat } }, "declared": { "started_by": { "place": "01JC90A1000000000000000001", "at": 5, "chat": chat } } });
+        cut_foreign_starter(&mut row);
+        assert_eq!(row["lineage"]["starter"], serde_json::json!({ "at": 5, "elsewhere": true }));
+        assert_eq!(row["declared"]["started_by"], serde_json::json!({ "at": 5, "elsewhere": true }));
     }
 }

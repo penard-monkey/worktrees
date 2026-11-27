@@ -63,6 +63,9 @@ pub enum StartedFrom {
     /// A place an MCP server runs in: `project` is set when the new place is
     /// in ANOTHER registered project, and names the starter's.
     Place { slug: String, project: Option<String> },
+    /// A workspace chat's MCP server: `address` is the chat's bus address
+    /// (`workspacechats::Address`), `conv` its id.
+    Chat { conv: String, address: String },
 }
 
 /// The CLI's terminal UI — byte-parity with the bash helpers.
