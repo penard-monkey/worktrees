@@ -6841,20 +6841,33 @@ function App() {
     if (remoteHost() !== null) { setWsList(null); return; }
     let alive = true;
     let pending = false;
+    let dirty = false;
+    let retryDelay = 3000;
     let retry: number | undefined;
-    const again = () => {
-      if (!alive || pending) return;
+    const pull = () => {
+      if (!alive) return;
+      if (pending) { dirty = true; return; }
       window.clearTimeout(retry);
       pending = true;
       invoke<WsList>("workspaces_list")
         .then((l) => {
-          if (alive) setWsList((cur) => JSON.stringify(cur) === JSON.stringify(l) ? cur : l);
+          if (!alive) return;
+          retryDelay = 3000;
+          setWsList((cur) => JSON.stringify(cur) === JSON.stringify(l) ? cur : l);
         })
         .catch(() => {
-          if (alive) retry = window.setTimeout(again, 3000);
+          if (!alive) return;
+          retry = window.setTimeout(pull, retryDelay);
+          retryDelay = Math.min(retryDelay * 2, 60000);
         })
-        .finally(() => { pending = false; });
+        .finally(() => {
+          pending = false;
+          // Focus/storage can announce a change after this read started.
+          // Coalesce those signals into one fresh read, even after failure.
+          if (alive && dirty) { dirty = false; retryDelay = 3000; pull(); }
+        });
     };
+    const again = () => { retryDelay = 3000; pull(); };
     const onStorage = (e: StorageEvent) => { if (e.key === WS_CHANGED_KEY) again(); };
     window.addEventListener("storage", onStorage);
     window.addEventListener("focus", again);

@@ -46,5 +46,35 @@ for (const [name, engine] of Object.entries({chromium, webkit})) {
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await page.waitForSelector('[data-testid=ws-group]');
   console.log(`ok — ${name}: CLI registry change with one busy read retains Workspaces`);
+  // Observe from before mock installation/App startup, so a brief first-frame
+  // workspace paint or read cannot escape an assertion made after loading.
+  const remote = await browser.newPage();
+  await remote.addInitScript(() => {
+   sessionStorage.setItem('wt-mock-ui-state', JSON.stringify({settings_rev:4, nav_pinned:true, nav_view:'workspaces'}));
+   window.__remoteWorkspaceReads = 0;
+   window.__remoteWorkspacePainted = false;
+   let ipc;
+   Object.defineProperty(window, '__TAURI_INTERNALS__', {
+    configurable: true, get: () => ipc,
+    set(value) {
+     const invoke = value.invoke;
+     value.invoke = (cmd, args) => {
+      if (cmd === 'workspaces_list') window.__remoteWorkspaceReads++;
+      return invoke(cmd, args);
+     };
+     ipc = value;
+    },
+   });
+   new MutationObserver(() => {
+    if (document.querySelector('[data-testid=ws-group], [data-testid=nav-view-workspaces]')) window.__remoteWorkspacePainted = true;
+   }).observe(document, {childList:true, subtree:true});
+  });
+  await remote.goto(`${base}/?workspaces=1&activity=0&remote`);
+  await remote.waitForSelector('.nav-scroll .project');
+  await remote.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await remote.waitForTimeout(100);
+  assert.deepEqual(await remote.evaluate(() => [window.__remoteWorkspaceReads, window.__remoteWorkspacePainted]), [0, false]);
+  console.log(`ok — ${name}: remote startup/focus never reads or paints the console workspace list`);
+
  } finally { await browser.close(); }
 }

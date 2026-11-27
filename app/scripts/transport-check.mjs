@@ -1754,6 +1754,11 @@ ${body}
     /return \{ sock, owned: false, started: false \};/.test(boot) && /remoteDoor\(\s*tauriDoor,/.test(boot),
     "(remote) remoteBoot hands connectSocket the pipe's token and socket, says owned:false, and goes through remoteDoor");
   check(/const door = host\s*\? await remoteBoot\(host\)\s*: engineDoor\(/.test(main), "(remote) the app's boot takes remoteBoot only when a host is chosen, else the engine door");
+  const remoteReady = main.indexOf("? await remoteBoot(host)");
+  const appImport = main.indexOf('const { default: App } = await import("./App")');
+  const renderApp = main.indexOf('ReactDOM.createRoot(');
+  check(remoteReady >= 0 && appImport > remoteReady && renderApp > appImport,
+    "(remote) remoteBoot finishes before App is imported or rendered: remoteHost is set before workspace effects run");
   check(!/^\s*import\s(?!type\b)/m.test(read(SRC.ipcremote)), "(remote) ipcremote.ts has no runtime import (this check loads it as a data: module)");
 }
 
