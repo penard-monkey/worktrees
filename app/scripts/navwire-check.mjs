@@ -40,7 +40,7 @@ const a = at("const frontHere =");
 const b = at("const navKey =", a);
 if (a < 0 || b < 0) { console.log("not ok — App.tsx: `const frontHere =` … `const navKey =` markers are gone"); process.exit(1); }
 const LOC = lines.slice(a, b).join("\n");
-const ENV1 = ["sel", "selected", "eff", "dockShown", "dockFile", "dockAt", "termFront", "settings", "placeKey", "navSeenFront", "shownTab", "lowerOn", "wsShown", "wsTabNow", "tabDoc", "wsChat", "diskOpen", "diskPath"];
+const ENV1 = ["sel", "selected", "eff", "dockShown", "dockFile", "dockAt", "termFront", "settings", "placeKey", "navSeenFront", "shownTab", "lowerOn", "wsShown", "wsTabNow", "tabDoc", "wsChat", "diskOpen", "diskPath", "docsPick", "docShown", "mainDoc", "memHistOpen", "memHistAt", "memPath"];
 const { build: buildLoc } = await load(`
 export function build(env: any) {
   const { ${ENV1.join(", ")} } = env;
@@ -55,6 +55,7 @@ const navLoc = (o) => buildLoc({
   navSeenFront: { current: {} },
   wsShown: null, wsTabNow: "overview", tabDoc: () => null, wsChat: {},
   diskOpen: null, diskPath: null,
+  docsPick: {}, docShown: false, mainDoc: null, memHistOpen: false, memHistAt: null, memPath: () => "MEMORY.md",
   ...o,
   eff: { dock_open: o.open, dock_tab: o.tab },
   dockShown: o.open,
@@ -115,6 +116,20 @@ eq("a stored \"terminal\" tab with the Terminal below records what is ON SCREEN 
   eq("Disk over Home is a location of its own", navLoc({ open: true, tab: "files", sel: null, diskOpen: { kind: "all" } }), { place: null, disk: { scope: { kind: "all" } } });
 }
 
+// The document chosen on Docs is a part of the location there, as the Files
+// tab's open file is on Files; a Memory file's History, and the change in it.
+eq("Docs with a document chosen in its list", navLoc({ open: true, tab: "docs", docsPick: { "/r|p1": "/p1/README.md" } })?.dock, { tab: "docs", doc: "/p1/README.md" });
+eq("…another place's choice is not this one's", navLoc({ open: true, tab: "docs", docsPick: { "/r|p2": "/p2/README.md" } })?.dock, { tab: "docs" });
+eq("…and off the Docs tab it is not in the location", navLoc({ open: true, tab: "files", docsPick: { "/r|p1": "/p1/README.md" } })?.dock, { tab: "files" });
+{
+  const mem = (o) => navLoc({ sel: null, open: false, tab: "files", wsShown: W, wsTabNow: "memory", docShown: true, mainDoc: { ws: "w1", tab: "memory", name: "MEMORY.md" }, ...o })?.ws;
+  eq("a Memory file with History closed", mem({})?.hist, undefined);
+  eq("…its History open, the list", mem({ memHistOpen: true })?.hist, {});
+  eq("…a change in it", mem({ memHistOpen: true, memHistAt: "c1" })?.hist, { at: "c1" });
+  eq("…History is Memory's only: on Plan the flag says nothing", mem({ memHistOpen: true, wsTabNow: "plan", mainDoc: { ws: "w1", tab: "plan", name: "p" } })?.hist, undefined);
+  eq("…nor while no document is drawn (a picture's preview)", mem({ memHistOpen: true, docShown: false })?.hist, undefined);
+}
+
 // ── 2. the parked apply's async file landing ────────────────────────────────
 const e0 = at("const loc = navPending;");
 const e1 = at("}, [navPending, sel]);", e0);
@@ -125,7 +140,7 @@ if (e0 < 1 || e1 < 0 || !lines[e0 - 1].includes("useEffect(() => {")) {
 const EFFECT = lines.slice(e0 - 1, e1 + 1).join("\n");
 const ENV2 = ["useEffect", "navPending", "sel", "selRef", "setNavPending", "eff", "dockFile", "dockAt", "openDockFile",
   "invoke", "setNotice", "setDockFile", "setDockAt", "updatePanels", "settings", "placeKey", "frontHere",
-  "setTermTab", "setNavShellGoto", "navShellSeq", "navApplyGen"];
+  "setTermTab", "setNavShellGoto", "navShellSeq", "navApplyGen", "docsPick", "setDocsPick"];
 const { build: buildApply } = await load(`
 export function build(env: any) {
   const { ${ENV2.join(", ")} } = env;
@@ -135,6 +150,7 @@ ${EFFECT}
 /** One app: refs persist across applies, as they do across renders. */
 function app() {
   const opened = [], stats = [];
+  let picks = {};
   const refs = { selRef: { current: null }, navShellSeq: { current: 0 }, navApplyGen: { current: 0 } };
   /** Run the effect as React would, for this entry with the app in this state. */
   const apply = (entry, state) => {
@@ -150,11 +166,12 @@ function app() {
       openDockFile: (path) => opened.push(path),
       setNotice: () => {}, setDockFile: () => {}, setDockAt: () => {}, updatePanels: () => {},
       setTermTab: () => {}, setNavShellGoto: () => {},
+      docsPick: picks, setDocsPick: (f) => { picks = f(picks); },
       ...state,
     });
     fx();
   };
-  return { apply, opened, stats, refs };
+  return { apply, opened, stats, refs, picks: () => picks };
 }
 const fileAt = (place, path) => ({ place, dock: { tab: "files", file: { path } } });
 const P2 = { repo: "/r", slug: "p2" };
@@ -189,6 +206,17 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
   t.apply(fileAt(P2, "/p2/Cargo.toml"));
   t.stats[0].res(true); await tick();
   eq("an answer for the entry still being shown opens its file", t.opened, ["/p2/Cargo.toml"]);
+}
+
+{ // Back to a Docs list puts back the document chosen in it, or none
+  const t = app();
+  const docs = (doc) => ({ place: P1, dock: { tab: "docs", ...(doc ? { doc } : {}) } });
+  t.apply(docs("/p1/README.md"));
+  eq("a Docs entry puts its chosen document back", t.picks(), { "/r|p1": "/p1/README.md" });
+  t.apply(docs());
+  eq("…and one with nothing chosen clears it", t.picks(), {});
+  t.apply({ place: P1, dock: { tab: "files" } });
+  eq("…a Files entry leaves the Docs choice alone", t.picks(), {});
 }
 
 if (failed) { console.log(`\nnavwire-check: ${failed} failed`); process.exit(1); }

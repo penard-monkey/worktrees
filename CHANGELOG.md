@@ -8,6 +8,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ### Fixed
 
 - **Back and Forward work inside Disk.** Each step in Disk is a step in the app's history: a project, one of its places, a file or folder picked in the treemap. Back from a place's treemap goes to the list you clicked it from, and Back from the first Disk screen goes to what was shown before Disk opened. Disk now opens over what you are looking at and no longer selects a place. Opening it from a place's menu keeps your place selected, and **✕** or Escape takes you back to it. Over Home or a workspace view, Disk has its own Back and Forward buttons.
+- **Back and Forward remember the document chosen on the Docs tab.** Back from a document you opened from Docs returns to the Docs list with that document still chosen, and the Back button names it. Forward opens it again. If the document has left the place, Back skips that step.
+- **A memory file's History is part of Back and Forward.** Opening History is a step, and so is opening one change in it. Back from a change returns to the History list, and Back again to the file you were reading, with History closed. Forward goes the other way.
 
 ## [0.54.0] - 2026-11-26
 

@@ -61,6 +61,10 @@ export function MainDocument(props: {
   linkNote?: (from: string, href: string) => string | null;
   /** Moves when History is asked for from elsewhere. */
   historyAsk?: number;
+  /** Moves when History is to close from elsewhere (Back to the document). */
+  historyShut?: number;
+  /** Whether History is open, on every change: Back and Forward step to it. */
+  historyShown?(open: boolean): void;
   /** History, when it is not the document's own versions. */
   history?: (close: () => void) => ReactNode;
 }) {
@@ -139,6 +143,9 @@ export function MainDocument(props: {
 
   const { setHistory } = doc;
   useEffect(() => { if (props.historyAsk) setHistory(true); }, [props.historyAsk, setHistory]);
+  useEffect(() => { if (props.historyShut) setHistory(false); }, [props.historyShut, setHistory]);
+  useEffect(() => { at.current.historyShown?.(doc.history); }, [doc.history]);
+  useEffect(() => () => { at.current.historyShown?.(false); }, []);
 
   // Stuck until it IS saved: another try is not yet an end of it.
   const stuckKey = useRef<string | null>(null);
