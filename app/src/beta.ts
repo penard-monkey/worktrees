@@ -25,7 +25,7 @@
 import type { Settings } from "./settings";
 
 /** The keys a beta feature may use: each its own `beta_<name>` boolean. */
-export type BetaKey = "beta_ideas" | "beta_group_chat" | "beta_workspace_chats";
+export type BetaKey = "beta_ideas" | "beta_group_chat" | "beta_workspace_chats" | "beta_left_off";
 
 export type BetaFeature = {
   /** Its own settings key, default off (settings.ts). */
@@ -58,6 +58,12 @@ export const BETA_FEATURES: readonly BetaFeature[] = [
     what: "Still being built: a workspace's own chats and its memory. Today it adds a workspace's Memory and Chats tabs, both empty, and nothing can be started from them yet. Turning it off hides them.",
     testId: "beta-workspace-chats",
   },
+  {
+    key: "beta_left_off",
+    label: "Where you left off",
+    what: "Still being built: notices your first return after more than six hours away, for a short digest of what changed. The digest panel is not in this build yet.",
+    testId: "beta-left-off",
+  },
 ];
 
 /** Ideas (idea board phases 0, 1, 3, 4 and S): the Ideas window, the rail's
@@ -78,3 +84,7 @@ export const workspaceChatsBeta = (s: Pick<Settings, "beta_workspace_chats">): b
  *  Surfaces outside App (main.tsx's guests, RemoteLayer) read it through
  *  betaLive.ts, which App feeds from this helper. */
 export const groupChatBeta = (s: Pick<Settings, "beta_group_chat">): boolean => s.beta_group_chat === true;
+
+/** Where you left off: the return detector only; the digest panel is a later
+ *  slice. Its listeners and persistence are inert until this is on. */
+export const leftOffBeta = (s: Pick<Settings, "beta_left_off">): boolean => s.beta_left_off === true;
