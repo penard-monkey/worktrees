@@ -1,4 +1,4 @@
-// Browser gate: renaming a lane and a workspace chat in the nav (rowname.ts,
+// Browser gate: renaming a lane, a workspace chat and a workspace in the nav (rowname.ts,
 // RowNameField.tsx), in Chromium AND WebKit against the mock. Real pointer
 // and key input: a synthetic event skips hit-testing (AGENTS.md).
 //
@@ -189,9 +189,43 @@ async function chats(browser, tag) {
   await page.context().close();
 }
 
+async function workspaces(browser, tag) {
+  const { page, errors } = await boot(browser, "workspaces");
+  const head = page.locator("[data-testid=ws-header]", { has: page.locator("[data-testid=ws-name]", { hasText: "Everything" }) }).first();
+  await head.waitFor();
+  const nameEl = () => head.locator("[data-testid=ws-name]");
+  const field = "[data-testid=ws-name-input]";
+
+  // No double-click rename in the nav (the owner, 2026-11-27).
+  ok(!/double-click/i.test((await nameEl().getAttribute("title")) ?? ""), `${tag} a workspace's name no longer says double-click to rename`);
+  await nameEl().dblclick();
+  await page.waitForTimeout(200);
+  ok(await page.locator(field).count() === 0, `${tag} a double-click on a workspace's name opens no field`);
+
+  // Right-click → Rename.
+  await head.click({ button: "right" });
+  await page.locator("[data-testid=ws-rename]").click();
+  ok(await until(page, () => { const f = document.activeElement; return f?.dataset?.testid === "ws-name-input" && f.value === "Everything" && f.selectionStart === 0 && f.selectionEnd === f.value.length; }), `${tag} Rename… in a workspace's menu opens its field on the name, selected`);
+  await page.keyboard.type("Not this");
+  await page.keyboard.press("Escape");
+  ok(await until(page, () => !document.querySelector("[data-testid=ws-name-input]")) && (await nameEl().textContent()) === "Everything", `${tag} Escape cancels a workspace's rename`);
+
+  // F2 with its overview on screen.
+  await nameEl().click();
+  await page.evaluate(() => document.activeElement instanceof HTMLElement && document.activeElement.blur());
+  await page.keyboard.press("F2");
+  ok(await until(page, () => document.activeElement?.dataset?.testid === "ws-name-input"), `${tag} F2 renames the workspace on screen`);
+  await page.keyboard.type("Everything here");
+  await page.keyboard.press("Enter");
+  ok(await until(page, () => [...document.querySelectorAll("[data-testid=ws-name]")].some((n) => n.textContent === "Everything here")), `${tag} …Enter saves it`);
+
+  ok(errors.length === 0, `${tag} no page errors ${errors.join(" | ")}`);
+  await page.context().close();
+}
+
 for (const [tag, type] of [["chromium", chromium], ["webkit", webkit]]) {
   const browser = await type.launch();
-  try { await lanes(browser, tag); await chats(browser, tag); }
+  try { await lanes(browser, tag); await chats(browser, tag); await workspaces(browser, tag); }
   catch (e) { failed++; console.log(`FAIL ${tag} threw: ${e.message.split("\n")[0]}`); }
   finally { await browser.close(); }
 }

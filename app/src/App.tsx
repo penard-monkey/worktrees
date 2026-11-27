@@ -1199,7 +1199,7 @@ function WsNameField({ initial, onCommit, onCancel }: {
 
 /** A named workspace's header row. A drag handle for reordering, a drop zone
  *  for a project (`data-ws-id` on the group around it), and its menu. */
-function WorkspaceHeader({ w, open, naming, rollup, active, onOpen, onToggle, onMenu, onArm, onRename, onRenameStart, onRenameCancel }: {
+function WorkspaceHeader({ w, open, naming, rollup, active, onOpen, onToggle, onMenu, onArm, onRename, onRenameCancel }: {
   w: WsDef;
   open: boolean;
   /** Its overview is what the main area shows (phase 4). */
@@ -1212,7 +1212,6 @@ function WorkspaceHeader({ w, open, naming, rollup, active, onOpen, onToggle, on
   onMenu: (e: React.MouseEvent) => void;
   onArm: (e: React.PointerEvent) => void;
   onRename: (name: string) => void;
-  onRenameStart: () => void;
   onRenameCancel: () => void;
 }) {
   return (
@@ -1226,8 +1225,11 @@ function WorkspaceHeader({ w, open, naming, rollup, active, onOpen, onToggle, on
       <span className="caret" onClick={onToggle}>{open ? <Icons.ChevronDown size={11} /> : <Icons.ChevronRight size={11} />}</span>
       <span className={"ws-icon" + (rollup ? " " + rollup : "")}><Icons.Layers size={13} /></span>
       {naming
-        ? <WsNameField initial={w.name} onCommit={onRename} onCancel={onRenameCancel} />
-        : <span className="ws-name" data-testid="ws-name" title={onOpen ? "Click for its overview; double-click to rename" : "Double-click to rename"} onClick={onOpen ?? onToggle} onDoubleClick={onRenameStart}>{w.name}</span>}
+        ? <RowNameField key={w.id} initial={w.name} label="Workspace name" testid="ws-name-input" className="ws-name-input"
+            onSave={(typed) => { const c = namedChange(typed, w.name); if (c.kind === "set") onRename(c.title); else onRenameCancel(); }} onCancel={onRenameCancel} />
+        // Rename is the menu's Rename… and F2, never a double-click (the
+        // owner, 2026-11-27): a double-click here is two clicks, nothing more.
+        : <span className="ws-name" data-testid="ws-name" title={onOpen ? "Click for its overview. Right-click to rename." : "Right-click to rename."} onClick={onOpen ?? onToggle}>{w.name}</span>}
       <span className="pcount">{w.projects.length}</span>
       <button className="mini" title="workspace menu" data-testid="ws-menu" data-track="nav.workspace.menu"
         onClick={(e) => onMenu(e)}><Icons.Ellipsis size={13} /></button>
@@ -10384,7 +10386,6 @@ function App() {
                   onMenu={(e) => wsMenu(e, w.id)}
                   onArm={(e) => arm(e, { kind: "workspace", id: w.id })}
                   onRename={(name) => wsRename(w.id, name)}
-                  onRenameStart={() => setWsNaming(w.id)}
                   onRenameCancel={() => setWsNaming(null)}
                 />
                 {open && (

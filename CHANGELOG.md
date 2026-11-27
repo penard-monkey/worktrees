@@ -7,7 +7,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ### Added
 
-- **Rename a lane or a workspace chat right in the sidebar.** Right-click its row and pick **Rename…**, or press F2 to rename the lane or chat on screen. The row turns into a field with the name selected. Enter or a click elsewhere saves, Escape cancels. An empty name returns a lane to its folder name and leaves a chat's title as it was. Only the name you see changes: the lane's folder, branch and session, and the chat's address, stay the same. A click on a row still selects it at once, and a double-click on a lane still opens it. The chat's own header saves on a click elsewhere too now, where it used to drop what you typed.
+- **Rename a lane, a workspace chat or a workspace right in the sidebar.** Right-click its row and pick **Rename…**, or press F2 to rename the lane, chat or workspace on screen. The row turns into a field with the name selected. Enter or a click elsewhere saves, Escape cancels. An empty name returns a lane to its folder name and leaves a chat's or workspace's name as it was. Only the name you see changes: the lane's folder, branch and session, and the chat's address, stay the same. A click on a row still selects it at once, and a double-click on a lane still opens it. A double-click on a workspace's name no longer renames it: renaming is always the menu or F2. The chat's own header saves on a click elsewhere too now, where it used to drop what you typed.
 
 ## [0.55.0] - 2026-11-27
 

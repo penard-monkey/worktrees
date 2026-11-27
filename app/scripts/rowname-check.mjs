@@ -64,6 +64,11 @@ has(app, "laneChange(typed, p.declared?.title, p.slug)", "a lane's field saves b
 has(app, "namedChange(typed, current)", "a chat row's field saves by namedChange");
 if (!/data-testid="ws-chat-row-rename"[^>]*data-track="workspace\.chat\.row\.rename"/.test(chat)) fail("a chat row's right-click menu has Rename, with a literal usage key");
 has(chat, "namedChange(t, c.title)", "the chat header's field saves by namedChange");
+// No double-click renames anything in the nav (the owner, 2026-11-27): the
+// workspace header's went, and its title no longer offers it.
+const wsHead = app.slice(app.indexOf("function WorkspaceHeader("), app.indexOf("function EverythingElseHeader("));
+if (/onDoubleClick/.test(wsHead)) fail("a workspace header renames on a double-click again");
+if (/double-click/i.test(wsHead.replace(/\/\/.*$/gm, ""))) fail("a workspace header's words still offer a double-click");
 // A renamed lane keeps its slug, branch and session: the only engine call is set_title.
 const save = app.slice(app.indexOf("const laneField ="), app.indexOf("const laneField =") + 900);
 if (/invoke\(/.test(save)) fail("a lane's field calls the engine itself (it must go through setTitle)");
