@@ -51,6 +51,7 @@ import { installUsage, setSurface, trackChord } from "./usage";
 import { fileInfo } from "./filekind";
 import { fromDevice, instructionLine, instructionTitle, launchedTitle, deviceLabel, type By, type LaunchedBy, type RemoteInstruction } from "./provenance";
 import type { Elsewhere, Lineage, Link } from "./lineage";
+import { handoffLine, indentOf, laneLines, laneTree, siblingSlot, subtreeOf as laneSubtree, type LaneItem } from "./lanetree";
 import { canStep as canStepNav, empty as emptyHistory, goTo as goToNav, label as labelNav, locKey, prune as pruneNav, reachable as reachableNav, record as recordNav, whereKey, WS_TAB_LABEL, type History as NavHistory, type Loc, type WsTab } from "./navHistory";
 import { agentViewFor, applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, lowerFits, lowerFracFor, lowerRange, panelsFor, placeKey, railsMerged, railsWidth, saveSettings, stepMdZoom, stepZoom, upperTab, viewportWidth, withAgentView, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
 import {
@@ -3466,6 +3467,12 @@ function RemoveDialog({ place, busy, error, onConfirm, onClose }: {
               </div>
             )
           )}
+          {/* What happens to its lanes (lane-children §7), in `rm`'s words:
+              they move up a level; nothing cascades. */}
+          {(() => {
+            const line = handoffLine(place.lineage?.lanes ?? [], place.lineage?.up ?? "(main)");
+            return line ? <div className="rm-note" data-testid="rm-lanes">{line}</div> : null;
+          })()}
           <div className="rm-warn" data-testid="rm-warn">
             This deletes the worktree directory from disk. <b>It cannot be undone.</b>
           </div>
@@ -7972,7 +7979,10 @@ function App() {
   };
 
   // ── nav sorting (Settings-persisted; Manual = drag) ──
-  const sortPlaces = (repo: string, arr: Place[]): Place[] => {
+  // `at`: the last-used sort's clock. The lane tree passes the newest activity
+  // in the subtree drawn under a row, so a busy grandchild lifts its family
+  // (lane-children §5.6); everything else sorts a row by its own.
+  const sortPlaces = (repo: string, arr: Place[], at: (p: Place) => number = activityAt): Place[] => {
     const out = [...arr];
     if (settings.sort_mode === "manual") {
       const order = settings.manual_order[repo] ?? [];
@@ -7983,7 +7993,7 @@ function App() {
     // by the DISPLAYED name: sorting renamed places by a hidden slug reads as
     // an alphabetical list that is not alphabetical
     if (settings.sort_mode === "alpha") out.sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
-    else out.sort((a, b) => activityAt(b) - activityAt(a));
+    else out.sort((a, b) => at(b) - at(a));
     const flip = settings.sort_mode === "alpha" ? settings.sort_dir === "desc" : settings.sort_dir === "asc";
     if (flip) out.reverse();
     return out;
@@ -7996,7 +8006,10 @@ function App() {
   // last-used the list itself does, so the gap opens at the slot that mode will
   // actually produce rather than wherever the cursor happens to be.
   type DropTarget =
-    | { kind: "tier"; repo: string; tier: Tier; before: string | null; lands: Tier; patch: DeclPatch }
+    // `before`: the sibling it is ordered in front of (`manual_order`); `gap`:
+    // the drawn item the gap opens in front of, which under nesting is after
+    // the last sibling's whole subtree (`lanetree.siblingSlot`).
+    | { kind: "tier"; repo: string; tier: Tier; before: string | null; gap: string | null; lands: Tier; patch: DeclPatch }
     | { kind: "reject"; hint: string }
     | { kind: "project"; before: string | null }
     // Named workspaces (`workspaces.ts`): a project into or out of one, and a
@@ -8020,13 +8033,59 @@ function App() {
 
   const placeAt = (repo: string, slug: string) =>
     ws?.projects.find((v) => v.root === repo)?.snapshot?.places.find((p) => p.slug === slug) ?? null;
-  /** The rows a tier group is currently RENDERING, in render order — the same
-   *  derivation ProjectNode uses, filter included, so a landing slot computed
-   *  here names a row that is actually on screen. */
-  const tierRows = (repo: string, tier: Tier): Place[] => {
-    const places = (ws?.projects.find((v) => v.root === repo)?.snapshot?.places ?? []).filter(matchPlace);
-    return sortPlaces(repo, places.filter((p) => !p.is_main && bucketOf(p) === tier));
+  /** What a tier group is RENDERING, in render order: its rows laid out as a
+   *  tree by `lineage.parent`, with ghosts of starters that are not rows here
+   *  (lane-children §5, `lanetree.ts`). ProjectNode draws exactly this, and a
+   *  drop computes its landing slot from it, so the slot names an item that is
+   *  on screen. */
+  const laneItems = (repo: string, tier: Tier): LaneItem<Place>[] => {
+    const all = (ws?.projects.find((v) => v.root === repo)?.snapshot?.places ?? []).filter((p) => !p.is_main);
+    return laneTree({
+      rows: all.filter((p) => visiblePlace(p) && bucketOf(p) === tier),
+      all,
+      slug: (p) => p.slug,
+      parent: (p) => p.lineage?.parent,
+      tier: bucketOf,
+      here: tier,
+      order: (sibs, latest) => sortPlaces(repo, sibs, latest),
+      at: activityAt,
+      folded: (slug) => !!settings.lane_folded?.[`${repo}|${slug}`],
+      filtering: laneFiltering,
+    });
   };
+  /** A typed filter (or the attention filter) shows a match with its starters
+   *  as context and ignores folds, without writing them (§5.6). */
+  const laneFiltering = !!filter.trim() || attnOnly;
+  /** Adoption from the menu (lane-children §8): where a lane is DRAWN, never
+   *  who started it or where its reports go. `under`: a slug, `"(main)"` for
+   *  the top level, null for back under its starter. Serve's
+   *  `set_place_under` applies core's rules and refuses a cycle. */
+  const moveLane = (repo: string, slug: string, under: string | null) => {
+    closeCtx();
+    mutate(invoke<string>("set_place_under", { repo, slug, under }).then((line) => setNotice(line)));
+  };
+  /** Every place drawn under `slug` (by `lineage.parent`), any depth: what it
+   *  may not be moved under. */
+  const drawnBelow = (repo: string, slug: string): Set<string> => {
+    const all = ws?.projects.find((v) => v.root === repo)?.snapshot?.places ?? [];
+    const out = new Set<string>();
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const p of all) {
+        const up = p.lineage?.parent;
+        if (up && (up === slug || out.has(up)) && !out.has(p.slug) && p.slug !== slug) { out.add(p.slug); grew = true; }
+      }
+    }
+    return out;
+  };
+  const toggleLane = (repo: string, slug: string) =>
+    updateSettings((prev) => {
+      const k = `${repo}|${slug}`;
+      const m = { ...(prev.lane_folded ?? {}) };
+      if (m[k]) delete m[k];
+      else m[k] = true;
+      return { lane_folded: m };
+    });
   /** Live geometry of the drop rows inside `zone`, with the open gap
    *  arithmetically removed (dnd.ts `naturalTop` explains why measuring around
    *  it is not optional). Returns rows in DOM order, minus the one being
@@ -8174,22 +8233,42 @@ function App() {
     // tiers those differ often enough that showing it under the pointer would
     // be a promise the list cannot keep.
     const lands = plan.lands;
-    const rows = tierRows(item.repo, lands).filter((r) => r.slug !== item.slug);
-    let before: string | null;
+    // Under nesting a row lands among its SIBLINGS (lane-children §5.6): the
+    // items drawn under the same parent in the landing tier. Its lanes travel
+    // with it, because they are drawn under it wherever it is.
+    const items = laneItems(item.repo, lands);
+    const drawn = items.find((i) => i.slug === item.slug);
+    const up = p.lineage?.parent;
+    const parent = drawn ? drawn.parent : up && items.some((i) => i.slug === up) ? up : null;
+    const sibs = items.filter((i) => i.parent === parent && i.slug !== item.slug);
+    let idx: number;
     if (settings.sort_mode === "manual" && lands === tier) {
-      const geo = rowGeometry(zone, y, item.slug, "[data-slug]", (n) => n.dataset.slug!);
-      before = geo.rows[pointerIndex(geo.rows, geo.y)]?.slug ?? null;
+      // Among another parent's rows a reorder has nothing to mean: drag never
+      // re-parents (decided); the menu's "Move under…" does.
+      // The row right AFTER the family counts too: the gap for "after the
+      // last sibling" opens above it, so the pointer that asked for the end
+      // of the family is over that row the moment the gap appears.
+      const over = el?.closest<HTMLElement>("li.row");
+      const at = over?.dataset.slug ?? over?.dataset.ghost;
+      const family = parent ? laneSubtree(items, parent) : [];
+      const next = parent ? items[items.findIndex((i) => i.slug === family[family.length - 1]) + 1]?.slug : undefined;
+      if (parent && at && at !== item.slug && !family.includes(at) && at !== next)
+        return { kind: "reject", hint: `${nameOf(p)} moves among the lanes of ${parent} only. To draw it somewhere else, use Move under… in its menu.` };
+      const geo = rowGeometry(zone, y, item.slug, "[data-slug], [data-ghost]", (n) => n.dataset.slug ?? n.dataset.ghost!);
+      const mine = new Set(sibs.map((i) => i.slug));
+      idx = pointerIndex(geo.rows.filter((r) => mine.has(r.slug)), geo.y);
     } else if (settings.sort_mode === "alpha") {
-      before = rows[alphaIndex(rows.map(nameOf), nameOf(p), settings.sort_dir === "desc")]?.slug ?? null;
+      idx = alphaIndex(sibs.map((i) => nameOf(i.place)), nameOf(p), settings.sort_dir === "desc");
     } else if (settings.sort_mode === "recent") {
-      before = rows[recentIndex(rows.map(activityAt), activityAt(p), settings.sort_dir === "asc")]?.slug ?? null;
+      idx = recentIndex(sibs.map((i) => activityAt(i.place)), activityAt(p), settings.sort_dir === "asc");
     } else {
       // Manual, but landing in a group the pointer is not over: the pointer has
       // nothing to say about a position in a list it is not in. Land at the top,
       // which is where the eye goes looking for what just moved.
-      before = rows[0]?.slug ?? null;
+      idx = 0;
     }
-    return { kind: "tier", repo: item.repo, tier, before, lands, patch: plan.patch };
+    const { before, gap } = siblingSlot(items, item.slug, parent, idx);
+    return { kind: "tier", repo: item.repo, tier, before, gap, lands, patch: plan.patch };
   };
 
   /** Spring-open: a group that is collapsed can still be a drop target, but it
@@ -8404,7 +8483,7 @@ function App() {
    *  `before === null` means "at the end of that group". */
   const gapAt = (repo: string, tier: Tier, before: string | null) =>
     drag?.item.kind === "place" && drag.target?.kind === "tier"
-    && drag.target.repo === repo && drag.target.lands === tier && drag.target.before === before;
+    && drag.target.repo === repo && drag.target.lands === tier && drag.target.gap === before;
   const projGapAt = (root: string | null) =>
     drag?.item.kind === "project" && drag.target?.kind === "project" && drag.target.before === root;
   /** Which tiers must exist as drop targets for the drag in flight, even empty:
@@ -9704,7 +9783,77 @@ function App() {
   // state of its own; the moment it needs some, hoist it to module scope with props.
   // No age override any more: every list this row appears in sorts by
   // `activityAt`, so the row can just print it.
-  const placeRow = (repo: string, p: Place) => {
+  /** A tree row's lane pieces (lane-children §5.1-§5.3): its indent, the
+   *  rails of the levels above it, its caret, the level number past the depth
+   *  stop, and the pill a folded row shows. Shared by real rows and ghosts. */
+  const laneBits = (repo: string, it: LaneItem<Place> | undefined) => {
+    if (!it) return null;
+    const { lvl, step, label } = indentOf(it.depth, fit.navShown ? fit.navW : clampNav(settings.nav_width, 0, vw, railsWidth(settings)));
+    const style = { "--lvl": lvl, "--lstep": `${step}px` } as CSSProperties;
+    const caret = it.kids ? (
+      <button
+        className="lane-caret"
+        data-testid={`lane-caret|${it.slug}`}
+        data-track="nav.row.lanes"
+        aria-expanded={!it.collapsed}
+        disabled={laneFiltering}
+        title={laneFiltering ? "the filter shows every lane" : it.collapsed ? "show its lanes" : "fold its lanes"}
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => { e.stopPropagation(); toggleLane(repo, it.slug); }}
+      >{it.collapsed ? <Icons.ChevronRight size={11} /> : <Icons.ChevronDown size={11} />}</button>
+    ) : null;
+    const rails = lvl > 0 ? <span className="lane-rails" aria-hidden /> : null;
+    const level = label !== null ? <span className="lane-lvl" title={`level ${label}`}>{label}</span> : null;
+    let pill: React.ReactNode = null;
+    if (it.collapsed && it.hidden.length) {
+      // The roll-up (§5.5): waiting first, then busy, then a just-finished
+      // lane. It reads activity and writes nothing: folding, unfolding or
+      // selecting this row marks no hidden lane read.
+      const roll = rollupOf(it.hidden, activityOf, (h) => doneOf(h) === 1);
+      const waiting = it.hidden.filter((h) => activityOf(h) === "waiting").length;
+      const busy = it.hidden.filter((h) => activityOf(h) === "busy").length;
+      const parts = [waiting && `${waiting} needs input`, busy && `${busy} working`, roll === "done" && "one just finished"].filter(Boolean);
+      const n = it.hidden.length;
+      pill = (
+        <span className="lane-pill" data-testid={`lane-pill|${it.slug}`} data-rollup={roll || undefined}
+          title={`${n} lane${n === 1 ? "" : "s"}${parts.length ? ": " + parts.join(", ") : ""}`}>
+          {roll && <span className={"lane-pill-dot " + roll} />}{n}
+        </span>
+      );
+    }
+    return { style, caret, rails, level, pill };
+  };
+
+  /** A starter drawn in a tier it is not in (§5.4), or hidden by the filter
+   *  and shown as context (§5.6). Not counted, not dragged, not a drop slot
+   *  (no `data-slug`); a click selects the real place. */
+  const ghostRow = (repo: string, it: LaneItem<Place>, here: Tier) => {
+    const p = it.place;
+    const b = laneBits(repo, it)!;
+    const other = it.tier && it.tier !== here ? it.tier : null;
+    return (
+      <li
+        className="row ghost"
+        data-ghost={p.slug}
+        style={b.style}
+        onClick={(e) => { fromRow(e.currentTarget, repo, p.slug); selectPlace(repo, p); hideNav(); }}
+        onDoubleClick={() => { enterPlace(repo, p); hideNav(); }}
+        onContextMenu={(e) => placeCtx(e, repo, p)}
+        title={other ? `${nameOf(p)} is in ${GROUP_LABEL[other] ?? other}; its lanes here are not` : `${nameOf(p)}: shown for the lanes under it`}
+        data-track="nav.row.ghost"
+      >
+        {b.rails}{b.caret}
+        <span className="status-dot" />
+        <span className="row-id">
+          <span className="row-name">{b.level}{nameOf(p)}</span>
+        </span>
+        <span className="glyphs">{b.pill}{other && <span className="lane-tier">{GROUP_LABEL[other] ?? other}</span>}</span>
+      </li>
+    );
+  };
+
+  const placeRow = (repo: string, p: Place, lane?: LaneItem<Place>) => {
+    const lb = laneBits(repo, lane);
     const divergent = !p.is_main && !p.detached && p.branch && p.branch !== p.slug;
     // The main worktree is not in any tier group and cannot leave one, so it is
     // the one row that never arms a drag.
@@ -9726,6 +9875,7 @@ function App() {
           (stale ? " stale" : "")
         }
         data-slug={p.slug}
+        style={lb?.style}
         // Click SELECTS; opening is always an explicit gesture (double-click, the
         // ▸ button below, the topbar/empty-state Enter, or the ctx menu). The
         // first click of a double-click selects and the second enters — enterPlace
@@ -9739,15 +9889,18 @@ function App() {
         // label carries user text gets an explicit key instead — see usage.ts.
         data-track="nav.row"
       >
+        {lb?.rails}{lb?.caret}
         <span className={"status-dot" + dotClass(p)} style={dotStyle(p)} title={dotTitle(p)} />
         <span className="row-id">
           <span className="row-name">
+            {lb?.level}
             {p.is_main ? "◆ " : p.declared?.pinned ? "★ " : ""}
             {nameOf(p)}
           </span>
           {divergent ? <span className="row-branch">↗ {p.branch}</span> : null}
         </span>
         <span className="glyphs">
+          {lb?.pill}
           {glyphs(p, health[repo]?.slugs.has(p.slug)).map((g, i) => (
             <span key={i} className={"g " + g.cls} title={g.title}>{g.text}</span>
           ))}
@@ -9844,13 +9997,15 @@ function App() {
       (g) => (buckets[g]?.length || dragTiers.has(g)) && !hiddenTiers.has(g),
     );
     const dormantShown = DORMANT_TIERS.filter((t) => buckets[t]?.length || dragTiers.has(t));
-    /** One tier group's rows plus the gap, in render order. */
+    /** One tier group's rows plus the gap, in render order: a tree by
+     *  `lineage.parent`, with ghosts of starters that are not rows here
+     *  (`laneItems`, lane-children §5). */
     const rowsWithGap = (g: Tier) => (
       <ul className="places">
-        {(buckets[g] ?? []).map((p) => (
-          <Fragment key={p.slug}>
-            {gapAt(pv.root, g, p.slug) && <li className="drop-gap" />}
-            {placeRow(pv.root, p)}
+        {laneItems(pv.root, g).map((it) => (
+          <Fragment key={it.slug}>
+            {gapAt(pv.root, g, it.slug) && <li className="drop-gap" />}
+            {it.kind === "ghost" ? ghostRow(pv.root, it, g) : placeRow(pv.root, it.place, it)}
           </Fragment>
         ))}
         {gapAt(pv.root, g, null) && <li className="drop-gap" />}
@@ -10633,6 +10788,26 @@ function App() {
                     {selected.lifecycle_effective !== "active" && (
                       <span className={"life " + selected.lifecycle_effective}>{selected.lifecycle_effective}</span>
                     )}
+                    {/* Its line (lane-children §8): who started it, where it was
+                        moved, where its reports go, how many lanes it started.
+                        One row here, every line in the tooltip; a click goes to
+                        the starter when it is a place of this project. */}
+                    {(() => {
+                      const here = ws?.projects.find((v) => v.root === sel.repo)?.snapshot?.places ?? [];
+                      const lines = laneLines(selected.lineage, (slug) => {
+                        const p = here.find((x) => x.slug === slug);
+                        return !!p && !p.tmux_session.up;
+                      }, (at) => new Date(at * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short" }));
+                      if (!lines.length) return null;
+                      const st = selected.lineage?.starter;
+                      const to = st && "place" in st && !st.project && !st.removed ? here.find((x) => x.slug === st.place) ?? null : null;
+                      return (
+                        <span className={"s lane-line" + (to ? " link" : "")} data-testid="lane-line" title={lines.join("\n")}
+                          onClick={to ? () => selectPlace(sel.repo, to) : undefined}>
+                          ↳ {lines.join(" · ")}
+                        </span>
+                      );
+                    })()}
                     {/* §7.3: an instruction file a paired device wrote here,
                         marked out of band — never inside the file. */}
                     {fromDevice(selected.declared?.last_remote_instruction) && (
@@ -12065,6 +12240,41 @@ function App() {
                   </button>
                 ))}
               </div>
+              {(() => {
+                // Where this lane is drawn (lane-children §8). Display only:
+                // its starter and its reports stay as they are.
+                const lin = ctxPlace.lineage;
+                const below = drawnBelow(ctx.repo, ctxPlace.slug);
+                const under = (ws?.projects.find((v) => v.root === ctx.repo)?.snapshot?.places ?? [])
+                  .filter((p) => !p.is_main && p.slug !== ctxPlace.slug && p.slug !== lin?.parent && !below.has(p.slug))
+                  .sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
+                // Back where its own line draws it: the lane it was handed to on
+                // a removal, else its starter (core's `first_holding` order).
+                const own = lin?.starter && "place" in lin.starter && !lin.starter.project && !lin.starter.removed ? lin.starter.place : null;
+                const home = lin?.handed_to ? lin.handed_to.place : own;
+                const starter = home && home !== "(main)" ? home : null;
+                return (
+                  <>
+                    <div className="pop-hint">drawn under</div>
+                    {lin?.parent && (
+                      <button className="pop-item" data-testid="ctx-lane-top" onClick={() => moveLane(ctx.repo, ctxPlace.slug, "(main)")}>Move to top level</button>
+                    )}
+                    {under.length > 0 && (
+                      <SubMenu label="Move under…" testId="ctx-lane-under" track="nav.row.lane.under">
+                        {under.map((p) => (
+                          <button key={p.slug} className="pop-item" data-testid={`ctx-lane-under|${p.slug}`}
+                            onClick={() => moveLane(ctx.repo, ctxPlace.slug, p.slug)}>{nameOf(p)}</button>
+                        ))}
+                      </SubMenu>
+                    )}
+                    {ctxPlace.declared?.under && (
+                      <button className="pop-item" data-testid="ctx-lane-reset" onClick={() => moveLane(ctx.repo, ctxPlace.slug, null)}>
+                        {starter ? `Back under ${starter}` : "Back to its starter"}
+                      </button>
+                    )}
+                  </>
+                );
+              })()}
               <div className="ctx-sep" />
               {ctxPlace.branch && (
                 <button className="pop-item" onClick={() => newFromBranch(ctx.repo, ctxPlace.branch!)}>New worktree off {ctxPlace.branch}…</button>
