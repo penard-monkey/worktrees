@@ -9221,6 +9221,18 @@ function App() {
     else if (id !== undefined) navSeenFront.current[key] = id;
     setTermFront({ key, id });
   }, []);
+  /** The document chosen in each place's Docs list, by place key. Part of the
+   *  location on the Docs tab, as the Files tab's open file is on Files. */
+  const [docsPick, setDocsPick] = useState<Record<string, string>>({});
+  /** Each place's Docs index as it last answered (whole ones only). */
+  const docsKnown = useRef<Record<string, Set<string>>>({});
+  /** A memory file's History: open (MainDocument says), and the change shown
+   *  in it (MemoryHistory says). `memShut` closes it from here. */
+  const [memHistOpen, setMemHistOpen] = useState(false);
+  const [memHistAt, setMemHistAt] = useState<string | null>(null);
+  const [memShut, setMemShut] = useState(0);
+  /** Changes asked for that could not be read: history skips them. */
+  const [memGone, setMemGone] = useState<ReadonlySet<string>>(() => new Set());
   const [hist, setHist] = useState<NavHistory>(emptyHistory);
   const histRef = useRef(hist);
   // A place selected before its snapshot resolves (or after it was removed
@@ -9242,7 +9254,9 @@ function App() {
   const shellHere = stripUp ? frontHere
     : sel ? navSeenFront.current[placeKey(sel.repo, sel.slug)] ?? settings.term_tab_active?.[placeKey(sel.repo, sel.slug)] : undefined;
   // The workspace view is a location too: its tab, and the idea it shows.
-  const wsLoc: Loc["ws"] = !sel && wsShown ? { id: wsShown.id, tab: wsTabNow, ...(wsTabNow === "ideas" ? { doc: tabDoc(wsShown.id, "ideas")?.name } : wsTabNow === "memory" ? { doc: memPath(wsShown.id) } : {}), ...(wsChat[wsShown.id] ? { chat: wsChat[wsShown.id]! } : {}) } : undefined;
+  // On Memory, its History too when open, and the change shown in it.
+  const memHist = wsShown && wsTabNow === "memory" && docShown && mainDoc?.tab === "memory" && memHistOpen ? { ...(memHistAt ? { at: memHistAt } : {}) } : null;
+  const wsLoc: Loc["ws"] = !sel && wsShown ? { id: wsShown.id, tab: wsTabNow, ...(wsTabNow === "ideas" ? { doc: tabDoc(wsShown.id, "ideas")?.name } : wsTabNow === "memory" ? { doc: memPath(wsShown.id) } : {}), ...(wsChat[wsShown.id] ? { chat: wsChat[wsShown.id]! } : {}), ...(memHist ? { hist: memHist } : {}) } : undefined;
   // Disk over all of it: its scope, and what is picked in a place's treemap.
   const diskLoc: Loc["disk"] = diskOpen ? { scope: diskOpen, ...(diskPath ? { path: diskPath } : {}) } : undefined;
   const navLoc: Loc | null = !sel ? { place: null, ...(wsLoc ? { ws: wsLoc } : {}), ...(diskLoc ? { disk: diskLoc } : {}) } : !selected ? null : stripUp && frontHere === undefined ? null : {
@@ -9251,6 +9265,8 @@ function App() {
     dock: {
       tab: shownTab,
       ...(dockFile ? { file: { path: dockFile, line: dockAt?.line, col: dockAt?.col } } : {}),
+      // The document chosen in the Docs list (normalize keeps it on Docs only).
+      ...(shownTab === "docs" && docsPick[placeKey(sel.repo, sel.slug)] ? { doc: docsPick[placeKey(sel.repo, sel.slug)] } : {}),
       // The shell in front (see `shellHere`).
       ...(shellHere != null ? { shell: shellHere } : {}),
     },
@@ -9277,10 +9293,19 @@ function App() {
     : d.kind === "project" ? !!ws?.projects.some((p) => p.ok && p.root === d.root)
     : !!ws?.projects.find((p) => p.root === d.repo)?.snapshot?.places.some((pl) => pl.slug === d.slug);
   wsAliveRef.current = (w) => tabsOn.includes(w.tab) && frameOn && !!wsById(w.id)
-    && (!w.chat || (wsChatsOn && (wsChats.of(w.id)?.chats.some((c) => c.id === w.chat) ?? true)));
+    && (!w.chat || (wsChatsOn && (wsChats.of(w.id)?.chats.some((c) => c.id === w.chat) ?? true)))
+    // A History whose memory is gone, or a change that could not be read.
+    && (!w.hist || (wsMem.of(w.id)?.made !== false && !(w.hist.at && memGone.has(w.hist.at))));
+  /** A Docs entry whose chosen document left the place's index is skipped. */
+  const docsAliveRef = useRef((_l: Loc): boolean => true);
+  docsAliveRef.current = (l) => {
+    const doc = l.dock?.tab === "docs" ? l.dock.doc : undefined;
+    const known = doc && l.place ? docsKnown.current[placeKey(l.place.repo, l.place.slug)] : undefined;
+    return !known || known.has(doc!);
+  };
   const navAlive = useCallback((l: Loc) => (!l.place
     ? !l.ws || wsAliveRef.current(l.ws)
-    : !!wsNavRef.current?.projects.find((p) => p.root === l.place!.repo)?.snapshot?.places.some((pl) => pl.slug === l.place!.slug))
+    : !!wsNavRef.current?.projects.find((p) => p.root === l.place!.repo)?.snapshot?.places.some((pl) => pl.slug === l.place!.slug) && docsAliveRef.current(l))
     && (!l.disk || diskAliveRef.current(l.disk.scope)), []);
   /** History is putting a location back. Observations are ignored until the
    *  panes show it (or 1.5 s pass — then whatever DID land amends the entry,
@@ -9357,8 +9382,16 @@ function App() {
     const cur = selRef.current;
     const samePlace = loc.place ? cur?.repo === loc.place.repo && cur?.slug === loc.place.slug : !cur;
     // A new object for the SAME place would re-run every effect keyed on `sel`.
-    if (loc.ws) void showWsRef.current(loc.ws.id, loc.ws.tab, { doc: loc.ws.doc, chat: loc.ws.chat ?? null });
-    else {
+    if (loc.ws) {
+      const w = loc.ws;
+      void showWsRef.current(w.id, w.tab, { doc: w.doc, chat: w.chat ?? null }).then((ok) => {
+        // A memory file's History, put back as the entry has it, once the
+        // file is the one shown and while this apply is still the one running.
+        if (!ok || w.tab !== "memory" || navApplying.current?.key !== key) return;
+        if (w.hist) setMemAt((m) => ({ ws: w.id, commit: w.hist!.at ?? null, n: (m?.n ?? 0) + 1 }));
+        else if (memHistOpenRef.current) { setMemAt(null); setMemShut((n) => n + 1); }
+      });
+    } else {
       if (!samePlace) setSel(loc.place ? { repo: loc.place.repo, slug: loc.place.slug } : null);
       if (!loc.place) setWsOpen(null);
     }
@@ -9376,6 +9409,8 @@ function App() {
    *  assigned during render, so calling them beside `setSel` would write the
    *  place being left. Each part is written only where it DIFFERS from what is
    *  showing, so nothing seeded is frozen into `place_panels`. */
+  const memHistOpenRef = useRef(memHistOpen);
+  memHistOpenRef.current = memHistOpen;
   const [navPending, setNavPending] = useState<Loc | null>(null);
   const [navShellGoto, setNavShellGoto] = useState<{ id: number; seq: number } | null>(null);
   const navShellSeq = useRef(0);
@@ -9423,6 +9458,11 @@ function App() {
       setDockFile(null);
       setDockAt(null);
     }
+    // The document chosen on Docs, as the entry has it (none: nothing chosen).
+    if (d.tab === "docs") {
+      const k = placeKey(sel.repo, sel.slug);
+      if ((docsPick[k] ?? undefined) !== d.doc) setDocsPick((p) => { const n = { ...p }; if (d.doc) n[k] = d.doc; else delete n[k]; return n; });
+    }
     if (d.tab === "terminal" && d.shell != null && (d.tab !== eff.dock_tab || d.shell !== frontHere)) {
       show = true;
       // Written first, so a tab strip that MOUNTS for this (the dock was on
@@ -9439,6 +9479,14 @@ function App() {
     if (i !== undefined) navGo(i);
   }, [navAlive, navGo]);
   navStepRef.current = navStep;
+  /** A document chosen in a place's Docs list: the entry on screen (that
+   *  list) is amended to name it, so Back to the list shows it chosen. */
+  const pickDoc = (repo: string, slug: string, path: string) => {
+    setDocsPick((p) => ({ ...p, [placeKey(repo, slug)]: path }));
+    const here = navLocRef.current;
+    if (here?.place?.repo !== repo || here.place.slug !== slug || here.dock?.tab !== "docs" || here.disk) return;
+    commitHist((h) => recordNav(h, { ...here, dock: { ...here.dock!, doc: path } }, Date.now(), "amend"));
+  };
   // Mouse buttons 4 / 5 (back / forward), the same step. On release, like a
   // browser; unbound under a dialog like the chords.
   useEffect(() => {
@@ -11325,6 +11373,10 @@ function App() {
                     float={ideasOn ? (to) => floatDoc(to, wsById(mainDoc.ws) ?? null) : undefined}
                     floated={(to, title) => { setMainDoc((d) => (sameDoc(d, to) ? null : d)); setFloated({ ...to, title }); }}
                     landed={landedHere}
+                    // Whatever the tab, so the flag it reports is never stale;
+                    // only Memory's is part of a location (`memHist`).
+                    historyShut={memShut}
+                    historyShown={setMemHistOpen}
                     {...(mainDoc.tab === "memory" ? {
                       // A note is its heading, as the open document has it.
                       title: mainDoc.name.startsWith("notes/") ? undefined : mainDoc.name.slice(mainDoc.name.lastIndexOf("/") + 1),
@@ -11341,7 +11393,8 @@ function App() {
                       historyAsk: memAt?.ws === mainDoc.ws ? memAt.n : 0,
                       history: (close: () => void) => (
                         <MemoryHistory ready={() => docSaved(mainDoc.ws)} view={memView} chat={(c) => chatNavName(mainDoc.ws, c)} key={`${mainDoc.ws}|${mainDoc.name}|${memAt?.ws === mainDoc.ws ? memAt.n : 0}`} ws={mainDoc.ws} path={mainDoc.name} at={memAt?.ws === mainDoc.ws ? memAt.commit : null} tick={wsMem.tick(mainDoc.ws)}
-                          open={(path) => { close(); setMemAt(null); openMemory(mainDoc.ws, path); }} close={() => { close(); setMemAt(null); }} />
+                          open={(path) => { close(); setMemAt(null); openMemory(mainDoc.ws, path); }} close={() => { close(); setMemAt(null); }}
+                          shown={setMemHistAt} gone={(c) => setMemGone((g) => new Set([...g, c]))} />
                       ),
                       strips: (mode: "edit" | "read") => (
                         <MemoryStrips failing={memView?.commit_error ?? null} mode={mode} long={mainDoc.name === "MEMORY.md" && memView ? longIndex(memView) : null}
@@ -11583,7 +11636,12 @@ function App() {
                     // renderer, which has done markdown since v0.8.0. The dock
                     // is controlled from here (`dockFile`), so this needs no
                     // new plumbing — it sets the same state a tree row does.
-                    onOpen={(p) => { openDockFile(p); updatePanels({ dock_tab: "files", dock_open: true }); }}
+                    // Choosing a document is a step of its own: the list's
+                    // entry is amended to name it (Back comes back to it
+                    // chosen), then the file opens in Files, a new entry.
+                    onOpen={(p) => { pickDoc(sel.repo, sel.slug, p); openDockFile(p); updatePanels({ dock_tab: "files", dock_open: true }); }}
+                    sel={docsPick[placeKey(sel.repo, sel.slug)] ?? null}
+                    onIndex={(paths) => { docsKnown.current[placeKey(sel.repo, sel.slug)] = new Set(paths); }}
                     onError={fail}
                     findOpen={findOn === "dock"}
                     findToken={findToken}

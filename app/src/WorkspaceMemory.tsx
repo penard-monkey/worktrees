@@ -2,7 +2,7 @@
  *  §4.4, §4.5): the file list, the folder's History, what is not a text, and the
  *  Overview's column. The texts themselves are the document pane's, on
  *  `memoryDocs` (doc/memory.ts). Module scope: it holds state. */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { memoryDocs, type CommitError, type MemoryChange, type MemoryFile, type MemoryFileDiff, type MemoryImage, type MemoryView } from "./doc/memory";
 import { isImagePath, linkTo, topicPath } from "./doc/memorypath";
 import { readableLinks } from "./doc/ideasrelate";
@@ -304,8 +304,15 @@ export function MemoryHistory(props: {
   chat(id: string): string | null;
   /** The open document is saved, before an Undo. */
   ready(): Promise<boolean>;
+  /** The change on screen (`null`: the list), on every change: Back and
+   *  Forward step to it. */
+  shown?(commit: string | null): void;
+  /** The change asked for (`at`) could not be read: it is gone. */
+  gone?(commit: string): void;
 }) {
   const { ws, path } = props;
+  const told = useRef(props);
+  told.current = props;
   const src = memoryDocs(ws);
   const [all, setAll] = useState(path === null || props.at !== null);
   const [list, setList] = useState<MemoryChange[] | null>(null);
@@ -331,7 +338,8 @@ export function MemoryHistory(props: {
   useEffect(() => {
     if (!props.at) return;
     let gone = false;
-    src.change(props.at).then((c) => { if (!gone) pick(c); }, (e) => { if (!gone) setErr(errText(e)); });
+    const want = props.at;
+    src.change(want).then((c) => { if (!gone) pick(c); }, (e) => { if (!gone) { setErr(errText(e)); told.current.gone?.(want); } });
     return () => { gone = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- the change asked for is the trigger
   }, [src, props.at]);
@@ -344,6 +352,8 @@ export function MemoryHistory(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [src, props.tick, cur?.commit]);
   const at = cur?.commit;
+  useEffect(() => { told.current.shown?.(at ?? null); }, [at]);
+  useEffect(() => () => { told.current.shown?.(null); }, []);
   useEffect(() => {
     setDiff(null);
     if (!at || !file) return;
