@@ -154,6 +154,8 @@ export const PLACE_MEMORY_KEYS = [
   "files_open", "files_open_at", "collapsed", "manual_order",
   // a named workspace's folding, and its projects' (workspaces.ts)
   "ws_collapsed",
+  // each workspace's last New chat pick (WorkspaceChat.tsx `NewChatMore`)
+  "ws_chat_pick",
 ] as const;
 /** Markers the controls write, never a control of their own. */
 export const MARKER_KEYS = ["settings_rev", "last_seen_version", "update_dismissed", "chat_default_v1", "init_dismissed", "offers_dismissed"] as const;

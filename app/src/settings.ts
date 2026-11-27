@@ -436,6 +436,9 @@ export type Settings = {
   // Switch agent sheet. Absent: Claude and Codex use their CLI's default; pi has
   // none worktrees will use, so the first ready model is offered instead.
   default_models: Partial<Record<Harness, string>>;
+  /** Each workspace's last New chat pick, by workspace id: what its plain
+   *  New chat starts on. Absent: Claude on its default. */
+  ws_chat_pick: Record<string, { harness: string; model: string }>;
   ai_auto_resume: boolean; // single-click Enter resumes the selected provider when possible
   update_auto_check: boolean; // poll for releases hourly while visible (manual check always works)
   // The release tag whose update bubble was closed ("" = none). Per VERSION, so
@@ -639,6 +642,7 @@ export const DEFAULTS: Settings = {
   collapsed: {},
   nav_view: "projects",
   ws_collapsed: {},
+  ws_chat_pick: {},
   beta_ideas: false,
   beta_group_chat: false,
   beta_workspace_chats: false,
@@ -1002,6 +1006,7 @@ export async function loadSettings(): Promise<Settings> {
     if (typeof s.projects_parent !== "string") s.projects_parent = "";
     if (s.nav_view !== "workspaces") s.nav_view = "projects";
     if (!s.ws_collapsed || typeof s.ws_collapsed !== "object") s.ws_collapsed = {};
+    if (!s.ws_chat_pick || typeof s.ws_chat_pick !== "object") s.ws_chat_pick = {};
     if (s.beta_ideas !== true) s.beta_ideas = false;
     if (s.beta_group_chat !== true) s.beta_group_chat = false;
     if (s.beta_workspace_chats !== true) s.beta_workspace_chats = false;

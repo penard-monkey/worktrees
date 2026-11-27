@@ -79,7 +79,7 @@ import { PickPlace, StartReview } from "./StartWork";
 import { useGone } from "./useGone";
 import { NoMemory, WorkspaceOverview, type DocLite, type WsParts } from "./WorkspaceOverview";
 import { WorkspaceFrame } from "./WorkspaceFrame";
-import { ChatDot, ChatLines, ChatsTab, NavChats, RefusedStart, StartingChat, WorkspaceChatColumn, type ChatActsHost } from "./WorkspaceChat";
+import { ChatDot, ChatLines, ChatsTab, NavChats, NewChatMore, RefusedStart, StartingChat, WorkspaceChatColumn, type ChatActsHost } from "./WorkspaceChat";
 import { PickPlaceWs, WorkspaceDock, type DockDoc } from "./WorkspaceDock";
 import { useWsChats } from "./useWsChats";
 import { keepFiles, MemoryCard, MemoryFiles, MemoryHistory, MemoryPreview, MemoryStrips, MemoryUnread } from "./WorkspaceMemory";
@@ -87,7 +87,7 @@ import { useWsMemory } from "./useWsMemory";
 import { fileOf, longIndex, memoryPicks, nameAt, sizeWords, trailStart, trailStep, trailTo, type Trail } from "./wsmemory";
 import { memoryDocs, type MemoryView } from "./doc/memory";
 import { linkTo, memoryLink } from "./doc/memorypath";
-import { chatReference, navRows, needsYouKeys, needsYouWords, tidyBar, type ChatRow } from "./wschats";
+import { chatReference, navRows, needsYouKeys, needsYouWords, pickFor, tidyBar, type ChatPick, type ChatRow } from "./wschats";
 import { attentionOf, chatActivity, placeActivity, docChips, LAST_VIEW_KEY, lastView, placeWorkspace, placeWorkspaces, PLACE_WS_KEY, placeWsRead, placeWsSet, rollupOf, tabsWith, tabOr, wsCounts, wsFrameOn, wsTabs, type LastView, type Rollup } from "./wsview";
 import { answer, ask, DOCK, FLOAT, take, windowEnv, type Ask, type HandDoc } from "./doc/handoff";
 import { MainDocument, type MainDocApi } from "./doc/MainDocument";
@@ -7012,7 +7012,13 @@ function App() {
   };
   const startingChat = useRef(false);
   /** `tidy`: Tidy…, the same start on the engine's tidy file. */
-  const startChat = async (id: string, tidy = false) => {
+  /** What a workspace's New chat starts on (`wschats.ts` `pickFor`). */
+  const chatPick = (id: string) => pickFor(settings.ws_chat_pick?.[id], wsChats.of(id)?.harnesses);
+  const chatMore = (id: string, testid: string) => (
+    <NewChatMore picks={wsChats.of(id)?.harnesses} value={chatPick(id)} busy={wsStart?.ws === id && wsStart.why === null} testid={testid} onError={fail}
+      start={(p) => { updateSettings((prev) => ({ ws_chat_pick: { ...(prev.ws_chat_pick ?? {}), [id]: p } })); void startChat(id, false, p); }} />
+  );
+  const startChat = async (id: string, tidy = false, pick?: ChatPick) => {
     if ((wsStart && wsStart.why === null) || startingChat.current) return;
     // One press at a time: what follows may wait for a save.
     startingChat.current = true;
@@ -7022,7 +7028,7 @@ function App() {
     } finally { startingChat.current = false; }
     setWsSide("chat");
     setWsStart({ ws: id, why: null, tidy });
-    const got = await wsChats.start(id, tidy);
+    const got = await wsChats.start(id, tidy, tidy ? undefined : pick ?? chatPick(id));
     // A workspace's first chat makes its memory.
     void wsMem.refresh(id);
     if ("refused" in got) { setWsStart({ ws: id, why: got.refused, tidy }); return; }
@@ -11055,14 +11061,14 @@ function App() {
                   ...(wsMem.unseen(wsShown.id) && wsTabNow !== "memory" ? { memory: "fresh" as const } : {}),
                   ...(docStuck !== null && mainDoc?.ws === wsShown.id ? { [mainDoc.tab]: "waits" as const } : {}),
                 } : undefined}
-                newChat={wsShown && wsChatsOn && (wsChats.of(wsShown.id)?.chats.length ?? 0) > 0 ? { busy: wsStart?.ws === wsShown.id && wsStart.why === null, run: () => void startChat(wsShown.id) } : null}
+                newChat={wsShown && wsChatsOn && (wsChats.of(wsShown.id)?.chats.length ?? 0) > 0 ? { busy: wsStart?.ws === wsShown.id && wsStart.why === null, run: () => void startChat(wsShown.id), more: chatMore(wsShown.id, "ws-frame-new-chat-more") } : null}
                 middle={wsMiddle}
                 side={wsSide}
                 setSide={setWsSide}
                 firstChat={() => { if (wsShown) void startChat(wsShown.id); }}
                 chatsTab={wsShown && wsChatsOn && (
                   <ChatsTab note={(path) => openMemory(wsShown.id, path)} rows={wsChats.rows(wsShown.id)} on={wsChat[wsShown.id] ?? null} starting={wsStart?.why === null} ago={ago}
-                    open={(conv) => openChat(wsShown.id, conv)} start={() => void startChat(wsShown.id)} acts={chatActsHost(wsShown.id)} />
+                    open={(conv) => openChat(wsShown.id, conv)} start={() => void startChat(wsShown.id)} acts={chatActsHost(wsShown.id)} more={chatMore(wsShown.id, "ws-chats-new-more")} />
                 )}
                 showTab={(t) => { if (wsShown) void showWs(wsShown.id, t); }}
                 navButtons={navButtons}

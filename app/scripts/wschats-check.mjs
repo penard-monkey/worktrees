@@ -164,5 +164,21 @@ eq("…a document, the rules, and what this build does not know", [...["unlinked
   eq("no title: still named", /“a workspace chat”/.test(W.chatReference(ws, conv, "  ")), true);
 }
 
+// ── which harness a chat starts on (workspace-chat-provider.md) ──
+{
+  const core = read("../../crates/worktrees-core/src/workspacechats.rs");
+  const fn = core.slice(core.indexOf("pub fn harness_refusal"), core.indexOf("pub fn pick("));
+  const words = Object.fromEntries([...fn.matchAll(/"(\w+)" => Some\("([^"]+)"\)/g)].map((m) => [m[1], m[2]]));
+  eq("core refuses codex, kimi and pi in words", Object.keys(words), ["codex", "kimi", "pi"]);
+  const mock = read("../src/mock/install.ts");
+  const table = mock.slice(mock.indexOf("const MOCK_CHAT_REFUSAL"), mock.indexOf("};", mock.indexOf("const MOCK_CHAT_REFUSAL")));
+  for (const [h, w] of Object.entries(words)) eq(`the mock says core's words for ${h}`, table.includes(`${h}: "${w}"`), true);
+  eq("the last pick, while its harness can start", W.pickFor({ harness: "claude", model: "opus" }, [{ id: "claude", label: "Claude" }]), { harness: "claude", model: "opus" });
+  eq("…a pick whose harness is refused now falls back to Claude's default", W.pickFor({ harness: "codex", model: "x" }, [{ id: "codex", label: "Codex", why: "no" }]), { harness: "claude", model: "" });
+  eq("…none: Claude's default", [W.pickFor(undefined, undefined), W.pickFor({ harness: "codex", model: "" }, undefined)], [W.DEFAULT_PICK, W.DEFAULT_PICK]);
+  const c = chat("m", { session: "s~m", model: "claude-sonnet-5-5" });
+  eq("the header names the started model until it replies, then the reply's", [W.modelWords(c, ev({ live: ["s~m"] }), true), W.modelWords(c, ev({ live: ["s~m"], model: { "s~m": "Opus 5.5" } }), true), W.modelWords(chat("n"), null, false)], ["claude-sonnet-5-5", "Opus 5.5", null]);
+}
+
 if (failed) { console.log(`\nwschats-check: ${failed} failed`); process.exit(1); }
 console.log("wschats-check: all ok");

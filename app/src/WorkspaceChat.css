@@ -94,3 +94,9 @@
 .wsc-stale ul { margin: var(--s1) 0; padding-left: var(--s4); }
 p.wsc-stale { margin: 0; }
 .wsc-limits { max-width: 22rem; margin: 0; padding: var(--s2) var(--s3); border-top: 1px solid var(--line); color: var(--txt); font-size: var(--fs-meta); }
+
+/* New chat's ▾ and what it opens: the harness, its model, why not the others. */
+.wsc-more { margin-left: calc(-1 * var(--s1)); padding-inline: var(--s1); }
+.wsc-pick { display: flex; flex-direction: column; gap: var(--s2); width: 260px; padding: var(--s1); }
+.wsc-pick .seg { flex-wrap: wrap; }
+.wsc-pick-why { margin: 0; padding-left: var(--s3); font-size: var(--fs-micro); color: var(--txt-dim); display: flex; flex-direction: column; gap: 2px; }

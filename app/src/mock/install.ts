@@ -2296,6 +2296,8 @@ setTimeout(() => ideaSessionsPush(), 300);
 type MockFold = { asked: string; asked_ms?: number; left?: number; state: string; commit?: string; files?: number; lines?: { added: number; removed: number }; reverted: boolean; why?: string };
 type MockChat = {
   id: string; harness: "claude"; session_id: string; title: string; started: string; last_activity: string; note: string;
+  /** The model it was started on (`workspacechats::Chat::model`). */
+  started_model?: string;
   fold?: MockFold; note_exists: boolean; live: boolean; state: "idle" | "busy" | "waiting"; turns: MockConv["turns"]; prompt: MockConv["prompt"];
   /** What its transcript names last (`watch::WorkspaceSessions::model`); none before a reply. */
   model?: string;
@@ -2392,9 +2394,19 @@ function chatReply(c: MockChat, user: string | null, reply: string, engine?: "st
 }
 /** The workspace that has chat `c`. */
 const chatWs = (c: MockChat) => [...mockChats].find(([, cs]) => cs.includes(c))?.[0] ?? "";
+/** `workspacechats::harness_picks`: every harness, the refused ones with core's words. */
+const MOCK_CHAT_HARNESSES: [string, string][] = [["claude", "Claude"], ["codex", "Codex"], ["pi", "pi"], ["kimi", "Kimi"]];
+const MOCK_CHAT_REFUSAL: Record<string, string> = {
+  codex: "Codex cannot be a workspace chat yet. Its sandbox does not stop reads, so a private project would be readable.",
+  kimi: "Kimi cannot be a workspace chat. It has no rule a launch can set to keep it out of a project's files.",
+  pi: "pi cannot be a workspace chat. It has no rule a launch can set to keep it out of a project's files.",
+};
+/** What each `workspace_chat_start` asked for, oldest first (`__mock.chatStarts`). */
+const mockChatStarts: { harness: string; model: string }[] = [];
 const mockChatRecord = (c: MockChat) => ({
   id: c.id, harness: c.harness, session_id: c.session_id, title: c.title, started: c.started, last_activity: c.last_activity, note: c.note,
   ...(c.tidy ? { tidy: true } : {}),
+  ...(c.started_model ? { model: c.started_model } : {}),
   // A fold's numbers are its commit's, in the memory (./memory.ts).
   ...(c.fold ? { fold: { ...c.fold, ...(c.fold.state === "done" && c.fold.commit ? mockMemory.fold(chatWs(c), c.title, c.fold.commit) : null) } } : {}),
 });
@@ -5134,15 +5146,24 @@ Phase 3: Frontend pane and mock harness
         id: w.id, name: w.name, folder: `${MOCK_WS_DIR}/${w.id}`, projects: mockChatReads(w.id), documents: mockChatDocs(w.id),
         limits: "The rules are set when the chat starts. They stop Claude's file tools, not every program it runs.",
         chats: [...(mockChats.get(w.id) ?? [])].sort((a, b) => (a.id < b.id ? 1 : -1)).map(mockChatRow),
+        harnesses: MOCK_CHAT_HARNESSES.map(([id, label]) => ({ id, label, ...(MOCK_CHAT_REFUSAL[id] ? { why: MOCK_CHAT_REFUSAL[id] } : {}) })),
       };
     }
     case "workspace_chat_start": {
       mockWsView();
+      // `workspacechats::pick`: Claude only, the others in their words; a model as data.
+      const harness = (args.harness as string | undefined) || "claude";
+      if (MOCK_CHAT_REFUSAL[harness]) throw MOCK_CHAT_REFUSAL[harness];
+      const model = typeof args.model === "string" ? args.model.trim() : "";
+      if (model && !/^[A-Za-z0-9._/:-]{1,200}$/.test(model)) throw `model '${model}' may contain only letters, digits and . _ / : -`;
+      mockChatStarts.push({ harness, model });
       const w = mockWsGet(args.id);
       const list = mockChats.get(w.id) ?? [];
       mockMemory.beforeLaunch(w.id);
       // A tidy chat takes no chat's number (core's `next_title`).
       const c = mockChatNew(ideaId(), `Chat ${list.filter((x) => !x.tidy).length + 1}`, 0, 0, { live: true });
+      // Claude replies on the model it was started on.
+      if (model) { c.started_model = model; c.model = model; }
       list.push(c); mockChats.set(w.id, list);
       chatReply(c, mockChatOpeners(w.id, c).start, "I read the memory's index and the list of projects. What would you like to settle?", "start");
       return { id: w.id, chat: mockChatRecord(c), session: chatSession(c) };
@@ -7551,6 +7572,7 @@ let mockNotifyGranted = new URLSearchParams(location.search).get("notify") === "
   /** A `/model` switch in a chat's transcript: the next push names it. */
   wsChatModel: (id: string, conv: string, model: string | null) => { const c = chatOf(id, conv); c.model = model ?? undefined; chatSessionsPush(); },
   endChat: (id: string, conv: string) => { const c = chatOf(id, conv); c.live = false; c.prompt = null; chatSessionsPush(); },
+  chatStarts() { return [...mockChatStarts]; },
   wsFold(id: string, conv: string, state: "folding" | "waiting" | "checking" | "failed" | "landed" | "nothing" | null, why: string | null = null) {
     const c = chatOf(id, conv);
     if (state === "landed" || state === "nothing") foldLand(id, c, state === "landed");

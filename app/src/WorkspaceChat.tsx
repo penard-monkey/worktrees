@@ -15,8 +15,10 @@ import { useArmed } from "./useArmed";
 import {
   accessWords, activeAt, ageWords, asksTrust, chatActs, endedLine, failedWords, firstMessage, foldOf, foldRuns, introWords, isDefaultTitle, monthOf, navRows, quietLine, readsWords, stateWords, titleFrom, transcriptGone, TRUST_WORDS, whenWords,
   type ChatAct, type ChatActItem, type ChatRow, type DocRead, type ProjectRead, type RowState, type WsChat, type WsChats, type WsSessionsEv,
-  modelOf,
+  modelOf, modelWords, type ChatPick, type HarnessPick,
 } from "./wschats";
+import { ModelPicker, useAgentModels } from "./ModelPicker";
+import { HARNESS_LABEL, isHarness, type Harness } from "./harness";
 import type { WsChatsLive } from "./useWsChats";
 import { RevertButton, useRevert } from "./WorkspaceMemory";
 import { chatNote } from "./wsmemory";
@@ -29,6 +31,9 @@ const DOT_TITLE: Record<RowState, string> = {
 export function ChatDot({ state }: { state: RowState }) {
   return <span className={`wsc-dot ${state}`} title={DOT_TITLE[state]} aria-hidden="true" />;
 }
+
+/** What a chat runs on, in words: `Claude`, `Claude · sonnet`. */
+export const onWords = (c: WsChat): string => `${isHarness(c.harness) ? HARNESS_LABEL[c.harness] : c.harness}${c.model ? ` · ${c.model}` : ""}`;
 
 /** What the acts on a chat need from the window: the same for its header and
  *  for a row's right-click menu. */
@@ -177,7 +182,7 @@ export function NavChats(props: {
         const age = ageWords(r, props.ago(activeAt(r.chat)));
         return (
           <button key={r.chat.id} className={"wsc-row" + (r.state === "ended" ? " closed" : "") + (r.chat.id === props.on ? " on" : "")} data-testid="ws-chat-row" data-track="nav.workspace.chat"
-            data-chat={r.chat.id} data-state={r.state} title={`${r.chat.title} · ${stateWords(r)}`} aria-current={r.chat.id === props.on || undefined} onClick={() => props.open(r.chat.id)}
+            data-chat={r.chat.id} data-state={r.state} title={`${r.chat.title} · ${stateWords(r)} · ${onWords(r.chat)}`} aria-current={r.chat.id === props.on || undefined} onClick={() => props.open(r.chat.id)}
             data-drag-handle="" onPointerDown={props.arm ? (e) => props.arm!(e, r.chat.id, r.chat.title) : undefined}
             {...(props.acts ? menu.on(r.chat.id) : {})} aria-haspopup={props.acts ? "menu" : undefined}>
             <span className="wsc-row-in">
@@ -322,7 +327,8 @@ export function WorkspaceChatColumn(props: {
     if (t.trim() && t.trim() !== c.title) void act("rename it", () => live.rename(ws.id, conv, t.trim()), false);
   };
   const term = view === "terminal" && row.live;
-  const model = modelOf(c, live.sessions, row.live);
+  const model = modelWords(c, live.sessions, row.live);
+  const who = isHarness(c.harness) ? HARNESS_LABEL[c.harness] : c.harness;
   return (
     <div className="wsc-col" data-testid="ws-chat-col" data-chat={conv} data-state={row.state}>
       <header className="wsc-head">
@@ -338,7 +344,7 @@ export function WorkspaceChatColumn(props: {
             <span className="wsc-name-in"><ChatDot state={row.state} /><span className="wsc-name-t">{c.title}</span><Icons.ChevronDown size={11} /></span>
           </button>
         )}
-        {model && <span className="agent-model wsc-model" data-testid="ws-chat-model" title="the model this chat last replied with">Claude {model}</span>}
+        {model && <span className="agent-model wsc-model" data-testid="ws-chat-model" title={modelOf(c, live.sessions, row.live) ? "the model this chat last replied with" : "the model this chat was started on"}>{who} {model}</span>}
         <button className="wsc-readsb" data-testid="ws-chat-readsb" data-track="workspace.chat.reads" title="Which projects this chat reads" aria-expanded={menu?.kind === "reads"} onClick={at("reads")}>{readsWords(info.projects)} ▾</button>
         {c.access === "stale" && <button className="wsc-stale-b" data-testid="ws-chat-stale-chip" title="What it may read has changed since it started" onClick={at("reads")}>its rules changed</button>}
         <span className="wsc-acts">
@@ -471,6 +477,46 @@ function useFoldChange(ws: string, c: WsChat | null, tick: number): MemoryChange
   return change && change.commit === commit ? change : null;
 }
 
+/** New chat's ▾: what a new chat starts on, the harness and its model, as a
+ *  new lane's dialog offers them. Every harness is listed; one that cannot be a
+ *  workspace chat, or is not installed, is disabled with the engine's reason
+ *  (`workspacechats::harness_picks`). New chat's plain press starts the
+ *  workspace's last pick with no step. */
+export function NewChatMore(props: { picks: readonly HarnessPick[] | undefined; value: ChatPick; busy: boolean; start(p: ChatPick): void; onError(e: unknown): void; testid: string }) {
+  const [at, setAt] = useState<{ x: number; y: number } | null>(null);
+  return (
+    <>
+      <button className="ctrl sm wsc-more" data-testid={props.testid} data-track="workspace.chat.new-with" aria-label="New chat with…" title="New chat with…" aria-haspopup="dialog" aria-expanded={!!at} disabled={props.busy}
+        onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setAt((a) => (a ? null : { x: r.right - 260, y: r.bottom + 4 })); }}>▾</button>
+      {at && <CtxMenu x={at.x} y={at.y} panel="New chat with" onClose={() => setAt(null)}>
+        <PickPanel picks={props.picks} value={props.value} onError={props.onError} start={(p) => { setAt(null); props.start(p); }} />
+      </CtxMenu>}
+    </>
+  );
+}
+function PickPanel(props: { picks: readonly HarnessPick[] | undefined; value: ChatPick; start(p: ChatPick): void; onError(e: unknown): void }) {
+  const picks = props.picks ?? [{ id: "claude", label: "Claude" }];
+  const [h, setH] = useState(props.value.harness);
+  const [m, setM] = useState(props.value.model);
+  const harness: Harness = isHarness(h) ? h : "claude";
+  const models = useAgentModels(harness, props.onError);
+  const refused = picks.filter((p) => p.why);
+  return (
+    <div className="wsc-pick" data-testid="ws-chat-pick">
+      <div className="pop-head">New chat with</div>
+      <div className="seg" role="group" aria-label="Agent provider">
+        {picks.map((p) => (
+          <button key={p.id} type="button" data-testid="ws-chat-pick-harness" data-harness={p.id} className={h === p.id ? "on" : ""} aria-pressed={h === p.id}
+            disabled={!!p.why} title={p.why} onClick={() => { setH(p.id); setM(""); }}>{p.label}</button>
+        ))}
+      </div>
+      <ModelPicker harness={harness} value={m} options={models} testid="ws-chat-pick-model" onChange={setM} />
+      {refused.length > 0 && <ul className="wsc-pick-why" data-testid="ws-chat-pick-why">{refused.map((p) => <li key={p.id}>{p.why}</li>)}</ul>}
+      <div className="ws-ov-line"><button className="enter-btn sm" data-testid="ws-chat-pick-start" data-track="workspace.chat.new-with.start" onClick={() => props.start({ harness: h, model: m })}>Start</button></div>
+    </div>
+  );
+}
+
 /** A start the engine refused (the live-agent limit, a spent window, no Claude),
  *  in the chat's side, in its own words. */
 export function RefusedStart(props: { why: string; busy: boolean; again(): void; away(): void }) {
@@ -513,7 +559,9 @@ export function ChatLines(props: { rows: readonly ChatRow[]; ago(epoch: number):
 
 /** The Chats tab: every chat, what needs somebody first, the closed ones by
  *  month. */
-export function ChatsTab(props: { note(path: string): void; rows: readonly ChatRow[]; on: string | null; starting: boolean; ago(epoch: number): string; open(conv: string): void; start(): void; acts?: ChatActsHost }) {
+export function ChatsTab(props: { note(path: string): void; rows: readonly ChatRow[]; on: string | null; starting: boolean; ago(epoch: number): string; open(conv: string): void; start(): void; acts?: ChatActsHost;
+  /** New chat's ▾. */
+  more?: React.ReactNode }) {
   const [q, setQ] = useState("");
   const menu = useRowMenu();
   const mrow = menu.m && props.rows.find((r) => r.chat.id === menu.m!.conv);
@@ -532,7 +580,7 @@ export function ChatsTab(props: { note(path: string): void; rows: readonly ChatR
     <div className="wsc-tab" data-testid="ws-chats-tab">
       <div className="wsc-tab-h">
         <input className="wsc-filter" data-testid="ws-chats-filter" placeholder={`Filter ${props.rows.length} chats`} value={q} spellCheck={false} onChange={(e) => setQ(e.currentTarget.value)} />
-        <button className="enter-btn sm" data-testid="ws-chats-new" data-track="workspace.chat.new" disabled={props.starting} onClick={props.start}>New chat</button>
+        <button className="enter-btn sm" data-testid="ws-chats-new" data-track="workspace.chat.new" disabled={props.starting} onClick={props.start}>New chat</button>{props.more}
       </div>
       {hit.length === 0 && <p className="ws-ov-none">No chat's title matches.</p>}
       {groups.map((g) => (
@@ -546,6 +594,7 @@ export function ChatsTab(props: { note(path: string): void; rows: readonly ChatR
                     <ChatDot state={r.state} />
                     <span className="ws-ov-name">{r.chat.title}</span>
                     <span className="ws-ov-detail">{stateWords(r)}</span>
+                    {r.chat.model && <span className="ws-ov-detail" data-testid="ws-chats-on">{onWords(r.chat)}</span>}
                   </span>
                 </button>
                 {chatNote(r.chat) && <button className="wsf-link" data-testid="ws-chats-note" title={r.chat.note} onClick={() => props.note(chatNote(r.chat)!)}>note</button>}

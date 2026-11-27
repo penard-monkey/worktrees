@@ -14,7 +14,8 @@
 // name from the first message, a refusal said in the chat's side; the Chats tab;
 // one side under 760 px; Back and Forward; six themes; nothing of it with the
 // beta off. And a chat row's right-click menu, in the card and in the Chats tab:
-// the header's acts by the chat's state, refused ones said, by key too.
+// the header's acts by the chat's state, refused ones said, by key too. And
+// New chat's ▾: the harness and model a chat starts on.
 const { chromium, webkit } = await import(process.env.PLAYWRIGHT_MODULE ?? "playwright");
 const BASE = process.env.IDEAS_MOCK_URL ?? "http://localhost:1466";
 const SHOTS = process.env.IDEAS_SCREENSHOTS;
@@ -273,6 +274,32 @@ async function rowmenu(page, tag) {
   ok(await until(page, () => !!document.querySelector(".ctxmenu")) && JSON.stringify(await items()) === JSON.stringify(["Fold now", "Resume", "Delete"]), `${tag} the Chats tab's rows have it too (${JSON.stringify(await items())})`);
 }
 
+/** New chat's ▾: the harness and its model (workspace-chat-provider.md §3). */
+async function picker(page, tag) {
+  const ws = await boot(page);
+  await page.locator("[data-testid=ws-name]", { hasText: "Everything" }).first().click();
+  await page.waitForSelector("[data-testid=ws-overview]");
+  await page.click("[data-testid=ws-frame-new-chat-more]");
+  ok(await until(page, () => !!document.querySelector("[data-testid=ws-chat-pick]")), `${tag} New chat's ▾ opens the pick`);
+  const hs = await page.locator("[data-testid=ws-chat-pick-harness]").evaluateAll((b) => b.map((x) => (x.disabled ? "~" : "") + x.textContent));
+  ok(JSON.stringify(hs) === JSON.stringify(["Claude", "~Codex", "~pi", "~Kimi"]), `${tag} every harness, the ones that cannot be a chat disabled (${JSON.stringify(hs)})`);
+  ok(/Codex cannot be a workspace chat yet\. Its sandbox does not stop reads, so a private project would be readable\./.test(await page.locator("[data-testid=ws-chat-pick-why]").innerText()), `${tag} …each with the engine's reason`);
+  ok(await page.locator("[data-testid=ws-chat-pick-harness][data-harness=codex]").getAttribute("title") !== null, `${tag} …on the button too`);
+  await until(page, () => document.querySelectorAll("[data-testid=ws-chat-pick-model] option").length > 2);
+  await page.selectOption("[data-testid=ws-chat-pick-model]", "sonnet");
+  await page.click("[data-testid=ws-chat-pick-start]");
+  ok(await until(page, () => window.__mock.chatStarts().length === 1) && JSON.stringify((await page.evaluate(() => window.__mock.chatStarts()))[0]) === JSON.stringify({ harness: "claude", model: "sonnet" }), `${tag} Start starts Claude on that model`);
+  ok(await until(page, () => /^Claude sonnet$/.test(document.querySelector("[data-testid=ws-chat-model]")?.textContent ?? "")), `${tag} its header names the model it was started on (${await page.locator("[data-testid=ws-chat-model]").innerText().catch(() => "none")})`);
+  const conv = await page.locator("[data-testid=ws-chat-col]").getAttribute("data-chat");
+  ok((await call(page, "workspace_chats", { id: ws })).chats.find((c) => c.id === conv)?.model === "sonnet", `${tag} …and its record holds it`);
+  ok(/· Claude · sonnet$/.test(await group(page, "Everything").locator(`[data-testid=ws-chat-row][data-chat='${conv}']`).getAttribute("title")), `${tag} its row says what it runs on`);
+  // The plain press starts the last pick, with no step.
+  await until(page, () => !document.querySelector("[data-testid=ws-frame-new-chat]")?.disabled);
+  await page.click("[data-testid=ws-frame-new-chat]");
+  ok(await until(page, () => window.__mock.chatStarts().length === 2) && JSON.stringify((await page.evaluate(() => window.__mock.chatStarts()))[1]) === JSON.stringify({ harness: "claude", model: "sonnet" }), `${tag} New chat's plain press starts the workspace's last pick`);
+  ok(!(await page.$("[data-testid=ws-chat-pick]")), `${tag} …with no step`);
+}
+
 async function start(page, tag) {
   const ws = await boot(page, ["beta_workspace_chats"]);
   await page.locator("[data-testid=ws-name]", { hasText: "Everything" }).first().click();
@@ -517,7 +544,7 @@ async function off(page, tag) {
 const only = process.env.ONLY?.split(",");
 for (const [engine, name] of [[chromium, "chromium"], [webkit, "webkit"]]) {
   const browser = await engine.launch();
-  for (const part of [nav, chat, rowmenu, start, narrow, back, trust, themes, model, notified, off]) {
+  for (const part of [nav, chat, rowmenu, picker, start, narrow, back, trust, themes, model, notified, off]) {
     if (only && !only.includes(part.name)) continue;
     const page = await (await browser.newContext({ viewport: { width: 1440, height: 900 } })).newPage();
     const errors = [];

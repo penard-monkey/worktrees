@@ -198,8 +198,13 @@ pub fn workspace_of_conv(root: &Path, conv: &str) -> Option<String> {
 pub struct Chat {
     /// The chat's ULID: names its folder and its tmux session.
     pub id: String,
-    /// `claude`, the only harness launched here.
+    /// `claude`, the only harness launched here ([`harness_refusal`] says why
+    /// not the others).
     pub harness: String,
+    /// The model it was started on, passed again on every resume and fold;
+    /// none is the harness's own default. Absent from a record before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// Claude's own id for it, chosen here and written BEFORE the launch.
     pub session_id: String,
     pub title: String,
@@ -447,7 +452,34 @@ pub fn remove_at(root: &Path, ws: &str, conv: &str) -> Result<(), String> {
 /// `context.md` (`context` is given the chat's id) and its record entry with
 /// the session id Claude will be given. Nothing is launched.
 pub fn prepare_at(root: &Path, ws: &str, context: impl FnOnce(&str) -> String) -> Result<Chat, String> {
-    prepare_kind_at(root, ws, Kind::Chat, context)
+    prepare_kind_at(root, ws, Kind::Chat, None, context)
+}
+
+/// Why `harness` cannot be a workspace chat, or `None` for one that can
+/// (Claude). One table: the start refuses with it, and `workspace_chats`
+/// hands it to the picker, which shows the harness disabled with it
+/// (`docs/proposals/workspace-chat-provider.md`).
+pub fn harness_refusal(harness: &str) -> Option<&'static str> {
+    match harness {
+        h if h == crate::provider::CLAUDE.id => None,
+        "codex" => Some("Codex cannot be a workspace chat yet. Its sandbox does not stop reads, so a private project would be readable."),
+        "kimi" => Some("Kimi cannot be a workspace chat. It has no rule a launch can set to keep it out of a project's files."),
+        "pi" => Some("pi cannot be a workspace chat. It has no rule a launch can set to keep it out of a project's files."),
+        _ => Some("That harness cannot be a workspace chat."),
+    }
+}
+
+/// What a start was asked for, checked: the harness (Claude when none) and
+/// the model, which must be one a launch can carry as data.
+pub fn pick(harness: Option<&str>, model: Option<&str>) -> Result<Option<String>, String> {
+    let h = harness.filter(|h| !h.is_empty()).unwrap_or(crate::provider::CLAUDE.id);
+    if let Some(why) = harness_refusal(h) {
+        return Err(why.to_string());
+    }
+    match model.map(str::trim).filter(|m| !m.is_empty()) {
+        None => Ok(None),
+        Some(m) => crate::choice::validate_model(m).map(|_| Some(m.to_string())),
+    }
 }
 
 /// What a chat is started for.
@@ -461,7 +493,8 @@ pub enum Kind {
 
 /// [`prepare_at`] for a chat of `kind`. Either opens on the same fixed opener
 /// ([`opener`]); only what the engine writes in `start.md` differs.
-pub fn prepare_kind_at(root: &Path, ws: &str, kind: Kind, context: impl FnOnce(&str) -> String) -> Result<Chat, String> {
+pub fn prepare_kind_at(root: &Path, ws: &str, kind: Kind, model: Option<&str>, context: impl FnOnce(&str) -> String) -> Result<Chat, String> {
+    let model = pick(None, model)?;
     let dir = make_at(root, ws)?;
     let desk = ws_desk(root, ws)?;
     desk.read::<Chat>()?;
@@ -479,6 +512,7 @@ pub fn prepare_kind_at(root: &Path, ws: &str, kind: Kind, context: impl FnOnce(&
             note: String::new(),
             id: conv,
             harness: crate::provider::CLAUDE.id.to_string(),
+            model: model.clone(),
             session_id: desk::new_uuid(),
             title: if kind == Kind::Tidy { TIDY_TITLE.to_string() } else { next_title(rec) },
             last_activity: started.clone(),
@@ -1439,6 +1473,7 @@ fn launch<'a>(cwd: &'a Path, c: &'a Chat, session: &'a str, how: Start, opener: 
         how,
         opener,
         settings: Some(settings),
+        model: c.model.as_deref(),
         env: Vec::new(),
         noun: NOUN,
         a_kind: "a workspace chat",
@@ -1489,16 +1524,16 @@ pub fn may_relaunch_at(root: &Path, ideas: &Path, w: &crate::workspaces::Workspa
 /// the chat back out (record entry and folder), so a refusal leaves nothing of
 /// it, and no folder at all when it would have been the workspace's first.
 pub fn start_at(root: &Path, ideas: &Path, w: &crate::workspaces::Workspace, context: impl FnOnce(&str) -> String) -> Result<(Chat, String), String> {
-    start_kind_at(root, ideas, w, Kind::Chat, context)
+    start_kind_at(root, ideas, w, Kind::Chat, None, context)
 }
 
 /// [`start_at`] for a chat of `kind`.
-pub fn start_kind_at(root: &Path, ideas: &Path, w: &crate::workspaces::Workspace, kind: Kind, context: impl FnOnce(&str) -> String) -> Result<(Chat, String), String> {
+pub fn start_kind_at(root: &Path, ideas: &Path, w: &crate::workspaces::Workspace, kind: Kind, model: Option<&str>, context: impl FnOnce(&str) -> String) -> Result<(Chat, String), String> {
     let ws = w.id.as_str();
     let dir = folder_at(root, ws)?;
     check_root(root, &policy(w)?.roots())?;
     let had_folder = fs::symlink_metadata(&dir).is_ok();
-    let c = prepare_kind_at(root, ws, kind, context)?;
+    let c = prepare_kind_at(root, ws, kind, model, context)?;
     match launch_at(root, ideas, w, &c.id, Start::Fresh, None) {
         Ok(session) => Ok((c, session)),
         Err(e) => {
@@ -1736,10 +1771,45 @@ mod tests {
         d
     }
 
+    /// The picker's choice, checked: Claude only, each other harness refused
+    /// in its own words, a model as data (workspace-chat-provider.md §0).
+    #[test]
+    fn a_start_takes_claude_and_a_model_and_refuses_the_others_in_words() {
+        assert_eq!(pick(None, None), Ok(None));
+        assert_eq!(pick(Some("claude"), Some(" opus ")), Ok(Some("opus".into())));
+        for h in ["codex", "kimi", "pi", "x"] {
+            let e = pick(Some(h), None).unwrap_err();
+            assert_eq!(Some(e.as_str()), harness_refusal(h), "{h}");
+        }
+        assert!(pick(Some("codex"), None).unwrap_err().contains("private project would be readable"));
+        assert!(pick(None, Some("--dangerously-skip-permissions")).is_err());
+        assert!(pick(None, Some("a b")).is_err());
+    }
+
+    /// The model is on the record from the start, and every launch of the chat
+    /// carries it (`launch` builds the fresh start, a resume and a fold's).
+    #[test]
+    fn a_chats_model_is_recorded_and_launched_every_time() {
+        let root = tmp("model");
+        let ws = crate::ulid::new();
+        let c = prepare_kind_at(&root, &ws, Kind::Chat, Some("claude-sonnet-5-5"), |_| String::new()).unwrap();
+        assert_eq!(find_at(&root, &ws, &c.id).unwrap().model.as_deref(), Some("claude-sonnet-5-5"));
+        let cwd = PathBuf::from("/w");
+        for how in [Start::Fresh, Start::Resume] {
+            let line = launch(&cwd, &c, "worktrees~ws~x", how, None, "{}".into()).line("claude", vec![]).unwrap();
+            assert!(line.contains(" --model 'claude-sonnet-5-5'"), "{how:?}: {line}");
+        }
+        let plain = prepare_at(&root, &ws, |_| String::new()).unwrap();
+        assert!(plain.model.is_none());
+        assert!(!launch(&cwd, &plain, "s", Start::Fresh, None, "{}".into()).line("claude", vec![]).unwrap().contains("--model"));
+        assert!(prepare_kind_at(&root, &ws, Kind::Chat, Some("-x"), |_| String::new()).is_err(), "a model that is a flag is refused before anything is made");
+    }
+
     fn chat(session_id: &str) -> Chat {
         Chat {
             id: crate::ulid::new(),
             harness: "claude".into(),
+            model: None,
             session_id: session_id.into(),
             title: "Talk".into(),
             started: "2026-11-24T10:00:00Z".into(),
@@ -2668,7 +2738,7 @@ mod tests {
         let root = tmp("tidy").join("workspaces");
         let ws = crate::ulid::new();
         let plain = prepare_at(&root, &ws, |_| String::new()).unwrap();
-        let c = prepare_kind_at(&root, &ws, Kind::Tidy, |_| String::new()).unwrap();
+        let c = prepare_kind_at(&root, &ws, Kind::Tidy, None, |_| String::new()).unwrap();
         assert!(c.tidy && !plain.tidy, "the record says which");
         assert_eq!(c.title, TIDY_TITLE);
         assert_eq!(openers(&folder_at(&root, &ws).unwrap(), &c)[0].text, opener(&c.id), "the same fixed opener");
@@ -2706,7 +2776,7 @@ mod tests {
         update_at(&root, &ws, &c.id, |c| c.fold = Some(Fold { state: FOLDING.into(), ..Fold::default() })).unwrap();
         assert_eq!(may_tidy_at(&root, &ws, &none).err().as_deref(), Some(ERR_TIDY_FOLDING));
         update_at(&root, &ws, &c.id, |c| c.fold = Some(Fold { state: FOLDED.into(), ..Fold::default() })).unwrap();
-        let t = prepare_kind_at(&root, &ws, Kind::Tidy, |_| String::new()).unwrap();
+        let t = prepare_kind_at(&root, &ws, Kind::Tidy, None, |_| String::new()).unwrap();
         assert_eq!(may_tidy_at(&root, &ws, &none), Ok(()), "an ended tidy chat is no bar");
         let s = session_name(&t.id);
         assert_eq!(may_tidy_at(&root, &ws, &|x: &str| x == s).err().as_deref(), Some(ERR_TIDY_RUNNING));

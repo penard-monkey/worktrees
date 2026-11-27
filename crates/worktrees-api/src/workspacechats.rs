@@ -78,6 +78,29 @@ pub struct Listed {
 
 /// `workspace_chats`' answer.
 #[derive(Serialize)]
+pub struct HarnessPick {
+    pub id: &'static str,
+    pub label: &'static str,
+    /// Why not, in words; none for one a chat can start with.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+}
+
+/// Every harness, in the registry's order, with why a workspace chat cannot
+/// be started on it now: first whether it can be one at all
+/// (`chats::harness_refusal`), then whether it is installed here.
+pub fn harness_picks() -> Vec<HarnessPick> {
+    worktrees_core::harness::ALL
+        .iter()
+        .map(|a| {
+            let p = a.provider();
+            let why = chats::harness_refusal(p.id).map(str::to_string).or_else(|| a.installed().err());
+            HarnessPick { id: p.id, label: p.label, why }
+        })
+        .collect()
+}
+
+#[derive(Serialize)]
 pub struct Chats {
     pub id: String,
     pub name: String,
@@ -93,6 +116,9 @@ pub struct Chats {
     pub documents: Vec<DocRead>,
     /// What the rules stop and what they do not, to show beside these lists.
     pub limits: &'static str,
+    /// Each harness a chat could be started with, and why it cannot be: the
+    /// picker shows every one, and the refused ones disabled with this.
+    pub harnesses: Vec<HarnessPick>,
 }
 
 fn state_of(live: bool, a: &activity::Activity) -> &'static str {
@@ -152,6 +178,7 @@ pub fn workspace_chats(ctx: &Ctx, id: String) -> Result<Chats, String> {
         projects: if reg.is_ok() { chats::project_reads(&w, src.reg) } else { chats::project_reads_unknown(&w) },
         documents: chats::doc_reads(&w, &src),
         limits: chats::LIMITS,
+        harnesses: harness_picks(),
         folder: wsfolder::folder_at(root, &id)?.to_string_lossy().into_owned(),
         name: w.name,
         id,
@@ -187,7 +214,12 @@ pub(crate) fn context(ctx: &Ctx, w: &Workspace, reg: &registry::Registry, conv: 
 /// the record (with the session id), then the launch. A refused launch (the
 /// live-agent limit, a spent window, a Claude below the floor) leaves nothing
 /// of the chat; the memory it made stays (a memory is never deleted here).
-pub fn workspace_chat_start(ctx: &Ctx, id: String) -> Result<Value, String> {
+///
+/// `harness` and `model`: what the picker chose. A harness that cannot be a
+/// workspace chat is refused in `chats::harness_refusal`'s words, before
+/// anything is made; none is Claude, and no model is Claude's own default.
+pub fn workspace_chat_start(ctx: &Ctx, id: String, harness: Option<String>, model: Option<String>) -> Result<Value, String> {
+    let model = chats::pick(harness.as_deref(), model.as_deref())?;
     let lock = life_lock(ctx, &id);
     let _life = lock.lock().unwrap_or_else(|e| e.into_inner());
     let w = workspace(ctx, &id)?;
@@ -195,7 +227,7 @@ pub fn workspace_chat_start(ctx: &Ctx, id: String) -> Result<Value, String> {
     let reg = chats::policy(&w)?;
     crate::workspacefolds::ensure(ctx);
     crate::memory::before_launch(ctx, &w)?;
-    let (c, session) = chats::start_at(ctx.workspaces_dir(), ctx.ideas_dir(), &w, |conv| chats::context_text(&context(ctx, &w, &reg, conv)))?;
+    let (c, session) = chats::start_kind_at(ctx.workspaces_dir(), ctx.ideas_dir(), &w, chats::Kind::Chat, model.as_deref(), |conv| chats::context_text(&context(ctx, &w, &reg, conv)))?;
     Ok(json!({ "id": id, "chat": c, "session": session }))
 }
 
@@ -215,7 +247,7 @@ pub fn workspace_chat_tidy(ctx: &Ctx, id: String) -> Result<Value, String> {
     crate::workspacefolds::ensure(ctx);
     tidy_may(ctx, &id, &|s| tmux::session_exists(s))?;
     crate::memory::before_launch(ctx, &w)?;
-    let (c, session) = chats::start_kind_at(ctx.workspaces_dir(), ctx.ideas_dir(), &w, chats::Kind::Tidy, |conv| chats::context_text(&context(ctx, &w, &reg, conv)))?;
+    let (c, session) = chats::start_kind_at(ctx.workspaces_dir(), ctx.ideas_dir(), &w, chats::Kind::Tidy, None, |conv| chats::context_text(&context(ctx, &w, &reg, conv)))?;
     Ok(json!({ "id": id, "chat": c, "session": session }))
 }
 
@@ -428,6 +460,18 @@ mod tests {
     /// (`workspacefolds::land`). In between, and while that end is tried
     /// again, the row reads ended, as its receipt says: never `done` and
     /// `running` at once (the macOS CI flake of 2026-11-27).
+    /// The picker's list: every harness, Claude startable, the others each
+    /// with the start's own refusal.
+    #[test]
+    fn the_picker_lists_every_harness_and_why_not() {
+        let p = harness_picks();
+        assert_eq!(p.iter().map(|h| h.id).collect::<Vec<_>>(), ["claude", "codex", "pi", "kimi"]);
+        assert!(p[0].why.is_none(), "Claude's start is not refused: {:?}", p[0].why);
+        for h in &p[1..] {
+            assert_eq!(h.why.as_deref(), chats::harness_refusal(h.id), "{}", h.id);
+        }
+    }
+
     #[test]
     fn a_landed_fold_whose_session_is_still_up_reads_ended() {
         let mut c: Chat = serde_json::from_value(serde_json::json!({ "id": worktrees_core::ulid::new(), "harness": "claude", "session_id": "s", "title": "t", "started": "" })).unwrap();
