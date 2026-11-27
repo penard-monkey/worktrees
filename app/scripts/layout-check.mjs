@@ -398,7 +398,16 @@ if (S.SETTINGS_REV < 4) fail(`SETTINGS_REV is ${S.SETTINGS_REV} — the dock_sid
     const a = app.indexOf('<div className="dock-lower"');
     return a < 0 ? "" : app.slice(a, app.indexOf("</div>", a));
   })();
-  const terms = [...app.matchAll(/<TerminalTabs /g)].length;
+  // A workspace's dock (wsdock.ts) is a third render, in an aside of its own
+  // that shows only where no place does: never beside the other two.
+  const wsAside = (() => {
+    const a = app.indexOf('<aside className="dock" data-testid="ws-dock"');
+    return a < 0 ? "" : app.slice(a, app.indexOf("</aside>", a));
+  })();
+  const wsTerms = [...wsAside.matchAll(/<TerminalTabs /g)].length;
+  if (wsAside && (wsTerms !== 1 || !/\{dockShown && wsDock && \(\s*$/.test(app.slice(0, app.indexOf(wsAside)))))
+    fail("the workspace's dock must render exactly one TerminalTabs, gated on `dockShown && wsDock`");
+  const terms = [...app.matchAll(/<TerminalTabs /g)].length - wsTerms;
   if (!body || !lower) fail("App.tsx: the dock body or the `.dock-lower` slot is gone — renamed?");
   else {
     if (terms !== 2 || !body.includes("<TerminalTabs ") || !lower.includes("<TerminalTabs ")) fail(`TerminalTabs renders ${terms} times — want one in the tab chain, one in the lower slot`);

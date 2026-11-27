@@ -78,7 +78,7 @@ if (strip) {
 const rails = [...app.matchAll(/<DockRailGroup [^>]*why=\{dockWhy\}/g)].length;
 eq("both rail hosts ask the rule for each button", rails, 2);
 check(/const dockWhy = \(key: Settings\["dock_tab"\]\) => dockWhyFor\(key, /.test(app), "dockWhy is dockWhyFor's");
-check(/const shownTab = dockTabAt\(/.test(app), "shownTab is dockTabAt's");
+check(/const eff = wsDock \? \{ \.\.\.panelsFor\(settings, wsDockKey\(wsDock\)\), dock_tab: dockTabAt\(/.test(app), "a workspace's effective tab is dockTabAt's");
 check(/dropPanels\(\(k\) => k === wsDockKey\(id\)\)/.test(app), "removing a workspace drops its dock records");
 
 if (failed) {

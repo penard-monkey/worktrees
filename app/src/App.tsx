@@ -5864,7 +5864,7 @@ function App() {
   // `eff` is what the UI must READ everywhere the dock is concerned — reading
   // `settings.dock_*` directly is the bug this indirection exists to prevent.
   // A workspace's record is `~|<id>`, and its tab is always the Terminal.
-  const eff = wsDock ? { ...panelsFor(settings, wsDockKey(wsDock)), dock_tab: "terminal" as const } : panelsFor(settings, selKey);
+  const eff = wsDock ? { ...panelsFor(settings, wsDockKey(wsDock)), dock_tab: dockTabAt({ place: false, workspace: true }, settings.dock_tab) } : panelsFor(settings, selKey);
   // A place left on the Pull requests tab, reopened where there is no such tab
   // (a project not on GitHub, or the feature switched off): fall back to Files,
   // once, rather than a tab whose icon does not exist. Waits for THIS project's
@@ -6256,6 +6256,8 @@ function App() {
   const placeWs = sel ? placeWorkspace(placeWsAll, placeWsFrom[placeKey(sel.repo, sel.slug)]) : null;
   // Files, for the workspace's tab in a place that has none. Nothing is written:
   // the tab is there again in one that has.
+  // (A workspace's effective tab is already its Terminal, and it has no lower
+  // slot: `lowerOn` needs a place's session. So nothing below knows of it.)
   const dockTabHere = eff.dock_tab === "workspace" && placeWsAll.length === 0 ? "files" : eff.dock_tab;
   // ── the dock's lower slot (Settings → Navigation → Terminal) ──
   // `lowerSet` is the preference; `lowerOn` is whether it is ON SCREEN — the
@@ -6284,7 +6286,7 @@ function App() {
   const lowerOn = lowerSet && dockShown && !!selected?.tmux_session.up && lowerFits(spaceH);
   const dockLower: Settings["dock_lower"] = lowerOn ? "terminal" : null;
   // What the UPPER half shows: never the section in the lower slot.
-  const shownTab = dockTabAt(dockWhere, upperTab(dockTabHere, dockLower));
+  const shownTab = upperTab(dockTabHere, dockLower);
   // ⌘J / the rail says "hide files" — leaving a full-pane reader behind would
   // make that a lie. Same for flipping the dock to the Terminal tab. Keyed on
   // `shownTab` (what is ON SCREEN), like every other reader of the tab.
