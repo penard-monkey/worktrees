@@ -438,6 +438,10 @@ impl Project {
         let index = crate::lineage::Index::new(places.iter().map(|p| (p.slug.as_str(), p.created_epoch)), &store.places);
         let probes = std::cell::OnceCell::new();
         let live = |slug: &str| -> bool {
+            if crate::workspacechats::Address::claims(slug) {
+                let probes = probes.get_or_init(|| crate::agent::live_probes_in(panes));
+                return crate::workspacechats::takes_reports(&self.main_root, slug, probes);
+            }
             let Some(path) = paths.get(slug) else { return false };
             let probes = probes.get_or_init(|| crate::agent::live_probes_in(panes));
             self.agent_running(slug, path, probes, panes)

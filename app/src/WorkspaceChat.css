@@ -25,6 +25,8 @@
 .wsc-row.closed .wsc-title { color: var(--txt); }
 .wsc-age { flex: none; margin-left: auto; color: var(--txt-dim); font-size: var(--fs-meta); }
 .wsc-age.strong { color: var(--txt-hi); }
+/* Lanes' messages it has not read: the hue is the tint, the digit the text colour. */
+.wsc-unread { flex: none; margin-left: var(--s1); padding: 0 5px; border-radius: 8px; font-size: var(--fs-meta); line-height: 1.5; color: var(--txt-hi); background: color-mix(in srgb, var(--accent) 22%, transparent); }
 .wsc-all { display: block; border: 0; background: transparent; padding: 2px var(--s3) 2px calc(var(--s3) + 8px + var(--s2)); color: var(--txt); font-size: var(--fs-meta); }
 .wsc-all:hover { color: var(--txt-hi); }
 .nav-view-seg .wsc-dot { margin-left: 6px; width: 6px; height: 6px; border-width: 0; vertical-align: 1px; }

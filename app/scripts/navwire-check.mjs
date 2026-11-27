@@ -40,7 +40,7 @@ const a = at("const frontHere =");
 const b = at("const navKey =", a);
 if (a < 0 || b < 0) { console.log("not ok — App.tsx: `const frontHere =` … `const navKey =` markers are gone"); process.exit(1); }
 const LOC = lines.slice(a, b).join("\n");
-const ENV1 = ["sel", "selected", "eff", "dockShown", "dockFile", "dockAt", "termFront", "settings", "placeKey", "navSeenFront", "shownTab", "lowerOn", "wsShown", "wsTabNow", "tabDoc", "wsChat"];
+const ENV1 = ["sel", "selected", "eff", "dockShown", "dockFile", "dockAt", "termFront", "settings", "placeKey", "navSeenFront", "shownTab", "lowerOn", "wsShown", "wsTabNow", "tabDoc", "wsChat", "diskOpen", "diskPath"];
 const { build: buildLoc } = await load(`
 export function build(env: any) {
   const { ${ENV1.join(", ")} } = env;
@@ -54,6 +54,7 @@ const navLoc = (o) => buildLoc({
   sel: P1, selected: {}, dockFile: null, dockAt: null, settings: {}, placeKey, termFront: null,
   navSeenFront: { current: {} },
   wsShown: null, wsTabNow: "overview", tabDoc: () => null, wsChat: {},
+  diskOpen: null, diskPath: null,
   ...o,
   eff: { dock_open: o.open, dock_tab: o.tab },
   dockShown: o.open,
@@ -102,6 +103,17 @@ eq("Terminal below while its strip restores: not known yet, so not recorded",
   navLoc({ open: true, tab: "docs", lowerOn: true, termFront: front(undefined) }), null);
 eq("a stored \"terminal\" tab with the Terminal below records what is ON SCREEN above it (Files)",
   navLoc({ open: true, tab: "terminal", shown: "files", lowerOn: true, termFront: front(1) })?.dock, { tab: "files", shell: 1 });
+
+// Disk is drawn over the panes and is part of the location: over a place (its
+// dock still part of it, so closing Disk is the same place again), and over Home.
+{
+  const scope = { kind: "place", repo: "/r", slug: "p9" };
+  const over = navLoc({ open: true, tab: "files", diskOpen: scope, diskPath: "target/debug" });
+  eq("Disk over a place keeps the place behind it", over?.place, P1);
+  eq("…and is in the location, with what its treemap has picked", over?.disk, { scope, path: "target/debug" });
+  eq("…closed, the same place without it", navLoc({ open: true, tab: "files" })?.disk, undefined);
+  eq("Disk over Home is a location of its own", navLoc({ open: true, tab: "files", sel: null, diskOpen: { kind: "all" } }), { place: null, disk: { scope: { kind: "all" } } });
+}
 
 // ── 2. the parked apply's async file landing ────────────────────────────────
 const e0 = at("const loc = navPending;");

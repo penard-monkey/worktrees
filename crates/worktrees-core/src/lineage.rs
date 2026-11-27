@@ -221,7 +221,7 @@ impl<'a> Index<'a> {
     }
 
     /// `slug`'s whole lineage. `live` is asked only for places on its report
-    /// chain.
+    /// chain, and for the bus address of a workspace chat that started it.
     pub fn lineage(&self, slug: &str, live: &dyn Fn(&str) -> bool) -> Lineage {
         let d = self.decl(slug);
         let starter = d.and_then(|d| d.started_by.as_ref()).filter(|l| l.project.is_some() || l.chat.is_some() || l.place != slug).map(|l| Starter {
@@ -241,7 +241,12 @@ impl<'a> Index<'a> {
             handed_to: holding(d.and_then(|d| d.handed_to.as_ref()), Self::raw_up),
             parent: self.parent(slug),
             up: self.up(slug),
-            reports_to: (slug != MAIN).then(|| self.route(slug, live).to),
+            // A chat that started this place takes its reports while `live`
+            // says it does (the MCP `report`'s own rule), so the two agree.
+            reports_to: (slug != MAIN).then(|| match d.and_then(|d| d.started_by.as_ref()).and_then(|l| l.chat.as_deref()) {
+                Some(chat) if live(chat) => chat.to_string(),
+                _ => self.route(slug, live).to,
+            }),
             started: others()
                 .filter(|s| {
                     self.decl(s)
@@ -690,5 +695,17 @@ mod tests {
         cut_foreign_starter(&mut row);
         assert_eq!(row["lineage"]["starter"], serde_json::json!({ "at": 5, "elsewhere": true }));
         assert_eq!(row["declared"]["started_by"], serde_json::json!({ "at": 5, "elsewhere": true }));
+    }
+
+    /// A place a workspace chat started reports to it while it takes reports,
+    /// so `reports_to` names where a report with no `to` goes now.
+    #[test]
+    fn a_chat_starter_takes_reports_while_it_is_live() {
+        let chat = "workspace:01JC90A1000000000000000000/01JC90A1000000000000000001";
+        let mut decl = BTreeMap::new();
+        decl.insert("kid".to_string(), Declared { started_by: Some(Link { chat: Some(chat.into()), ..Link::to("01JC90A1000000000000000001", 5) }), ..Default::default() });
+        let i = Index::new([("kid", Some(1))], &decl);
+        assert_eq!(i.lineage("kid", &|s| s == chat).reports_to.as_deref(), Some(chat));
+        assert_eq!(i.lineage("kid", &|_| false).reports_to.as_deref(), Some(MAIN), "not live: (main), as the report goes");
     }
 }

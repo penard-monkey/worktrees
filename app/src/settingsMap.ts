@@ -156,6 +156,8 @@ export const PLACE_MEMORY_KEYS = [
   "ws_collapsed",
   // each workspace's last New chat pick (WorkspaceChat.tsx `NewChatMore`)
   "ws_chat_pick",
+  // which rows have their lanes folded (lane-children §5.1)
+  "lane_folded",
 ] as const;
 /** Markers the controls write, never a control of their own. */
 export const MARKER_KEYS = ["settings_rev", "last_seen_version", "update_dismissed", "chat_default_v1", "init_dismissed", "offers_dismissed"] as const;
