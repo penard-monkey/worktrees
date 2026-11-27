@@ -351,7 +351,7 @@ export function WorkspaceChatColumn(props: {
         {model && <span className="agent-model wsc-model" data-testid="ws-chat-model" title={modelOf(c, live.sessions, row.live) ? "the model this chat last replied with" : "the model this chat was started on"}>{who} {model}</span>}
         <button className="wsc-readsb" data-testid="ws-chat-readsb" data-track="workspace.chat.reads" title="Which projects this chat reads" aria-expanded={menu?.kind === "reads"} onClick={at("reads")}>{readsWords(info.projects)} ▾</button>
         {c.access === "stale" && <button className="wsc-stale-b" data-testid="ws-chat-stale-chip" title="What it may read has changed since it started" onClick={at("reads")}>its rules changed</button>}
-        {props.mcp && <button className="wsc-stale-b" data-testid="ws-chat-no-mcp" title={props.mcp.words} onClick={props.mcp.setUp}>no worktrees tools · Set up</button>}
+        {props.mcp && <button className="wsc-stale-b wsc-nomcp" data-testid="ws-chat-no-mcp" title={props.mcp.words} aria-label={`${props.mcp.words} Set up.`} onClick={props.mcp.setUp}>no tools · Set up</button>}
         <span className="wsc-acts">
           {row.live && (
             <span className="agent-view" role="group" aria-label="View">

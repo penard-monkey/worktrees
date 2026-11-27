@@ -173,12 +173,84 @@ pub struct Node {
     pub c: Cat,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub dir: bool,
-    /// Identity at scan time, `"<dev>:<ino>"`, checked by a delete. A string:
-    /// an inode number can pass 2^53, where a JSON number stops being exact.
+    /// Identity at scan time ([`Ident`]), checked by a delete. A string: an
+    /// inode number can pass 2^53, where a JSON number stops being exact.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub k: Vec<Node>,
+}
+
+// ── identity ──────────────────────────────────────────────────────────────
+
+/// When the object was made, as far as the filesystem says: its birth time
+/// where there is one (APFS, HFS+; on Linux whatever `statx` returns in
+/// `STATX_BTIME`, which ext4, xfs and btrfs fill), else its inode change time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Born {
+    /// Nanoseconds since the epoch.
+    Birth(i128),
+    /// The ctime, in nanoseconds: it also moves when the object's own inode
+    /// changes (a directory's when an entry is added or removed directly in
+    /// it), so without a birth time a delete may be refused as "changed"
+    /// after a build wrote there. Refusing is the safe side.
+    Change(i128),
+}
+
+/// Which object a scan saw at a path. `(dev, ino)` alone is not enough: Linux
+/// (ext4, overlayfs) hands a freed inode number straight back, so a folder
+/// removed and made again under the same name can have the identity of the
+/// one scanned (CI's ubuntu job, PR #717). APFS does not reuse one that fast.
+/// The time it was made tells them apart.
+///
+/// What can still slip through: an object removed and made again within the
+/// filesystem's timestamp resolution (ns on APFS and ext4) AND given the same
+/// inode number; and on a filesystem without a birth time, a ctime that
+/// happens to match.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ident {
+    pub dev: u64,
+    pub ino: u64,
+    pub born: Born,
+}
+
+impl Ident {
+    /// From an `lstat`: std reads the birth time with `statx` on Linux and
+    /// `st_birthtime` on macOS, from the same call, so this costs nothing.
+    pub fn of(md: &fs::Metadata) -> Ident {
+        let born = match md.created().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()) {
+            Some(d) => Born::Birth(d.as_nanos() as i128),
+            None => Born::Change(md.ctime() as i128 * 1_000_000_000 + md.ctime_nsec() as i128),
+        };
+        Ident { dev: md.dev(), ino: md.ino(), born }
+    }
+
+    /// `"<dev>:<ino>:b<ns>"` or `"<dev>:<ino>:c<ns>"`.
+    pub fn to_id(&self) -> String {
+        match self.born {
+            Born::Birth(n) => format!("{}:{}:b{n}", self.dev, self.ino),
+            Born::Change(n) => format!("{}:{}:c{n}", self.dev, self.ino),
+        }
+    }
+}
+
+/// A [`Node::id`] back into an [`Ident`]. The old two-part form
+/// (`"<dev>:<ino>"`, before the time was recorded) answers `None`: it cannot
+/// tell a replaced folder from the scanned one, so a delete naming it is
+/// refused and asks for a rescan.
+pub fn parse_id(s: &str) -> Option<Ident> {
+    let mut it = s.splitn(3, ':');
+    let dev = it.next()?.parse().ok()?;
+    let ino = it.next()?.parse().ok()?;
+    let t = it.next()?;
+    let born = if let Some(n) = t.strip_prefix('b') {
+        Born::Birth(n.parse().ok()?)
+    } else if let Some(n) = t.strip_prefix('c') {
+        Born::Change(n.parse().ok()?)
+    } else {
+        return None;
+    };
+    Some(Ident { dev, ino, born })
 }
 
 // ── the walk ──────────────────────────────────────────────────────────────
@@ -188,14 +260,14 @@ struct Dir {
     parent: usize,
     cat: Cat,
     dev: u64,
-    ino: u64,
+    ident: Ident,
     kids: Vec<usize>,
     /// Bytes of files directly in it: own by category, shared.
     own: [u64; 4],
     shared: u64,
     files: u64,
     /// Files at least `BIG_FILE` large, kept as leaves.
-    big: Vec<(String, u64, bool, u64, u64)>,
+    big: Vec<(String, u64, bool, Ident)>,
 }
 
 const BIG_FILE: u64 = 4 << 20;
@@ -206,6 +278,7 @@ struct Multi {
     name: String,
     ino: u64,
     dev: u64,
+    ident: Ident,
     nlink: u64,
     clone: u64,
     refs: u32,
@@ -275,7 +348,7 @@ fn walk(root: &Path, is_main: bool) -> Walk {
         parent: usize::MAX,
         cat: Cat::Source,
         dev: md.dev(),
-        ino: md.ino(),
+        ident: Ident::of(&md),
         kids: Vec::new(),
         own: [0; 4],
         shared: 0,
@@ -317,7 +390,7 @@ fn walk(root: &Path, is_main: bool) -> Walk {
                     parent: di,
                     cat,
                     dev: md.dev(),
-                    ino: md.ino(),
+                    ident: Ident::of(&md),
                     kids: Vec::new(),
                     own: [0; 4],
                     shared: 0,
@@ -337,14 +410,14 @@ fn walk(root: &Path, is_main: bool) -> Walk {
             w.dirs[di].files += 1;
             let (clone, refs) = if ft.is_file() && alloc > 0 { clone_info(&p).unwrap_or((0, 0)) } else { (0, 0) };
             if md.nlink() > 1 || refs > 1 {
-                multis.push(Multi { dir: di, name, ino: md.ino(), dev: md.dev(), nlink: md.nlink(), clone, refs, alloc });
+                multis.push(Multi { dir: di, name, ino: md.ino(), dev: md.dev(), ident: Ident::of(&md), nlink: md.nlink(), clone, refs, alloc });
             } else {
                 w.alloc += alloc;
                 w.singles += alloc;
                 let c = w.dirs[di].cat.idx();
                 w.dirs[di].own[c] += alloc;
                 if alloc >= BIG_FILE {
-                    w.dirs[di].big.push((name, alloc, false, md.dev(), md.ino()));
+                    w.dirs[di].big.push((name, alloc, false, Ident::of(&md)));
                 }
             }
         }
@@ -381,7 +454,7 @@ fn walk(root: &Path, is_main: bool) -> Walk {
             d.own[d.cat.idx()] += m.alloc;
         }
         if m.alloc >= BIG_FILE {
-            d.big.push((m.name, m.alloc, shared, m.dev, m.ino));
+            d.big.push((m.name, m.alloc, shared, m.ident));
         }
     }
     w
@@ -422,7 +495,7 @@ fn summarize(slug: &str, path: &str, is_main: bool, w: &Walk) -> PlaceUsage {
             let (o, s, f) = t[i];
             let own: u64 = o.iter().sum();
             if own + s > 0 {
-                cleanable.push(Cleanable { path: rel_path(w, i), cat: d.cat, own, shared: s, files: f, id: format!("{}:{}", d.dev, d.ino) });
+                cleanable.push(Cleanable { path: rel_path(w, i), cat: d.cat, own, shared: s, files: f, id: d.ident.to_id() });
             }
         }
     }
@@ -476,7 +549,7 @@ fn tree(w: &Walk, cut_frac: f64, max_nodes: usize) -> Node {
         }
         let mut big_bytes_own = 0u64;
         let mut big_bytes_shared = 0u64;
-        for (name, alloc, shared, dev, ino) in &d.big {
+        for (name, alloc, shared, ident) in &d.big {
             if *alloc >= cut && *budget > 0 {
                 *budget -= 1;
                 let p = if path.is_empty() { name.clone() } else { format!("{path}/{name}") };
@@ -486,7 +559,7 @@ fn tree(w: &Walk, cut_frac: f64, max_nodes: usize) -> Node {
                 } else {
                     big_bytes_own += alloc;
                 }
-                kids.push(Node { n: name.clone(), p: Some(p), own, shared: sh, files: 1, c: d.cat, dir: false, id: Some(format!("{dev}:{ino}")), k: Vec::new() });
+                kids.push(Node { n: name.clone(), p: Some(p), own, shared: sh, files: 1, c: d.cat, dir: false, id: Some(ident.to_id()), k: Vec::new() });
             }
         }
         // This folder's own loose files.
@@ -516,7 +589,7 @@ fn tree(w: &Walk, cut_frac: f64, max_nodes: usize) -> Node {
             files: t[i].2,
             c: d.cat,
             dir: true,
-            id: Some(format!("{}:{}", d.dev, d.ino)),
+            id: Some(d.ident.to_id()),
             k: kids,
         }
     }
@@ -668,12 +741,6 @@ pub struct Deleted {
     pub dir: bool,
 }
 
-/// A [`Node::id`] back into `(dev, ino)`.
-pub fn parse_id(s: &str) -> Option<(u64, u64)> {
-    let (d, i) = s.split_once(':')?;
-    Some((d.parse().ok()?, i.parse().ok()?))
-}
-
 fn lexically_ok(rel: &str) -> bool {
     !rel.is_empty()
         && !rel.starts_with('/')
@@ -687,7 +754,7 @@ fn lexically_ok(rel: &str) -> bool {
 /// `.worktrees/`; no symlink on the way (every component lstat'd, the last
 /// too); the scan's identity when given; nothing git tracks inside; git
 /// ignores it.
-pub fn delete_refusal(root: &Path, is_main: bool, rel: &str, expect: Option<(u64, u64)>) -> Option<String> {
+pub fn delete_refusal(root: &Path, is_main: bool, rel: &str, expect: Option<Ident>) -> Option<String> {
     if !lexically_ok(rel) {
         return Some(format!("not a path inside the place: {rel:?}"));
     }
@@ -708,8 +775,8 @@ pub fn delete_refusal(root: &Path, is_main: bool, rel: &str, expect: Option<(u64
         }
     }
     let md = fs::symlink_metadata(&cur).ok()?;
-    if let Some((dev, ino)) = expect {
-        if md.dev() != dev || md.ino() != ino {
+    if let Some(want) = expect {
+        if Ident::of(&md) != want {
             return Some(format!("{rel} changed since the scan; rescan"));
         }
     }
@@ -814,14 +881,15 @@ pub fn delete_in_place(
     root: &Path,
     is_main: bool,
     rel: &str,
-    expect: Option<(u64, u64)>,
+    expect: Option<Ident>,
 ) -> Result<Deleted, String> {
     use std::os::fd::AsRawFd;
     if let Some(why) = delete_refusal(root, is_main, rel, expect) {
         return Err(why);
     }
     let checked = fs::symlink_metadata(root.join(rel)).map_err(|e| format!("{rel}: {e}"))?;
-    let (dev, ino) = expect.unwrap_or((checked.dev(), checked.ino()));
+    let want = expect.unwrap_or_else(|| Ident::of(&checked));
+    let (dev, ino) = (want.dev, want.ino);
     let (parent, name) = open_parent(root, rel)?;
     let st = fstatat_nofollow(parent.as_raw_fd(), &name).ok_or_else(|| format!("{rel} is not there any more; rescan"))?;
     let kind = st.st_mode as u32 & libc::S_IFMT as u32;
@@ -842,7 +910,14 @@ pub fn delete_in_place(
         return Err(format!("{rel}: {e}"));
     }
     let moved = fstatat_nofollow(hold_fd.as_raw_fd(), &name);
-    if moved.map(|m| m.st_dev as u64 != dev || m.st_ino as u64 != ino).unwrap_or(true) {
+    // By handle for (dev, ino), then by the folder we just made for the time it
+    // was made: a reused inode number passes the first and not the second. A
+    // ctime cannot be compared here: the rename itself moves it on Linux.
+    let same_time = match want.born {
+        Born::Birth(_) => fs::symlink_metadata(hold.join(rel.rsplit('/').next().unwrap_or(rel))).map(|m| Ident::of(&m) == want).unwrap_or(false),
+        Born::Change(_) => true,
+    };
+    if moved.map(|m| m.st_dev as u64 != dev || m.st_ino as u64 != ino).unwrap_or(true) || !same_time {
         // Not the object checked: put it back and refuse.
         unsafe { libc::renameat(hold_fd.as_raw_fd(), name.as_ptr(), parent.as_raw_fd(), name.as_ptr()) };
         let _ = fs::remove_dir(&hold);
@@ -1065,8 +1140,8 @@ mod tests {
         assert_eq!(tg.p.as_deref(), Some("target"));
         assert_eq!(tg.c, Cat::Build);
         let md = fs::symlink_metadata(d.join("target")).unwrap();
-        assert_eq!(tg.id, Some(format!("{}:{}", md.dev(), md.ino())));
-        assert_eq!(parse_id(tg.id.as_deref().unwrap()), Some((md.dev(), md.ino())));
+        assert_eq!(tg.id, Some(Ident::of(&md).to_id()));
+        assert_eq!(parse_id(tg.id.as_deref().unwrap()), Some(Ident::of(&md)));
         let sum: u64 = t.k.iter().map(|n| n.own + n.shared).sum();
         assert_eq!(sum, t.own + t.shared, "children add up to the place");
         fs::remove_dir_all(&d).unwrap();
@@ -1086,8 +1161,9 @@ mod tests {
         assert!(r("/etc").unwrap().contains("not a path"));
         assert!(r("nope").unwrap().contains("not there"));
         let md = fs::symlink_metadata(d.join("target")).unwrap();
-        assert!(delete_refusal(&d, false, "target", Some((md.dev(), md.ino() + 1))).unwrap().contains("changed since"));
-        let done = delete_in_place("x", &d, false, "target", Some((md.dev(), md.ino()))).unwrap();
+        let id = Ident::of(&md);
+        assert!(delete_refusal(&d, false, "target", Some(Ident { ino: id.ino + 1, ..id })).unwrap().contains("changed since"));
+        let done = delete_in_place("x", &d, false, "target", Some(id)).unwrap();
         assert!(done.dir && done.bytes >= 200_000 && done.files == 1, "{done:?}");
         assert!(!d.join("target").exists());
         assert!(d.join("src/main.rs").exists());
@@ -1096,6 +1172,57 @@ mod tests {
         let f = delete_in_place("x", &d, false, "scratch.log", None).unwrap();
         assert!(!f.dir && !d.join("scratch.log").exists());
         fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// The comparison itself, on every OS: Linux can give a folder made again
+    /// the scanned folder's (dev, ino), and only the time it was made differs.
+    #[test]
+    fn the_same_inode_number_made_at_another_time_is_another_object() {
+        let a = Ident { dev: 1, ino: 2, born: Born::Birth(1_000) };
+        assert_ne!(a, Ident { born: Born::Birth(1_001), ..a });
+        assert_ne!(a, Ident { born: Born::Change(1_000), ..a }, "a birth time and a ctime never match");
+        assert_eq!(parse_id(&a.to_id()), Some(a));
+        let c = Ident { born: Born::Change(-5), ..a };
+        assert_eq!(parse_id(&c.to_id()), Some(c));
+        assert_eq!(parse_id("1:2"), None, "a scan record without the time is not an identity");
+        assert_eq!(parse_id("1:2:x9"), None);
+        // On a real folder: its own (dev, ino), another time, refused.
+        let d = repo("reuse");
+        let id = Ident::of(&fs::symlink_metadata(d.join("target")).unwrap());
+        let other = Ident { born: match id.born { Born::Birth(n) => Born::Birth(n + 1), Born::Change(n) => Born::Change(n + 1) }, ..id };
+        assert!(delete_refusal(&d, false, "target", Some(other)).unwrap().contains("changed since"));
+        assert!(delete_in_place("x", &d, false, "target", Some(other)).is_err());
+        assert!(d.join("target/debug/big").exists(), "nothing was deleted");
+        assert_eq!(delete_refusal(&d, false, "target", Some(id)), None);
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// The Disk view keeps a scan until Rescan, so a delete it sends can name
+    /// a folder that was replaced since, or a place that is gone. Both are
+    /// refused by the scan's identity and by the path, with nothing deleted.
+    #[test]
+    fn a_folder_replaced_after_the_scan_is_refused_and_kept() {
+        let d = repo("swap");
+        let scan = summarize("x", &d.to_string_lossy(), false, &walk(&d, false));
+        let id = scan.cleanable.iter().find(|c| c.path == "target").map(|c| parse_id(&c.id).unwrap()).unwrap();
+        // A build that cleans and rebuilds: same name, a new folder.
+        fs::remove_dir_all(d.join("target")).unwrap();
+        write(&d.join("target/debug/fresh"), 1000);
+        let e = delete_in_place("x", &d, false, "target", Some(id)).unwrap_err();
+        assert!(e.contains("changed since the scan"), "{e}");
+        assert!(d.join("target/debug/fresh").exists(), "the new folder is left alone");
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_place_removed_after_the_scan_is_refused() {
+        let d = repo("gone");
+        let scan = summarize("x", &d.to_string_lossy(), false, &walk(&d, false));
+        let id = scan.cleanable.iter().find(|c| c.path == "target").map(|c| parse_id(&c.id).unwrap()).unwrap();
+        fs::remove_dir_all(&d).unwrap();
+        let e = delete_in_place("x", &d, false, "target", Some(id)).unwrap_err();
+        assert!(e.contains("not there any more"), "{e}");
+        assert!(!d.exists(), "nothing was made where the place was");
     }
 
     #[test]

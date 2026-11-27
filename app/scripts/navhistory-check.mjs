@@ -149,5 +149,52 @@ eq("…a project", H.label(D({ kind: "project", root: "/w/worktrees" })), "Disk 
 eq("…a workspace", H.label(D({ kind: "workspace", id: "w1" }), undefined, () => "Jellyfin"), "Disk · Jellyfin");
 eq("…everything", H.label(D({ kind: "all" })), "Disk · All projects");
 
+// ── the Docs tab's chosen document ──────────────────────────────────────────
+// Docs and Files behave the same: what is chosen in the list is a part of the
+// location, so Back to the list shows the one you chose and Forward opens it.
+const DOC = (doc) => P("a", { tab: "docs", ...(doc ? { doc } : {}) });
+eq("a document chosen on Docs is its own location", H.locKey(DOC("README.md")) === H.locKey(DOC()), false);
+eq("…and two documents are two", H.locKey(DOC("README.md")) === H.locKey(DOC("docs/a.md")), false);
+eq("…in the same where", H.whereKey(DOC("README.md")), H.whereKey(DOC()));
+eq("a document means nothing off the Docs tab", H.locKey(P("a", { tab: "files", doc: "README.md" })), H.locKey(P("a", { tab: "files" })));
+eq("…nor a file on Docs", H.locKey(P("a", { tab: "docs", file: { path: "x" } })), H.locKey(DOC()));
+eq("its label names the document", H.label(DOC("docs/adr/0001.md")), "a · Docs · 0001.md");
+{
+  // Docs → choose README (the entry is amended: the list now shows it chosen,
+  // and the file opens in Files) → Docs again → choose CLAUDE → Back ×3.
+  let h = H.empty();
+  h = H.record(h, DOC(), 10_000);
+  h = H.record(h, DOC("README.md"), 20_000, "amend");
+  h = H.record(h, P("a", { tab: "files", file: { path: "/a/README.md" } }), 20_050);
+  h = H.record(h, DOC("README.md"), 30_000);
+  h = H.record(h, DOC("CLAUDE.md"), 40_000, "amend");
+  h = H.record(h, P("a", { tab: "files", file: { path: "/a/CLAUDE.md" } }), 40_050);
+  eq("the walk is four entries", h.entries.map((e) => H.label(e)), ["a · Docs · README.md", "a · README.md", "a · Docs · CLAUDE.md", "a · CLAUDE.md"]);
+  eq("Back from the file: the list, with it chosen", H.current(H.step(h, -1)), DOC("CLAUDE.md"));
+  eq("…Back again: the document before", H.current(H.step(H.step(h, -1), -1)).dock.file.path, "/a/README.md");
+}
+
+// ── a Memory file's History ─────────────────────────────────────────────────
+const M = (doc, hist) => ({ place: null, ws: { id: "w1", tab: "memory", doc, ...(hist ? { hist } : {}) } });
+eq("History open is its own location", H.locKey(M("a.md", {})) === H.locKey(M("a.md")), false);
+eq("…and one change in it another", H.locKey(M("a.md", { at: "c1" })) === H.locKey(M("a.md", {})), false);
+eq("…and two changes are two", H.locKey(M("a.md", { at: "c1" })) === H.locKey(M("a.md", { at: "c2" })), false);
+eq("…all in the same where", new Set([M("a.md"), M("a.md", {}), M("a.md", { at: "c1" })].map(H.whereKey)).size, 1);
+eq("History means nothing off the Memory tab", H.locKey({ place: null, ws: { id: "w1", tab: "plan", hist: { at: "c1" } } }), H.locKey(V("plan")));
+eq("stray History fields are dropped", H.normalize(M("a.md", { at: "", junk: 1 })), M("a.md", {}));
+eq("labels: History", H.label(M("a.md", {}), undefined, () => "Jellyfin"), "Jellyfin · Memory · History");
+eq("…and a change in it", H.label(M("a.md", { at: "c1" }), undefined, () => "Jellyfin"), "Jellyfin · Memory · A change in History");
+{
+  let h = H.empty();
+  for (const [i, l] of [M("a.md"), M("a.md", {}), M("a.md", { at: "c1" })].entries()) h = H.record(h, l, 10_000 * (i + 1));
+  eq("the file, its History, a change: three entries", h.entries.length, 3);
+  h = H.step(h, -1);
+  eq("Back from a change: the History list", H.current(h), M("a.md", {}));
+  h = H.step(h, -1);
+  eq("…Back again: the file you were reading", H.current(h), M("a.md"));
+  eq("…and Forward the change again", H.current(H.step(H.step(h, 1), 1)), M("a.md", { at: "c1" }));
+  eq("a change that is gone is skipped", H.current(H.step(H.goTo(h, 2), -1, (l) => !l.ws?.hist || !!l.ws.hist.at)), M("a.md"));
+}
+
 if (failed) { console.log(`\n${failed} failed`); process.exit(1); }
 console.log("navhistory-check: all ok");
