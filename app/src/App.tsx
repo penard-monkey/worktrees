@@ -6918,26 +6918,53 @@ function App() {
   // Re-read whenever the registry's roots change: "not registered" is the
   // registry's answer, joined in by the row.
   const wsRegKey = (ws?.projects ?? []).map((pv) => pv.root).join("\n");
-  // Always fetched: a window that does not ask the row (a remote one: its
-  // device answer is the phone's projection, `CONSOLE_SHAPED`) gets null, which takes the switch and every workspace menu
-  // item with it.
+  // A refused read (e.g. serve's transient "busy") is not evidence that
+  // workspaces disappeared. Keep the last good list and retry, including on
+  // first load. Recovery must not depend on already having a list: otherwise
+  // null hides the view switch AND removes the only focus recovery listener.
   useEffect(() => {
+    // A remote window cannot use this console-shaped list.
+    if (remoteHost() !== null) { setWsList(null); return; }
     let alive = true;
-    invoke<WsList>("workspaces_list").then((l) => { if (alive) setWsList(l); }).catch(() => { if (alive) setWsList(null); });
-    return () => { alive = false; };
-  }, [wsRegKey]);
-  // …and when the Ideas window changed one (it says so), or this window comes
-  // to the front: no event carries a change of the list, and an agent or another
-  // window may have made one. A list that did not move is the one that is here.
-  const wsLoaded = wsList !== null;
-  useEffect(() => {
-    if (!wsLoaded) return;
-    const again = () => { invoke<WsList>("workspaces_list").then((l) => setWsList((cur) => (JSON.stringify(cur) === JSON.stringify(l) ? cur : l))).catch(() => {}); };
+    let pending = false;
+    let dirty = false;
+    let retryDelay = 3000;
+    let retry: number | undefined;
+    const pull = () => {
+      if (!alive) return;
+      if (pending) { dirty = true; return; }
+      window.clearTimeout(retry);
+      pending = true;
+      invoke<WsList>("workspaces_list")
+        .then((l) => {
+          if (!alive) return;
+          retryDelay = 3000;
+          setWsList((cur) => JSON.stringify(cur) === JSON.stringify(l) ? cur : l);
+        })
+        .catch(() => {
+          if (!alive) return;
+          retry = window.setTimeout(pull, retryDelay);
+          retryDelay = Math.min(retryDelay * 2, 60000);
+        })
+        .finally(() => {
+          pending = false;
+          // Focus/storage can announce a change after this read started.
+          // Coalesce those signals into one fresh read, even after failure.
+          if (alive && dirty) { dirty = false; retryDelay = 3000; pull(); }
+        });
+    };
+    const again = () => { retryDelay = 3000; pull(); };
     const onStorage = (e: StorageEvent) => { if (e.key === WS_CHANGED_KEY) again(); };
     window.addEventListener("storage", onStorage);
     window.addEventListener("focus", again);
-    return () => { window.removeEventListener("storage", onStorage); window.removeEventListener("focus", again); };
-  }, [wsLoaded]);
+    again();
+    return () => {
+      alive = false;
+      window.clearTimeout(retry);
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("focus", again);
+    };
+  }, [wsRegKey]);
   /** Adding never asks. */
   const wsAddProject = (id: string, root: string) => {
     const w = wsById(id);
