@@ -162,7 +162,7 @@ export const PLACE_MEMORY_KEYS = [
   "lane_folded",
 ] as const;
 /** Markers the controls write, never a control of their own. */
-export const MARKER_KEYS = ["settings_rev", "last_seen_version", "update_dismissed", "chat_default_v1", "init_dismissed", "offers_dismissed"] as const;
+export const MARKER_KEYS = ["settings_rev", "last_seen_version", "update_dismissed", "chat_default_v1", "init_dismissed", "offers_dismissed", "left_off_last_active", "left_off_shown_day"] as const;
 /** An older build's copy of host policy (settings.ts, end of the type). */
 export const MIRROR_KEYS = ["codex_permissions", "pi_project_trust", "fetch_interval_min", "term_persist_scrollback", "term_per_tab_history"] as const;
 /** The sheet's own view: the mode switch in its header. */
@@ -220,7 +220,7 @@ export const SECTIONS: readonly SectionDef[] = [
   // (group chat start design S2, the owner's pick): a person invited into a
   // beta is not an advanced user by being invited. It was Advanced and
   // Expert only from 2026-11-08.
-  { id: "beta", page: "general", tier: "beginner", label: "Beta features", keywords: ["beta", "experimental", "preview", "early access", "feature flag", "ideas", "group chat", "workspace chats", "memory"], keys: ["beta_ideas", "beta_group_chat", "beta_workspace_chats"], localOnly: true },
+  { id: "beta", page: "general", tier: "beginner", label: "Beta features", keywords: ["beta", "experimental", "preview", "early access", "feature flag", "ideas", "group chat", "workspace chats", "memory", "where you left off"], keys: ["beta_ideas", "beta_group_chat", "beta_workspace_chats", "beta_left_off"], localOnly: true },
   // ── Appearance
   { id: "zoom", page: "appearance", tier: "beginner", label: "Overall size", keywords: ["zoom", "scale", "bigger", "smaller", "text size", "magnify"], keys: ["app_zoom"] },
   { id: "ui-font", page: "appearance", tier: "advanced", label: "UI font size", keywords: ["font", "font size", "text size", "interface font", "rem"], keys: ["ui_rem"] },
@@ -230,6 +230,7 @@ export const SECTIONS: readonly SectionDef[] = [
   // ── Layout
   { id: "sidebar", page: "layout", tier: "beginner", label: "Sidebar", keywords: ["nav", "navigation", "places list", "pin sidebar", "hide sidebar", "hover reveal"], keys: ["nav_pinned", "nav_hover_reveal"] },
   { id: "layout", page: "layout", tier: "beginner", label: "Layout", keywords: ["swap sides", "dock side", "places side", "move panels", "left", "right"], keys: ["places_side", "dock_side"] },
+  { id: "show-all", page: "layout", tier: "beginner", label: "Show all", keywords: ["quiet chrome", "sidebar details", "place header"], keys: ["quiet_chrome"] },
   { id: "nav-width", page: "layout", tier: "advanced", label: "Nav width", keywords: ["sidebar width", "places width", "wider sidebar", "nav size"], keys: ["nav_width"] },
   { id: "nav-tiers", page: "layout", tier: "advanced", label: "Nav tiers", keywords: ["hide idle places", "hide dormant places", "nav groups", "sidebar sections"], keys: ["hidden_tiers"] },
   { id: "dock-lower", page: "layout", tier: "advanced", label: "Terminal placement", keywords: ["terminal position", "terminal below", "split terminal", "reference column"], keys: ["dock_lower"] },
