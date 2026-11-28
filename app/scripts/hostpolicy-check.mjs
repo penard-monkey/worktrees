@@ -87,7 +87,7 @@ const DISPATCH = process.argv[4] ?? fileURLToPath(new URL("../../crates/worktree
 // `apply_policy_preset` (settings-reorg §5) rewrites the two agent policies
 // above through their own setters, so it is held to the same rule: only the
 // user's act may call it.
-const SETTERS = ["set_codex_permissions", "set_pi_trust", "set_fetch_interval", "set_term_history_opts", "apply_policy_preset", "set_keep_awake"];
+const SETTERS = ["set_codex_permissions", "set_kimi_permissions", "set_pi_trust", "set_fetch_interval", "set_term_history_opts", "apply_policy_preset", "set_keep_awake"];
 /** Each host key in ui-state.json, the setter that changes it, and a value
  *  that is NOT its default (so DEFAULTS cannot pass rule 6 by accident). */
 const KEYS = [

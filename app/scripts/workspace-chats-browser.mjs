@@ -27,8 +27,11 @@ const call = (page, cmd, args) => page.evaluate(([c, a]) => window.__TAURI_INTER
 const group = (page, name) => page.locator("[data-testid=ws-group]", { has: page.locator("[data-testid=ws-name]", { hasText: name }) }).first();
 const row = (page, title) => group(page, "Everything").locator("[data-testid=ws-chat-row]", { hasText: title });
 const colOf = (page, title) => until(page, (t) => document.querySelector("[data-testid=ws-chat-col] .wsc-name-t")?.textContent === t, title);
-const tab = (page, t) => page.click(`[data-testid=ws-tab][data-tab=${t}]`);
-const isTab = (page, t) => until(page, (t) => document.querySelector("[data-testid=ws-tab].on")?.dataset.tab === t, t, 2000);
+const tab = async (page, t) => {
+  const button = page.locator(`[data-workspace-panel=${t}]`);
+  if (await button.getAttribute("aria-pressed") !== "true") await button.click();
+};
+const isTab = (page, t) => until(page, (t) => document.querySelector("[data-testid=ws-frame]:not([hidden])")?.dataset.panel === t, t, 2000);
 const sends = (page) => page.evaluate(() => window.__mock.chatSends());
 const draft = (page) => page.locator("[data-testid=ws-chat-col] textarea").first();
 
@@ -106,12 +109,13 @@ async function chat(page, tag, name) {
   const ws = await boot(page, ["beta_workspace_chats", "beta_ideas"]);
   await row(page, "Release order").click();
   ok(await colOf(page, "Release order") && await isTab(page, "memory"), `${tag} a chat row opens it in the middle, beside Memory`);
-  const g = await page.evaluate(() => { const m = document.querySelector("[data-testid=ws-mid]").getBoundingClientRect(), d = document.querySelector(".wsf-docs").getBoundingClientRect(), b = document.querySelector(".wsf-body").getBoundingClientRect(); return { left: m.left <= b.left + 1, right: d.left >= m.right - 1, share: d.width / b.width, mid: m.width, docs: d.width }; });
-  ok(g.left && g.right && Math.abs(g.share - 0.46) < 0.01 && g.mid >= 420 && g.docs >= 340, `${tag} chat left, documents on the dock's side, at 46 percent (${JSON.stringify(g)})`);
+  const g = await page.evaluate(() => { const m = document.querySelector("[data-testid=ws-mid]").getBoundingClientRect(), d = document.querySelector(".ws-dock").getBoundingClientRect(), b = document.querySelector(".space-body").getBoundingClientRect(); return { left: m.left <= b.left + 1, right: d.left >= m.right - 1, share: d.width / b.width, mid: m.width, docs: d.width }; });
+  ok(g.left && g.right && g.mid >= 420 && g.docs >= 240, `${tag} chat left, documents on the dock's side, in the shared dock (${JSON.stringify(g)})`);
   ok(await row(page, "Release order").evaluate((e) => e.classList.contains("on")) && !(await page.evaluate(() => document.querySelector(".home-item").classList.contains("on"))), `${tag} its row is marked, Home is not lit`);
   ok(/A chat of Everything\. It reads the memory index first, and it can read \d of 3 projects\. It is told not to write in a project\. The rules are set when the chat starts\. They stop Claude's file tools, not every program it runs\./.test(await page.locator("[data-testid=chat-intro]").innerText()), `${tag} its first line says what it is`);
+  await page.getByTestId("ws-chat-menu").click();
   const reads = await page.locator("[data-testid=ws-chat-readsb]").innerText();
-  ok(/^reads \d of 3/.test(reads), `${tag} the header counts what it reads (${reads})`);
+  ok(/reads \d of 3/.test(reads), `${tag} the title menu counts what it reads (${reads})`);
   await page.click("[data-testid=ws-chat-readsb]");
   ok(/not read: not registered/.test(await page.locator("[data-testid=ws-chat-reads]").innerText()), `${tag} …and names which, and why not`);
   ok(/They stop Claude's file tools, not every program it runs\./.test(await page.locator("[data-testid=ws-chat-limits]").innerText()) && !(await page.$("[data-testid=ws-chat-stale]")) && !(await page.$("[data-testid=ws-chat-stale-chip]")), `${tag} …with what its rules stop, in the engine's words`);
@@ -119,7 +123,7 @@ async function chat(page, tag, name) {
   await page.keyboard.press("Escape");
   const stale = await page.evaluate(() => { const c = document.querySelector("[data-testid=ws-chat-col]").dataset.chat, w = document.querySelector("[data-testid=ws-frame]").dataset.ws; window.__mock.wsStale(w, c, [{ kind: "project", name: "valleos", path: "/w/valleos", change: "private" }, { kind: "document", name: "Plan", path: "/i/p.md", change: "unlinked" }]); return [w, c]; });
   ok(await until(page, () => !!document.querySelector("[data-testid=ws-chat-stale-chip]")) && await page.evaluate(() => { const b = document.querySelector("[data-testid=ws-chat-stale-chip]").getBoundingClientRect(); const h = document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2); return !!h.closest("[data-testid=ws-chat-stale-chip]"); }), `${tag} a chat whose rules changed says so in its header`);
-  await page.click("[data-testid=ws-chat-stale-chip]");
+  await page.getByTestId("ws-chat-menu").click(); await page.getByTestId("ws-chat-readsb").click();
   ok(/valleos is private now\s+“Plan” is not linked any more[\s\S]*Close and start a new chat to apply/.test(await page.locator("[data-testid=ws-chat-stale]").innerText()), `${tag} …and what, and what to do about it`);
   await page.waitForTimeout(300);
   ok(await page.evaluate(() => { const b = document.querySelector("[data-testid=ws-chat-stale]")?.getBoundingClientRect(); return !!b && b.width > 0 && !!document.elementFromPoint(b.x + 20, b.y + 10)?.closest("[data-testid=ws-chat-stale]"); }), `${tag} …and it stays open to be read`);
@@ -128,7 +132,7 @@ async function chat(page, tag, name) {
   ok(!!(await page.$("[data-testid=ws-chat-col] textarea")), `${tag} nothing is ended: it goes on`);
   await page.evaluate(([w, c]) => window.__mock.wsStale(w, c, null), stale);
   ok(await until(page, () => !document.querySelector("[data-testid=ws-chat-stale-chip]")), `${tag} and when they are the same again, it is gone`);
-  await page.click("[data-testid=ws-chat-readsb]");
+  await page.click("[data-testid=ws-chat-menu]"); await page.click("[data-testid=ws-chat-readsb]");
   await page.keyboard.press("Escape");
   ok(await until(page, () => /Which ships first\?/.test(document.querySelector("[data-testid=chat-list]")?.textContent ?? "")), `${tag} its transcript`);
   ok(!(await page.$("[data-testid=ws-chat-col] .chat-attach")) && !/for a command|\/ for/.test(await page.locator("[data-testid=ws-chat-col]").innerText()) && (await draft(page).getAttribute("placeholder")) === "Message this chat", `${tag} no attachments and no slash commands in the composer`);
@@ -137,7 +141,9 @@ async function chat(page, tag, name) {
   await page.locator("[data-testid=ws-chat-menu]").waitFor();
   await page.evaluate(() => window.__mock.wsFold && window.dispatchEvent(new Event("focus")));
   await row(page, "Who can see what").click(); await row(page, "Release order").click();
+  await page.getByTestId("ws-chat-menu").click();
   ok(await page.evaluate(() => { const r = document.querySelector("[data-testid=ws-chat-readsb]"); return r.scrollWidth <= r.clientWidth + 1; }), `${tag} "reads n of m" stays whole beside a long name`);
+  await page.keyboard.press("Escape");
   await call(page, "workspace_chat_rename", { id: ws, conv: await row(page, "Release order").getAttribute("data-chat"), title: "Release order" });
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
 
@@ -188,9 +194,9 @@ async function chat(page, tag, name) {
   ok(await colOf(page, "Order of release") && await until(page, () => [...document.querySelectorAll("[data-testid=ws-chat-row] .wsc-title")].some((e) => e.textContent === "Order of release")), `${tag} Rename renames it, here and in the card`);
 
   // ── Close without folding, ended, Resume ── (Close, the fold: workspace-fold-browser.mjs)
-  ok(await page.locator("[data-testid=ws-chat-close]").evaluate((e) => getComputedStyle(e).backgroundColor !== getComputedStyle(document.querySelector("[data-testid=ws-frame-new-chat]")).backgroundColor), `${tag} its Close is not a filled button`);
-  await page.click("[data-testid=ws-chat-close-menu]");
-  ok(await page.locator(".ctxmenu .pop-item").evaluateAll((b) => b.map((x) => x.textContent).join()) === "Close without folding,Delete", `${tag} its menu: Close without folding, Delete (and the terminal app, when there is one)`);
+  ok(await page.getByTestId("ws-chat-close").count() === 0, `${tag} Close is off the header`);
+  await page.getByTestId("ws-chat-menu").click();
+  ok(await page.getByTestId("ws-chat-close").isVisible() && await page.getByTestId("ws-chat-close-item").isVisible() && await page.getByTestId("ws-chat-delete").isVisible(), `${tag} the title menu has Close, Close without folding and Delete`);
   await page.click("[data-testid=ws-chat-close-item]");
   ok(await until(page, () => /Closed, not folded\. Started /.test(document.querySelector("[data-testid=ws-chat-ended]")?.textContent ?? "")) && !(await page.$("[data-testid=ws-chat-view-terminal]")) && await page.locator("[data-testid=ws-chat-col] textarea").count() === 0, `${tag} closed, it reads, with no composer and no terminal`);
   ok(await until(page, () => !!document.querySelector("[data-testid=chat-list] li")), `${tag} …its transcript still there`);
@@ -200,18 +206,18 @@ async function chat(page, tag, name) {
   await draft(page).fill("Something long");
   await draft(page).press("Enter");
   await until(page, () => document.querySelector("[data-testid=ws-chat-col]")?.dataset.state === "busy");
-  await page.click("[data-testid=ws-chat-close-menu]");
+  await page.click("[data-testid=ws-chat-menu]");
   await page.click("[data-testid=ws-chat-close-item]");
   ok(/It is working\. Close\?/.test(await page.locator("[data-testid=ws-chat-close-item]").innerText().catch(() => "")), `${tag} closing one that is working, with no fold, asks first`);
   await page.keyboard.press("Escape");
   await until(page, () => document.querySelector("[data-testid=ws-chat-col]")?.dataset.state === "running", null, 10000);
   // ── Delete ──
-  await page.click("[data-testid=ws-chat-close-menu]");
+  await page.click("[data-testid=ws-chat-menu]");
   await page.click("[data-testid=ws-chat-delete]");
   ok(/Delete this chat\?/.test(await page.locator("[data-testid=ws-chat-delete]").innerText()) && (await page.evaluate((w) => window.__mock.wsChats(w).length, ws)) === 5, `${tag} Delete asks first`);
   await page.click("[data-testid=ws-chat-delete]");
-  ok(await until(page, (w) => window.__mock.wsChats(w).length === 4, ws) && await until(page, () => !document.querySelector("[data-testid=ws-mid]")), `${tag} the second press deletes it, and the documents take the room`);
-  ok(await page.evaluate(() => Math.abs(document.querySelector(".wsf-docs").getBoundingClientRect().width - document.querySelector(".wsf-body").getBoundingClientRect().width) < 1), `${tag} …all of it`);
+  ok(await until(page, (w) => window.__mock.wsChats(w).length === 4, ws) && await until(page, () => !document.querySelector("[data-testid=ws-mid]")), `${tag} the second press deletes it and leaves the workspace open`);
+  ok(await page.locator(".ws-dock [data-testid=ws-no-plan]").isVisible(), `${tag} the Plan panel stays open after deleting the chat`);
 }
 
 /** A row's right-click menu: the header's acts, by the chat's state (wschats.ts `chatActs`). */
@@ -354,31 +360,18 @@ async function start(page, tag) {
 }
 
 async function narrow(page, tag) {
-  await boot(page, ["beta_workspace_chats", "beta_ideas"]);
+  await boot(page, ["beta_workspace_chats", "beta_ideas"], { nav_width: 220 });
   await row(page, "Release order").click();
   await colOf(page, "Release order");
-  await page.setViewportSize({ width: 1100, height: 800 }); // 1100 − 88 − 300 = 712 of room
-  const vis = () => page.evaluate(() => ["[data-testid=ws-mid]", ".wsf-docs"].map((s) => (document.querySelector(s)?.getBoundingClientRect().width ?? 0) > 0));
-  ok(await until(page, () => !!document.querySelector("[data-testid=ws-side-chat]")) && JSON.stringify(await vis()) === "[true,false]", `${tag} under 760 of room, one side, with Chat | Documents in the bar`);
-  await draft(page).fill("kept");
-  await page.click("[data-testid=ws-side-docs]");
-  ok(JSON.stringify(await vis()) === "[false,true]", `${tag} Documents shows the other`);
-  await row(page, "Who can see what").click();
-  ok(JSON.stringify(await vis()) === "[true,false]", `${tag} a chat row goes to the chat`);
-  await page.click("[data-testid=ws-side-docs]");
+  await page.setViewportSize({ width: 1100, height: 800 });
   await tab(page, "memory");
-  ok(JSON.stringify(await vis()) === "[false,true]" && await isTab(page, "memory"), `${tag} a document's tab is on the documents side`);
-  await row(page, "Release order").click();
-  ok(await draft(page).inputValue() === "kept", `${tag} and the draft was kept`);
-  await page.setViewportSize({ width: 1440, height: 900 });
-  ok(await until(page, () => !document.querySelector("[data-testid=ws-side-chat]")) && JSON.stringify(await vis()) === "[true,true]", `${tag} with room, both`);
-  // The width of the documents.
-  const bar = await page.locator("[data-testid=ws-split]").boundingBox();
-  await page.mouse.move(bar.x, bar.y + 200); await page.mouse.down(); await page.mouse.move(bar.x - 120, bar.y + 200, { steps: 6 }); await page.mouse.up();
-  const w = await page.evaluate(() => document.querySelector(".wsf-docs").getBoundingClientRect().width);
-  await page.mouse.move(bar.x - 120, bar.y + 200); await page.mouse.down(); await page.mouse.move(40, bar.y + 200, { steps: 6 }); await page.mouse.up();
-  const m = await page.evaluate(() => document.querySelector("[data-testid=ws-mid]").getBoundingClientRect().width);
-  ok(Math.abs(w - (1052 * 0.46 + 120)) < 8 && m >= 418, `${tag} the bar between them drags, and stops at the chat's floor (${w.toFixed(0)}, ${m.toFixed(0)})`);
+  const chat = page.getByTestId("ws-mid"), dock = page.getByTestId("ws-dock");
+  ok(await chat.isVisible() && await dock.isVisible() && await page.getByTestId("ws-side-chat").count() === 0, `${tag} chat and dock fit with a 220px sidebar`);
+  await draft(page).fill("kept");
+  await page.getByTestId("ws-dock-close").click();
+  ok(await chat.isVisible() && !await dock.isVisible() && await draft(page).inputValue() === "kept", `${tag} closing the dock leaves the draft and chat`);
+  await page.keyboard.press("Meta+j");
+  ok(await dock.isVisible() && await isTab(page, "memory"), `${tag} the shortcut reopens Memory`);
 }
 
 async function back(page, tag) {

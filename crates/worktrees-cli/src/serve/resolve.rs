@@ -1630,6 +1630,21 @@ mod tests {
         assert!(try_row("set_codex_allowed", &con, &all, json!({ "repo": s(&t.a), "allow": true }), &w).is_ok());
     }
 
+    /// What an agent may do without asking (Codex's and Kimi's permission
+    /// modes) is the host's own choice: a device holding every capability is
+    /// refused, and reading it is an ordinary read.
+    #[test]
+    fn agent_permission_modes_are_set_from_the_console_only() {
+        let t = two("permrows");
+        let (cx, g) = phone(&Capability::ALL, &[&t.a]);
+        let w = t.world();
+        for (cmd, mode) in [("set_codex_permissions", "full"), ("set_kimi_permissions", "never-ask")] {
+            let e = try_row(cmd, &cx, &g, json!({ "mode": mode }), &w).unwrap_err();
+            assert_eq!((e.kind, e.wire()), (RefusalKind::ConsoleOnly, json!(ERR_CONSOLE_ONLY)), "{cmd}");
+        }
+        assert!(try_row("get_kimi_permissions", &cx, &g, json!({}), &w).is_ok(), "a device may read it");
+    }
+
     /// A slot's capacity is how much of THIS machine every lane's gate may
     /// take, so setting it — or removing it — is a console act even for a
     /// device holding everything. Reading it is a `read`/`global` row like

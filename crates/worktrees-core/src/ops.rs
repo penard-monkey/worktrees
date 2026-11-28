@@ -262,6 +262,14 @@ fn ai_launch_inner(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> crat
                 ui.warn(&crate::trust::pi_shadow_warning(wt));
             }
         }
+        // kimi keeps a conversation's mode across a resume and has no flag for
+        // Always Ask, so a resume under it can come back looser: said here.
+        if a.provider().id == crate::provider::KIMI.id {
+            let recorded = crate::kimi::current_session(wt).and_then(|s| crate::kimi::session_mode(&s.wire()));
+            if let Some(note) = crate::kimi::resume_note(crate::kimi::permissions(), recorded) {
+                ui.warn(&format!("if this launch resumes: {note}"));
+            }
+        }
     }
     // Reads the same flag the PROBE side reads, so the two cannot get out of
     // step — `claude_config_dir_for_repo` returns `~/.claude` while this is off.
@@ -3037,6 +3045,10 @@ fn kimi_doctor(p: &Project, ui: &mut dyn Ui, json: bool, with_usage: bool) -> i3
     // Only when asked for by name: it starts kimi's own `kimi web` for one
     // request (`kimi_usage`), which the plain `doctor` should not pay for.
     let usage = (with_usage && bin.is_some()).then(crate::kimi_usage::read);
+    let (perm, perm_origin) = crate::kimi::permissions_origin();
+    // The mode this place's conversation is in, which a resume keeps.
+    let recorded = crate::kimi::current_session(&place).and_then(|s| crate::kimi::session_mode(&s.wire()));
+    let resume_note = crate::kimi::resume_note(perm, recorded);
     let rc = if bin.is_none() { crate::diag::EXIT_FINDINGS } else { 0 };
     if json {
         let (models, default, catalog_error) = match &catalog {
@@ -3048,6 +3060,14 @@ fn kimi_doctor(p: &Project, ui: &mut dyn Ui, json: bool, with_usage: bool) -> i3
                 "kimi": bin.as_ref().map(|b| b.to_string_lossy().into_owned()),
                 "version": version,
                 "trust": launch,
+                "permissions": {
+                    "mode": perm.as_str(),
+                    "label": perm.label(),
+                    "flag": perm.flag(),
+                    "origin": perm_origin,
+                    "session_mode": recorded.map(crate::kimi::Permissions::as_str),
+                    "resume_note": resume_note,
+                },
                 "mcp": mcp,
                 "models": models,
                 "default_model": default,
@@ -3069,6 +3089,17 @@ fn kimi_doctor(p: &Project, ui: &mut dyn Ui, json: bool, with_usage: bool) -> i3
         _ => "kimi asks once per place (worktrees trust kimi to allow this repo)",
     };
     ui.info(&format!("trust {trust}"));
+    let from = match perm_origin.source {
+        crate::config::Source::Host => "this computer's Settings",
+        crate::config::Source::Env => crate::kimi::PERMISSIONS_ENV,
+        crate::config::Source::Config => "kimi_permissions in config.toml",
+        _ => "the default",
+    };
+    let flag = perm.flag().map(|f| format!(" ({f})")).unwrap_or_default();
+    ui.info(&format!("perms {}{flag}, from {from}", perm.label()));
+    if let Some(note) = &resume_note {
+        ui.warn(note);
+    }
     let mcp_line = match mcp.state {
         "mutations" => "mutating — each kimi lane gets <place>/.kimi-code/mcp.json".to_string(),
         "read-only" => "READ-ONLY — kimi lanes cannot create or close places".to_string(),

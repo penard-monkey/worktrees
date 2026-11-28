@@ -789,7 +789,7 @@ pub fn cap_of(cmd: &str) -> Option<Capability> {
 pub const GLOBAL_OK: &[&str] = &[
     // read
     "settings_info", "get_settings", "quota_settings", "slots_settings", "limits_settings", "policy_preset_status", "claude_usage", "codex_usage", "kimi_usage", "claude_status",
-    "check_update", "harness_sessions", "list_releases", "get_ai_config", "get_codex_permissions", "get_fetch_interval", "get_keep_awake",
+    "check_update", "harness_sessions", "list_releases", "get_ai_config", "get_codex_permissions", "get_kimi_permissions", "get_fetch_interval", "get_keep_awake",
     "get_term_history_opts", "agent_guidance_status", "agent_guidance_diff", "agent_models", "agent_user_skills", "pi_hosts",
     "kimi_version", "tmux_check", "log_info", "get_changelog", "new_profile_id", "skills_list", "ui_usage",
     // write
@@ -1027,6 +1027,8 @@ commands! { cx, a;
     // act, read by the engine; the getter is a read like any other.
     set_codex_permissions: HostConsole => project::set_codex_permissions(&cx.ctx, a.get("mode")?),
     get_codex_permissions: Engine [read, global] => project::get_codex_permissions(a.get("detail")?),
+    set_kimi_permissions: HostConsole => project::set_kimi_permissions(&cx.ctx, a.get("mode")?),
+    get_kimi_permissions: Engine [read, global] => project::get_kimi_permissions(),
     agent_guidance_status: Engine [read, global] => project::agent_guidance_status(),
     set_agent_guidance: HostConsole => project::set_agent_guidance(a.get("enabled")?, a.get("guard")?),
     set_agent_guidance_skill: HostConsole => project::set_agent_guidance_skill(a.get("text")?),
@@ -1616,14 +1618,15 @@ mod tests {
     /// two `guest` history rows (`shared_turns`, `shared_tool_call`), the guest's `shared_image` and `shared_call_image`, and the host's sleep
     /// hold (`get_keep_awake`, `set_keep_awake`), disk usage's three (`disk_usage`,
     /// `disk_place_tree`, `disk_delete`), a workspace's memory's nine
-    /// console rows (`workspace_memory*`), and lane children's adoption
-    /// (`set_place_under`); the check scripts
+    /// console rows (`workspace_memory*`), lane children's adoption
+    /// (`set_place_under`), and Kimi's permission mode (`get_kimi_permissions`,
+    /// `set_kimi_permissions`); the check scripts
     /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 325, "the table has 325 commands");
+        assert_eq!(TABLE.len(), 327, "the table has 327 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -2051,7 +2054,7 @@ mod tests {
     /// `shares_all`, `guests_list`, `guest_remove`, `owner_set_name`) and the
     /// four `guest` rows (`GUEST_ROWS`), the capability's first, the thread's
     /// two `guest` rows (`thread_read`, `thread_post`) and PR C's two
-    /// (`shared_turns`, `shared_tool_call`), then `shared_image` and `shared_call_image`; and lane children's `set_place_under` (`write`). A row that moves group
+    /// (`shared_turns`, `shared_tool_call`), then `shared_image` and `shared_call_image`; lane children's `set_place_under` (`write`); and Kimi's permission mode's `get_kimi_permissions` (`read`) and `set_kimi_permissions` (console). A row that moves group
     /// fails here until the count (and the proposal's table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
@@ -2068,7 +2071,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 75), ("write", 25), ("admin", 42), ("console", 139), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 76), ("write", 25), ("admin", 42), ("console", 140), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7), ("guest", 10),
         ]
         .into();

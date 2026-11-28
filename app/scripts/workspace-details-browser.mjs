@@ -25,13 +25,13 @@ async function boot(page, betas = ["beta_workspace_chats"], query = "", more = {
   await page.goto(`${BASE}/?ideas=seed&workspaces=1&folding=0&memtick=100${query}`);
   await page.waitForSelector("[data-testid=ws-group]");
   await page.locator("[data-testid=ws-name]", { hasText: "Everything" }).first().click();
-  await page.waitForSelector("[data-testid=ws-tab][data-tab=memory]");
+  await page.waitForSelector("[data-workspace-panel=memory]");
   return (await call(page, "workspaces_list", {})).workspaces.find((w) => w.name === "Everything").id;
 }
 
 async function picture(page, tag) {
   await boot(page);
-  await page.click("[data-testid=ws-tab][data-tab=memory]");
+  await page.click("[data-workspace-panel=memory]");
   await isDoc(page, "MEMORY.md");
   // Two pictures; the second one's bytes are held.
   await page.evaluate(([a, b]) => {
@@ -77,39 +77,24 @@ async function picture(page, tag) {
 async function split(page, tag) {
   await boot(page);
   await page.locator("[data-testid=ws-chat-row]").first().click();
-  await page.waitForSelector("[data-testid=ws-split]");
-  const bar = page.locator("[data-testid=ws-split]");
-  const at = () => page.evaluate(() => { const b = document.querySelector("[data-testid=ws-split]"), d = document.querySelector(".wsf-docs").getBoundingClientRect().width, w = document.querySelector(".wsf-body").getBoundingClientRect().width; return { now: Number(b.getAttribute("aria-valuenow")), min: Number(b.getAttribute("aria-valuemin")), max: Number(b.getAttribute("aria-valuemax")), real: Math.round((d / w) * 100), docs: d, mid: document.querySelector("[data-testid=ws-mid]").getBoundingClientRect().width, stored: Number(localStorage.getItem("wt.workspace.split")) }; });
-  for (const [key, n] of [["ArrowRight", 30], ["ArrowLeft", 45]]) {
-    await bar.focus();
-    for (let i = 0; i < n; i++) await page.keyboard.press(key);
-    await page.waitForTimeout(80);
-    const a = await at();
-    ok(Math.abs(a.now - a.real) <= 1, `${tag} ${key}: it says what is on screen (${a.now}, ${a.real})`);
-    ok(a.docs >= 339 && a.mid >= 419, `${tag} ${key}: and both keep their floor (${a.docs.toFixed(0)}, ${a.mid.toFixed(0)})`);
-    ok(Math.abs(a.stored * 100 - a.real) <= 1 && a.now >= a.min && a.now <= a.max, `${tag} ${key}: what is kept is that too (${a.stored}, ${a.min} to ${a.max})`);
-    // One press the other way moves it at once: it did not run on past the edge.
-    await page.keyboard.press(key === "ArrowRight" ? "ArrowLeft" : "ArrowRight");
-    await page.waitForTimeout(60);
-    ok(Math.abs((await at()).real - a.real) >= 1, `${tag} ${key}: one press back moves it`);
-  }
-  const b = await bar.boundingBox();
-  await page.mouse.move(b.x + 1, b.y + 200); await page.mouse.down(); await page.mouse.move(b.x + 900, b.y + 200, { steps: 5 }); await page.mouse.up();
-  const d = await at();
-  ok(Math.abs(d.now - d.real) <= 1 && d.docs >= 339, `${tag} the pointer stops at the same place (${d.now}, ${d.real})`);
-  // A window made narrower takes it in again.
-  for (let i = 0; i < 45; i++) await page.keyboard.press("ArrowLeft");
-  await page.setViewportSize({ width: 1250, height: 900 });
-  await page.waitForTimeout(150);
-  const s = await at();
-  ok(Math.abs(s.now - s.real) <= 1 && s.mid >= 419, `${tag} and in a narrower window (${s.now}, ${s.real}, ${s.mid.toFixed(0)})`);
+  const dock = page.getByTestId("ws-dock");
+  await dock.waitFor();
+  const width = async () => (await dock.boundingBox()).width;
+  const start = await width();
+  const grip = await dock.locator(".dock-resizer").boundingBox();
+  await page.mouse.move(grip.x + 1, grip.y + 200); await page.mouse.down();
+  await page.mouse.move(grip.x - 49, grip.y + 200, { steps: 5 }); await page.mouse.up();
+  const changed = await width();
+  ok(Math.abs(changed - start - 50) <= 2, `${tag} the common dock handle resizes the workspace panel`);
+  await page.locator("[data-workspace-panel=memory]").click();
+  ok(Math.abs(await width() - changed) <= 1, `${tag} another panel uses the same width`);
 }
 
 const TIDY_WHAT = "Tidy the index: start a chat with Claude that moves detail out of MEMORY.md into topic files, keeping one line and a link for each. It is told to delete nothing, and each change it makes is in History, where you can undo it.";
 const AGENT = process.env.AGENT_SHOTS; // .worktrees-attachments/agent, for the report
 async function tidy(page, tag, name) {
   const id = await boot(page);
-  await page.click("[data-testid=ws-tab][data-tab=memory]");
+  await page.click("[data-workspace-panel=memory]");
   await isDoc(page, "MEMORY.md");
   ok(await page.locator("[data-testid=memory-tidy]").count() === 0, `${tag} an index under its budget offers no Tidy…`);
   await page.evaluate((id) => window.__mock.memoryEdit(id, "MEMORY.md", "# Memory\n\n" + "A line of the index, long enough to count.\n".repeat(560)), id);
@@ -134,7 +119,7 @@ async function tidy(page, tag, name) {
   const chats = await call(page, "workspace_chats", { id });
   ok(chats.chats.filter((c) => c.tidy).length === 1, `${tag} one tidy chat in the record`);
   // While it runs, the index's line opens it instead of a second.
-  await page.click("[data-testid=ws-tab][data-tab=memory]");
+  await page.click("[data-workspace-panel=memory]");
   ok(await until(page, () => !!document.querySelector("[data-testid=memory-tidy-open]") && /A tidy chat is running\./.test(document.querySelector("[data-testid=memory-long]")?.textContent ?? "")), `${tag} a running tidy is said, with Open it`);
   ok(await page.locator("[data-testid=memory-tidy]").count() === 0, `${tag} …and no second Tidy…`);
   if (AGENT && name === "webkit") await page.screenshot({ path: `${AGENT}/tidy-webkit-1440-running.png` });
@@ -146,7 +131,7 @@ async function tidyNarrow(page, tag, name) {
     const ctx = await page.context().browser().newContext({ viewport: { width: w, height: 800 } });
     page = await ctx.newPage();
     const id = await boot(page, ["beta_workspace_chats"], "", { theme });
-    await page.click("[data-testid=ws-tab][data-tab=memory]");
+    await page.click("[data-workspace-panel=memory]");
     await isDoc(page, "MEMORY.md");
     await page.evaluate((id) => window.__mock.memoryEdit(id, "MEMORY.md", "# Memory\n\n" + "A line of the index, long enough to count.\n".repeat(560)), id);
     const b = page.locator("[data-testid=memory-tidy]");
@@ -178,9 +163,9 @@ async function removed(page, tag) {
 
 async function header(page, tag, name) {
   await boot(page, ["beta_workspace_chats", "beta_ideas"]);
-  await page.click("[data-testid=ws-tab][data-tab=memory]");
+  await page.click("[data-workspace-panel=memory]");
   await isDoc(page, "MEMORY.md");
-  await file(page, "topics/nas-layout.md").click().catch(async () => { await page.click("[data-testid=ws-side-toggle]"); await file(page, "topics/nas-layout.md").click(); });
+  await file(page, "topics/nas-layout.md").click();
   await isDoc(page, "topics/nas-layout.md");
   const at = () => page.evaluate(() => {
     const h = document.querySelector("[data-testid=main-doc] .ix-head"), t = h.querySelector(".ix-title"), r = document.createRange();
@@ -223,7 +208,7 @@ async function skipped(page, tag) {
     t.invoke = async (c, x) => { const out = await real(c, x); if (c === "workspace_memory" && out.made) out.skipped = [{ path: "video.mov", why: "over 16 MB" }, { path: ".git", why: "a repository inside the memory" }, { path: "a", why: "w1" }, { path: "b", why: "w2" }]; return out; };
   });
   await page.evaluate((id) => window.__mock.memoryEdit(id, "topics/y.md", "# y\n"), (await call(page, "workspaces_list", {})).workspaces.find((w) => w.name === "Everything").id);
-  await page.click("[data-testid=ws-tab][data-tab=memory]");
+  await page.click("[data-workspace-panel=memory]");
   const says = () => page.evaluate(() => document.querySelector("[data-testid=memory-skipped]")?.innerText ?? "");
   ok(await until(page, () => /video\.mov/.test(document.querySelector("[data-testid=memory-skipped]")?.innerText ?? "")), `${tag} what is not shown is named`);
   ok(/4 files not shown/.test(await says()) && /video\.mov\s*: over 16 MB/.test(await says()) && /\.git\s*: a repository inside the memory/.test(await says()), `${tag} …each with why (${JSON.stringify(await says())})`);

@@ -828,6 +828,30 @@ pub fn get_codex_permissions(detail: Option<bool>) -> Result<serde_json::Value, 
     }
 }
 
+/// Settings → Policy → Agent permissions → Kimi: HOST policy, exactly as
+/// [`set_codex_permissions`]. Console-only at the dispatch table; an unknown
+/// value is refused and nothing is written.
+pub fn set_kimi_permissions(ctx: &Ctx, mode: String) -> Result<(), String> {
+    let Some(p) = worktrees_core::kimi::Permissions::parse(&mode) else {
+        let e = format!("unknown Kimi permission mode '{mode}' (expected ask, ask-when-needed or never-ask)");
+        applog("error", &format!("set_kimi_permissions: {e}"));
+        return Err(e);
+    };
+    hostpolicy::set(&ctx.config_dir, hostpolicy::KIMI_PERMISSIONS, p.as_str())
+        .inspect_err(|e| applog("error", &format!("set_kimi_permissions: {e}")))?;
+    worktrees_core::kimi::set_permissions_override(Some(p));
+    applog("info", &format!("host-policy: kimi_permissions set to {}", p.as_str()));
+    Ok(())
+}
+
+/// What the next kimi launch on this host will use, and what decided it:
+/// `{value, source, env}`, the shape `get_codex_permissions` gives with
+/// `detail` (a new row, so there is no older plain form to keep).
+pub fn get_kimi_permissions() -> Result<serde_json::Value, String> {
+    let (p, origin) = worktrees_core::kimi::permissions_origin();
+    Ok(serde_json::json!({ "value": p.as_str(), "source": origin.source, "env": origin.env }))
+}
+
 /// What a model picker lists for `harness` (`choice::options_for`): Claude's
 /// aliases, nothing for Codex (free text), pi's catalog with each unusable
 /// model's reason. pi's shells out and probes its hosts — cached a minute in

@@ -7,6 +7,7 @@ import type { Origin } from "./EnvLine";
 export type PresetValues = {
   /** Not `codex_permissions`: that name is the blob's mirror key. */
   codex_access: string;
+  kimi_access: string;
   main_guard: boolean;
   pi_trust: string;
   cross_project: string;
@@ -41,10 +42,11 @@ export type PresetStatus = {
 };
 
 /** Every key, in the order the host sets them and the Compare table lists them. */
-export const PRESET_KEYS: PresetKey[] = ["codex_access", "main_guard", "pi_trust", "cross_project", "quota_gate", "quota_weekly_pct", "max_live_agents"];
+export const PRESET_KEYS: PresetKey[] = ["codex_access", "kimi_access", "main_guard", "pi_trust", "cross_project", "quota_gate", "quota_weekly_pct", "max_live_agents"];
 
 export const PRESET_KEY_LABEL: Record<PresetKey, string> = {
   codex_access: "Codex permissions",
+  kimi_access: "Kimi permissions",
   main_guard: "Claude in (main)",
   pi_trust: "pi project trust",
   cross_project: "Other projects",
@@ -56,6 +58,7 @@ export const PRESET_KEY_LABEL: Record<PresetKey, string> = {
 /** The section on Agent policy each key is changed in. */
 export const PRESET_KEY_SECTION: Record<PresetKey, string> = {
   codex_access: "codex-permissions",
+  kimi_access: "kimi-permissions",
   main_guard: "main-guard",
   pi_trust: "pi-trust",
   cross_project: "cross-project",
@@ -68,6 +71,7 @@ export const PRESET_KEY_SECTION: Record<PresetKey, string> = {
 export function presetWords(key: PresetKey, v: PresetValues): string {
   switch (key) {
     case "codex_access": return ({ ask: "Ask", "auto-review": "Auto-review", full: "Full access" } as Record<string, string>)[v.codex_access] ?? v.codex_access;
+    case "kimi_access": return ({ ask: "Always Ask", "ask-when-needed": "Ask When Needed", "never-ask": "Never Ask" } as Record<string, string>)[v.kimi_access] ?? v.kimi_access;
     case "main_guard": return v.main_guard ? "Guarded" : "Not guarded";
     case "pi_trust": return v.pi_trust === "ask" ? "Let pi ask" : "Skip repo resources";
     case "cross_project": return ({ off: "Off", read: "Read", full: "Full" } as Record<string, string>)[v.cross_project] ?? v.cross_project;
@@ -80,6 +84,9 @@ export function presetWords(key: PresetKey, v: PresetValues): string {
 /** Does applying `p` set Codex to Full access? Then Apply asks first, as the
  *  Full access button does (§9 Q4, by the plan's default). */
 export const setsFullAccess = (p: PolicyPreset | undefined) => p?.values.codex_access === "full";
+
+/** Does applying `p` set Kimi to Never Ask? Asked first the same way. */
+export const setsNeverAsk = (p: PolicyPreset | undefined) => p?.values.kimi_access === "never-ask";
 
 /** The two client-side defaults a preset suggests (§5.2's last rows): the
  *  "Allow create and close tools" box and the scope a pairing starts on.

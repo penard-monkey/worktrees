@@ -362,6 +362,9 @@ fn a_policy_preset_applies_through_each_setter_and_says_what_moved() {
     assert_eq!((r["ok"]["name"].clone(), r["ok"]["applied"]["name"].clone()), (json!("cautious"), json!("cautious")), "{r}");
     let policy: Value = serde_json::from_slice(&std::fs::read(sb.cfg().join("host-policy.json")).unwrap()).unwrap();
     assert_eq!((policy["codex_permissions"].clone(), policy["policy_preset"]["name"].clone()), (json!("ask"), json!("cautious")), "{policy}");
+    assert_eq!(policy["kimi_permissions"], json!("ask"), "Cautious keeps Kimi asking: {policy}");
+    let r = rpc(&mut ws, 100, "get_kimi_permissions", json!({}));
+    assert_eq!((r["ok"]["value"].clone(), r["ok"]["source"].clone()), (json!("ask"), json!("host")), "{r}");
     let toml = std::fs::read_to_string(sb.root.join("xdg/worktrees/config.toml")).unwrap();
     assert!(toml.contains("weekly_warn_pct = 80") && toml.contains("max_live_agents = 2"), "{toml}");
     let guidance: Value = serde_json::from_slice(&std::fs::read(sb.root.join("xdg/worktrees/agent-guidance.json")).unwrap()).unwrap();
@@ -397,6 +400,7 @@ fn a_policy_preset_applies_through_each_setter_and_says_what_moved() {
     let r = rpc(&mut ws, 15, "apply_policy_preset", json!({"name": "balanced"}));
     let cur = &r["ok"]["current"];
     assert_eq!((cur["codex_access"].clone(), cur["main_guard"].clone(), cur["max_live_agents"].clone()), (json!("auto-review"), json!(false), Value::Null), "{r}");
+    assert_eq!(cur["kimi_access"], json!("ask-when-needed"), "Balanced is the shipped default: {r}");
     let r = rpc(&mut ws, 16, "apply_policy_preset", json!({"name": "custom"}));
     assert_eq!((r["ok"]["applied"].clone(), r["ok"]["name"].clone()), (Value::Null, json!("balanced")), "Keep as custom forgets the name; the values still read as Balanced: {r}");
     assert_eq!(sb.terminate().code(), Some(0));

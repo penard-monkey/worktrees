@@ -155,9 +155,9 @@ for (const [b, frame, tabs, chips] of [
   [{ ideas: false, chats: true }, true, "overview,memory,chats", "memory"],
   [{ ideas: true, chats: true }, true, "overview,memory,plan,ideas,chats", "memory,plan,ideas"],
 ]) ok(V.wsFrameOn(b) === frame && V.wsTabs(b).join() === tabs && V.docChips(b).join() === chips, `Ideas ${b.ideas ? "on" : "off"}, chats ${b.chats ? "on" : "off"}: the view ${frame ? `has ${tabs}` : "is not drawn"}, a place's dock ${chips || "nothing"}`);
-ok(/const tabsOn = wsTabs\(\{ ideas: ideasOn, chats: wsChatsOn \}\);[\s\S]{0,400}?const docRescue = docStuck !== null && mainDoc \? \{ ws: mainDoc\.ws, tab: mainDoc\.tab \} : null;\s*const viewOn = frameOn \|\| docRescue !== null;\s*const tabsOf = \(id: string \| null\) => \(id \? tabsWith\(tabsOn, id, docRescue\) : tabsOn\);\s*const wsTabNow = tabOr\(wsTab, tabsOf\(wsOpen\)\);/.test(code) && /tabs=\{tabsOf\(wsShown\?\.id \?\? null\)\}\s*tab=\{wsTabNow\}/.test(code), "its tabs are those, and a tab that is not drawn is never the one shown");
+ok(/const tabsOn = wsTabs\(\{ ideas: ideasOn, chats: wsChatsOn \}\);[\s\S]{0,400}?const docRescue = docStuck !== null && mainDoc \? \{ ws: mainDoc\.ws, tab: mainDoc\.tab \} : null;\s*const viewOn = frameOn \|\| docRescue !== null;\s*const tabsOf = \(id: string \| null\) => \(id \? tabsWith\(tabsOn, id, docRescue\) : tabsOn\);\s*const wsTabNow = tabOr\(wsTab, tabsOf\(wsOpen\)\);/.test(code) && /tabsOf\(wsDock\)\.includes\(d\.key as WsTab\)/.test(code) && /tab=\{wsTabNow\}/.test(code), "its tabs are those, and a tab that is not drawn is never the one shown");
 ok(/const wsShown = viewOn && !\(selected && sel\) && wsOpen \? wsById\(wsOpen\) : null;/.test(code) && /shown=\{wsShown !== null(?: && !diskOpen)?\}/.test(code), "the view is shown with either on, and with both off only for a text that is not saved (Disk over it hides it, kept mounted)");
-ok(/const showWs = async \([\s\S]{0,160}?\{\s*if \(!viewOn \|\| id === EVERYTHING_ELSE_ID\) return false;/.test(code) && /const openWsOverview = \(id: string\) => \{ void showWsRef\.current\(id, "overview", \{ chat: null \}\); \};/.test(code), "showWs opens nothing with both off, nor for Everything Else, and the overview goes through it");
+ok(/const showWs = async \([\s\S]{0,320}?\{\s*if \(!viewOn \|\| id === EVERYTHING_ELSE_ID\) return false;/.test(code) && /const openWsOverview = \(id: string\) => \{ void showWsRef\.current\(id, "overview", \{ chat: null \}\); \};/.test(code), "showWs opens nothing with both off, nor for Everything Else, and the overview goes through it");
 ok(/onOpen=\{frameOn \? \(\) => openWsOverview\(w\.id\) : docRescue\?\.ws === w\.id \? \(\) => void showWs\(w\.id, docRescue\.tab, \{ doc: mainDoc\?\.name \}\) : undefined\}/.test(code) && /onClick=\{onOpen \?\? onToggle\}/.test(code), "with both off a workspace's name folds its card, as before phase 4");
 ok(gatedFrame('data-testid="ws-overview-open"'), "a workspace menu's Overview renders only with the view on");
 // The owner took the Memory / Plan / Ideas chips out of a workspace's nav card
@@ -166,11 +166,11 @@ ok(!/<DocChips\b|ws-doc-(memory|plan|ideas)/.test(code) && !/export function Doc
 const overview = read("../src/WorkspaceOverview.tsx");
 ok(/const work = props\.ideasOn && <WorkCard/.test(overview) && /\{props\.ideasOn && <IdeasCard/.test(overview) && (overview.match(/<WorkCard|<IdeasCard/g) ?? []).length === 2, "the Overview's Work and Ideas are Ideas' alone");
 ok(/\{props\.chatsOn\s*\? <Card name="Memory"/.test(overview) && /\{props\.chatsOn && <Card name="Chats"/.test(overview) && (overview.match(/<Card name="(Memory|Chats)"/g) ?? []).length === 2, "…its Memory and Chats are workspace chats' alone");
-ok(/<WorkspaceOverview[\s\S]{0,200}?ideasOn=\{ideasOn\}\s*chatsOn=\{wsChatsOn\}/.test(code), "…and it is told each by its own");
+ok(/<WorkspaceOverview[\s\S]{0,360}?ideasOn=\{ideasOn\}\s*chatsOn=\{wsChatsOn\}/.test(code), "…and it is told each by its own");
 // Chats are workspace chats' alone, wherever they show.
 ok(/const wsChats = useWsChats\(wsChatsOn && !!wsList,/.test(code) && /if \(!on\) return;\s*for \(const id of key/.test(read("../src/useWsChats.ts")), "workspace_chats is asked for, and workspaces:sessions heard, only with workspace chats on");
 ok(/\{wsChatsOn && \(\s*<NavChats/.test(code) && (code.match(/<NavChats\b/g) ?? []).length === 1, "a card's Chats group is drawn only with it on");
-ok(/const wsMiddle = !wsShown \|\| !wsChatsOn \? null/.test(code) && (code.match(/<WorkspaceChatColumn\b/g) ?? []).length === 1 && /newChat=\{wsShown && wsChatsOn && /.test(code), "…and so are the middle column and New chat");
+ok(/const wsMiddle = !wsShown \|\| !wsChatsOn \? null/.test(code) && (code.match(/<WorkspaceChatColumn\b/g) ?? []).length === 1 && /<WorkspaceTopBar[\s\S]{0,250}?newChat=\{wsChatsOn && /.test(code), "…and so are the middle column and New chat");
 ok(/waits=\{wsChatsOn && chatWaits\}/.test(code) && /\.\.\.\(wsChatsOn \? wsChats\.rows\(w\.id\) : \[\]\)\.map/.test(code), "…and the switch's dot and ⌘K's chats");
 // Slice 6: a place's crumb and dock tab, with the view on, its parts by their own.
 ok(/const placeWsAll = frameOn && selected && sel && wsList \?/.test(code) && /\(d\.key !== "workspace" \|\| placeWsAll\.length > 0\)/.test(code) && /\{placeWsAll\.length > 0 && \(\s*<span className="wsd-crumb"/.test(code), "a place's crumb and its dock tab are drawn only with the view on, for a project a workspace holds");
@@ -191,7 +191,7 @@ ok((code.match(/<WorkspaceFrame\b/g) ?? []).length === 1 && (code.match(/<Worksp
 ok(/\{\(wsShown \|\| mainDoc\) && \(\s*<WorkspaceFrame\b/.test(code), "the frame stays mounted while a document is open, whatever is shown");
 {
   const frame = read("../src/WorkspaceFrame.tsx");
-  ok((frame.match(/\{props\.doc\}/g) ?? []).length === 1 && /\{props\.doc\}\s*<\/div>\s*<\/div>\s*<\/div>\s*<\/div>\s*<\/section>/.test(frame) && /<section className="wsf"[^>]*hidden=\{!props\.shown\}>/.test(frame) && !/key=\{(props\.)?ws/.test(frame),
+  ok((frame.match(/\{props\.doc\}/g) ?? []).length === 1 && /\{props\.doc\}\s*<\/>\s*,\s*slot\s*,/.test(frame) && /<section className="wsf"[^>]*hidden=\{!props\.shown\}>/.test(frame) && !/key=\{(props\.)?ws/.test(frame),
     "…and the document's section has one parent there, hidden and never keyed to a workspace or a tab");
 }
 ok(/if \(was === true && !ideasOn\) \{\s*invoke\("close_companion"\)/.test(code), "turning Ideas off closes the Ideas window (close_companion)");

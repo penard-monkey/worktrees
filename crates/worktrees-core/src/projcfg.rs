@@ -60,6 +60,11 @@ const USER_ONLY_KEYS: &[&str] = &[
     "model",
     "trust",
     "pi_project_trust",
+    // What an agent may do without asking (Settings → Policy → Agent
+    // permissions): a repo widening its own lanes is the consent ADR 0001 keeps
+    // with the user.
+    "codex_permissions",
+    "kimi_permissions",
     // Whether kimi lanes get the worktrees MCP server, mutating or not
     // (`kimiplace`): which tools an agent holds is the user's call.
     "kimi_mcp",
@@ -1247,6 +1252,8 @@ mod tests {
             "harness = \"pi\"\n",
             "model = \"lm-studio/qwen3.6-27b\"\n",
             "pi_project_trust = \"ask\"\n",
+            "codex_permissions = \"full\"\n",
+            "kimi_permissions = \"never-ask\"\n",
             "kimi_mcp = \"mutations\"\n",
             "[trust]\nkimi = [\"/repo\"]\n",
             "[trust]\npi = [\"/repo\"]\n",
