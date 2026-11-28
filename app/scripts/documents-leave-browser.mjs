@@ -54,7 +54,7 @@ async function workspace(page) {
   for (const i of [JELLY, GPU]) await call(page, "workspace_link_idea", { id, idea: i });
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   await page.locator("[data-testid=ws-name]", { hasText: "Everything" }).first().click();
-  await page.click("[data-testid=ws-tab][data-tab=ideas]");
+  await page.click("[data-workspace-panel=ideas]");
   await page.waitForSelector(`[data-testid=ws-ideas-row][data-idea='${JELLY}'], [data-idea='${JELLY}']`);
   await page.locator(`.wsf-ideas [data-idea='${JELLY}'] .wsf-idea-open, .wsf-ideas [data-idea='${JELLY}']`).first().click();
   await isDoc(page, JELLY);
@@ -85,13 +85,13 @@ async function leave(page, tag) {
   await page.click("[data-testid=main-doc] [data-testid=ideas-mode-edit]").catch(() => {});
   await hold(page, "idea_write");
   await type(page, " FOUR");
-  await page.click("[data-testid=ws-tab][data-tab=memory]");
+  await page.click("[data-workspace-panel=memory]");
   await held(page);
   await type(page, " FIVE");
   await free(page);
   ok(await until(page, (id) => / FOUR FIVE/.test(window.__mock.ideaFile(id).content), JELLY), `${tag} another tab: on disk (${JSON.stringify([(await text(page, JELLY)).slice(-40), (await text(page, GPU)).slice(-40)])})`);
   // A refusal of the SECOND save keeps the document.
-  await page.click("[data-testid=ws-tab][data-tab=ideas]");
+  await page.click("[data-workspace-panel=ideas]");
   await isDoc(page, JELLY);
   await page.click("[data-testid=main-doc] [data-testid=ideas-mode-edit]").catch(() => {});
   await hold(page, "idea_write");

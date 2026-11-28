@@ -21,8 +21,11 @@ let failed = 0;
 const ok = (c, m) => { if (!c) failed++; console.log((c ? "ok   " : "FAIL ") + m); };
 const until = (page, fn, arg, ms = 5000) => page.waitForFunction(fn, arg, { timeout: ms }).then(() => true, () => false);
 const call = (page, cmd, args) => page.evaluate(([c, a]) => window.__TAURI_INTERNALS__.invoke(c, a), [cmd, args]);
-const tab = (page, t) => page.click(`[data-testid=ws-tab][data-tab=${t}]`);
-const isTab = (page, t) => until(page, (t) => document.querySelector("[data-testid=ws-tab].on")?.dataset.tab === t, t, 2000);
+const tab = async (page, t) => {
+  const button = page.locator(`[data-workspace-panel=${t}]`);
+  if (await button.getAttribute("aria-pressed") !== "true") await button.click();
+};
+const isTab = (page, t) => until(page, (t) => document.querySelector("[data-testid=ws-frame]:not([hidden])")?.dataset.panel === t, t, 2000);
 const isDoc = (page, id) => until(page, (id) => { const d = document.querySelector("[data-testid=main-doc]"); return !!d && !d.hidden && d.dataset.doc === id; }, id);
 const read = (page) => page.evaluate(() => document.querySelector("[data-testid=main-doc] [data-testid=ideas-read]")?.innerText ?? null);
 const files = (page) => page.evaluate(() => [...document.querySelectorAll("[data-testid=memory-file]")].map((b) => b.dataset.path));
@@ -42,8 +45,8 @@ async function boot(page, betas = ["beta_workspace_chats"], query = "") {
 const name = (page, n = "Everything") => page.locator("[data-testid=ws-name]", { hasText: n }).first().click();
 // The workspace's Memory tab, through its overview: the nav card has no
 // document chips since 2026-11-26.
-const memTab = async (page, n = "Everything") => { await name(page, n); await page.waitForSelector("[data-testid=ws-tab][data-tab=memory]"); await tab(page, "memory"); };
-const freshDot = "[data-testid=ws-tab][data-tab=memory] [data-testid=memory-fresh]";
+const memTab = async (page, n = "Everything") => { await name(page, n); await page.waitForSelector("[data-workspace-panel=memory]"); await tab(page, "memory"); };
+const freshDot = "[data-workspace-panel=memory] [data-testid=memory-fresh]";
 
 async function overview(page, tag, eng) {
   const ws = await boot(page);
@@ -81,7 +84,7 @@ async function tabs(page, tag, eng) {
   ok(await isDoc(page, "MEMORY.md") && /What this workspace is for/.test(await read(page)), `${tag} the Memory tab opens the index, in Read`);
   await page.waitForTimeout(400);
   ok(!(await fetched(page)), `${tag} …and no editor is fetched`);
-  ok(await page.evaluate(() => { const s = document.querySelector("[data-testid=ws-side]").getBoundingClientRect(), d = document.querySelector("[data-testid=main-doc]").getBoundingClientRect(); return s.right <= d.left + 1; }), `${tag} its files are a column beside it`);
+  ok(await page.evaluate(() => { const s = document.querySelector("[data-testid=ws-side]").getBoundingClientRect(), d = document.querySelector("[data-testid=main-doc]").getBoundingClientRect(); return s.left >= d.right - 1; }), `${tag} its files are a column beside it`);
   const list = await files(page);
   ok(list[0] === "MEMORY.md" && list.filter((p) => p.startsWith("notes/")).length === 2 && list.includes("topics/nas-layout.md") && list.includes("files/rack.svg"), `${tag} the index, then notes, topics, files (${list})`);
   ok((await page.locator("[data-testid=main-doc] .ix-title").innerText()) === "MEMORY.md" && await page.locator("[data-testid=main-doc] [data-testid=main-doc-float]").count() === ((await page.evaluate(() => JSON.parse(sessionStorage.getItem("wt-mock-ui-state")).beta_ideas)) ? 1 : 0), `${tag} its name is the file's, and it floats with Ideas on`);
@@ -121,9 +124,8 @@ async function tabs(page, tag, eng) {
   await page.fill("[data-testid=memory-filter]", "");
   // ── narrow ──
   await page.setViewportSize({ width: 1000, height: 800 }); // 612 of room
-  ok(await until(page, () => /Files · \d+/.test(document.querySelector("[data-testid=ws-side-toggle]")?.textContent ?? "") && !document.querySelector("[data-testid=ws-side]")), `${tag} under 720 the list is a Files button`);
-  await page.click("[data-testid=ws-side-toggle]");
-  ok(await open(page, "topics/nas-layout.md"), `${tag} …that opens it, over the document`);
+  ok(await page.locator(".ws-dock [data-testid=ws-side]").isVisible(), `${tag} the files stay in the dock at this width`);
+  ok(await open(page, "topics/nas-layout.md"), `${tag} a file in the narrow dock opens the document`);
   await page.setViewportSize({ width: 1440, height: 900 });
   // ── Edit loads the editor, and a change an agent makes is read ──
   await page.click("[data-testid=main-doc] [data-testid=ideas-mode-edit]");
@@ -201,7 +203,7 @@ async function commits(page, tag) {
   await name(page);
   await page.waitForSelector("[data-testid=memory-last]");
   const was = await page.locator("[data-testid=memory-last]").innerText();
-  await page.click("[data-testid=ws-tab][data-tab=memory]");
+  await page.click("[data-workspace-panel=memory]");
   await isDoc(page, "MEMORY.md");
   await page.click("[data-testid=ideas-versions-toggle], [data-testid=doc-menu-open]");
   if (!(await page.$("[data-testid=memory-history]"))) await page.click("[data-testid=doc-menu-history]");
@@ -209,7 +211,7 @@ async function commits(page, tag) {
   const n = await page.locator("[data-testid=memory-log-row]").count();
   await page.evaluate((id) => window.__mock.memoryEdit(id, "topics/nas-layout.md", "# NAS layout\n\nQuietly.\n"), ws);
   ok(await until(page, (n) => document.querySelectorAll("[data-testid=memory-log-row]").length === n + 1, n, 5000), `${tag} a quiet commit is in an open History`);
-  await page.click("[data-testid=ws-tab][data-tab=overview]");
+  await page.click("[data-workspace-panel=overview]");
   ok(await until(page, (was) => { const t = document.querySelector("[data-testid=memory-last]")?.innerText; return !!t && t !== was && /1 file/.test(t); }, was), `${tag} …and what last changed on the Overview`);
   // ── commits that keep failing ──
   const p = await page.context().newPage();
@@ -217,7 +219,7 @@ async function commits(page, tag) {
   await name(p);
   const words = /Memory could not be saved to its history since .*: git commit failed: fatal: no space left on device\. Its files are saved\. 4 tries\./;
   ok(await until(p, () => !!document.querySelector("[data-testid=memory-failing]")) && words.test(await p.locator("[data-testid=memory-failing]").first().innerText()), `${tag} commits that keep failing are said on the Overview`);
-  await p.click("[data-testid=ws-tab][data-tab=memory]");
+  await p.click("[data-workspace-panel=memory]");
   await isDoc(p, "MEMORY.md");
   ok(words.test(await p.locator("[data-testid=main-doc] [data-testid=memory-failing]").innerText()), `${tag} …and on the Memory tab`);
   await p.close();
@@ -255,7 +257,7 @@ async function states(page, tag) {
   // ── off ──
   await page.keyboard.press("Meta+Comma");
   await page.click("[data-testid=beta-workspace-chats]");
-  ok(await until(page, () => !document.querySelector("[data-testid=main-doc]") && !document.querySelector("[data-testid=ws-tab][data-tab=memory]")), `${tag} turned off, the open file is closed and the tab is gone`);
+  ok(await until(page, () => !document.querySelector("[data-testid=main-doc]") && !document.querySelector("[data-workspace-panel=memory]")), `${tag} turned off, the open file is closed and the tab is gone`);
 }
 
 /** Slice 5: a person writes in it, beside chats that may. */

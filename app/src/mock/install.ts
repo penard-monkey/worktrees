@@ -99,6 +99,7 @@ const MOCK_HOST_POLICY_KEY = "wt-mock-host-policy";
 const CONSOLE: By = { principal: "owner", device: { kind: "console" } };
 type MockHostPolicy = {
   codex_permissions: string;
+  kimi_permissions: string;
   pi_project_trust: string;
   fetch_interval_min: number;
   term_persist_scrollback: boolean;
@@ -107,7 +108,7 @@ type MockHostPolicy = {
 };
 const mockHostPolicy: MockHostPolicy = (() => {
   const d: MockHostPolicy = {
-    codex_permissions: "auto-review", pi_project_trust: "never",
+    codex_permissions: "auto-review", kimi_permissions: "ask-when-needed", pi_project_trust: "never",
     fetch_interval_min: 0, term_persist_scrollback: true, term_per_tab_history: true, keep_awake: false,
   };
   try { return { ...d, ...JSON.parse(sessionStorage.getItem(MOCK_HOST_POLICY_KEY) ?? "{}") }; } catch { return d; }
@@ -635,24 +636,24 @@ const mockQuotaNow = () => ({ ...mockQuota, config_path: "/Users/demo/.config/wo
 // `apply_policy_preset`): core's `policy_presets`, mirrored — the same three
 // presets and keys, Balanced the shipped defaults, the name kept only for a
 // whole apply. `?preset=cautious` starts as if Cautious had been applied.
-const MOCK_PRESET_KEYS = ["codex_access", "main_guard", "pi_trust", "cross_project", "quota_gate", "quota_weekly_pct", "max_live_agents"];
-type MockPresetValues = { codex_access: string; main_guard: boolean; pi_trust: string; cross_project: string; quota_gate: boolean; quota_weekly_pct: number | null; max_live_agents: number | null };
+const MOCK_PRESET_KEYS = ["codex_access", "kimi_access", "main_guard", "pi_trust", "cross_project", "quota_gate", "quota_weekly_pct", "max_live_agents"];
+type MockPresetValues = { codex_access: string; kimi_access: string; main_guard: boolean; pi_trust: string; cross_project: string; quota_gate: boolean; quota_weekly_pct: number | null; max_live_agents: number | null };
 const MOCK_PRESETS: { name: string; label: string; summary: string; values: MockPresetValues; mutations_default: boolean; pair_scope: string }[] = [
-  { name: "cautious", label: "Cautious", summary: "Codex asks before each command, Claude may not branch in (main), pi skips repo resources, agents see only their own project and stop at 80% of a weekly plan, and two may be live at once.",
-    values: { codex_access: "ask", main_guard: true, pi_trust: "never", cross_project: "off", quota_gate: true, quota_weekly_pct: 80, max_live_agents: 2 }, mutations_default: false, pair_scope: "observe" },
-  { name: "balanced", label: "Balanced", summary: "Codex's reviewer approves or refuses each command, pi skips repo resources, agents see only their own project and stop on a nearly spent plan, up to this machine's default number at once. Today's defaults.",
-    values: { codex_access: "auto-review", main_guard: false, pi_trust: "never", cross_project: "off", quota_gate: true, quota_weekly_pct: null, max_live_agents: null }, mutations_default: true, pair_scope: "observe" },
-  { name: "autonomous", label: "Autonomous", summary: "Codex runs with no prompts and no sandbox, pi asks about each repo's resources, agents may read your other projects, and no plan check stops a launch.",
-    values: { codex_access: "full", main_guard: false, pi_trust: "ask", cross_project: "read", quota_gate: false, quota_weekly_pct: null, max_live_agents: null }, mutations_default: true, pair_scope: "operate" },
+  { name: "cautious", label: "Cautious", summary: "Codex and Kimi ask before each command, Claude may not branch in (main), pi skips repo resources, agents see only their own project and stop at 80% of a weekly plan, and two may be live at once.",
+    values: { codex_access: "ask", kimi_access: "ask", main_guard: true, pi_trust: "never", cross_project: "off", quota_gate: true, quota_weekly_pct: 80, max_live_agents: 2 }, mutations_default: false, pair_scope: "observe" },
+  { name: "balanced", label: "Balanced", summary: "Codex's reviewer approves or refuses each command, Kimi asks only for risky ones, pi skips repo resources, agents see only their own project and stop on a nearly spent plan, up to this machine's default number at once. Today's defaults.",
+    values: { codex_access: "auto-review", kimi_access: "ask-when-needed", main_guard: false, pi_trust: "never", cross_project: "off", quota_gate: true, quota_weekly_pct: null, max_live_agents: null }, mutations_default: true, pair_scope: "observe" },
+  { name: "autonomous", label: "Autonomous", summary: "Codex runs with no prompts and no sandbox, Kimi never asks, pi asks about each repo's resources, agents may read your other projects, and no plan check stops a launch.",
+    values: { codex_access: "full", kimi_access: "never-ask", main_guard: false, pi_trust: "ask", cross_project: "read", quota_gate: false, quota_weekly_pct: null, max_live_agents: null }, mutations_default: true, pair_scope: "operate" },
 ];
 let mockPresetApplied: { name: string; version: number } | null =
-  mockQuotaQ.get("preset") ? { name: mockQuotaQ.get("preset")!, version: 1 } : null;
+  mockQuotaQ.get("preset") ? { name: mockQuotaQ.get("preset")!, version: 2 } : null;
 const mockPresetDiffers = (a: MockPresetValues, b: MockPresetValues) => MOCK_PRESET_KEYS.filter((k) =>
   k === "quota_weekly_pct" ? a.quota_gate && b.quota_gate && a.quota_weekly_pct !== b.quota_weekly_pct
     : a[k as keyof MockPresetValues] !== b[k as keyof MockPresetValues]);
 function mockPresetStatus() {
   const current: MockPresetValues = {
-    codex_access: mockHostPolicy.codex_permissions, main_guard: mockGuidanceSettings.guard,
+    codex_access: mockHostPolicy.codex_permissions, kimi_access: mockHostPolicy.kimi_permissions, main_guard: mockGuidanceSettings.guard,
     pi_trust: mockHostPolicy.pi_project_trust, cross_project: mockReach,
     quota_gate: mockQuota.gate, quota_weekly_pct: mockQuota.weekly_warn_pct, max_live_agents: mockLimits.max_live_agents ?? null,
   };
@@ -660,10 +661,10 @@ function mockPresetStatus() {
   const known = MOCK_PRESETS.find((p) => p.name === mockPresetApplied?.name);
   return {
     name: known ? known.name : matches[0] ?? "custom",
-    applied: mockPresetApplied, version: 1, stale: false,
+    applied: mockPresetApplied, version: 2, stale: false,
     modified: known ? mockPresetDiffers(known.values, current) : [],
     matches, current, presets: MOCK_PRESETS,
-    sources: { codex_access: mockOrigin("codex", "set_codex_permissions"), pi_trust: mockOrigin("pi", "set_pi_trust") },
+    sources: { codex_access: mockOrigin("codex", "set_codex_permissions"), kimi_access: { source: mockHostPolicySets.some((x) => x.cmd === "set_kimi_permissions") ? "host" : "default", env: null }, pi_trust: mockOrigin("pi", "set_pi_trust") },
   };
 }
 
@@ -3312,6 +3313,7 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       const want = (k: string) => !keys || keys.includes(k);
       const v = p.values;
       if (want("codex_access")) setHostPolicy("set_codex_permissions", { codex_permissions: v.codex_access });
+      if (want("kimi_access")) setHostPolicy("set_kimi_permissions", { kimi_permissions: v.kimi_access });
       if (want("main_guard")) mockGuidanceSettings = { ...mockGuidanceSettings, guard: v.main_guard };
       if (want("pi_trust")) setHostPolicy("set_pi_trust", { pi_project_trust: v.pi_trust });
       if (want("cross_project")) mockReach = v.cross_project;
@@ -3319,7 +3321,7 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         gate: want("quota_gate") ? v.quota_gate : mockQuota.gate,
         weekly_warn_pct: want("quota_weekly_pct") ? v.quota_weekly_pct : mockQuota.weekly_warn_pct, problems: [] };
       if (want("max_live_agents")) { if (v.max_live_agents === null) delete mockLimits.max_live_agents; else mockLimits.max_live_agents = v.max_live_agents; }
-      if (!keys) mockPresetApplied = { name, version: 1 };
+      if (!keys) mockPresetApplied = { name, version: 2 };
       return mockPresetStatus();
     }
     case "limits_settings":
@@ -6192,6 +6194,18 @@ Phase 3: Frontend pane and mock harness
       }
       setHostPolicy("set_codex_permissions", { codex_permissions: mode });
       return null;
+    }
+    case "set_kimi_permissions": {
+      const mode = String(args.mode);
+      if (!["ask", "ask-when-needed", "never-ask"].includes(mode)) {
+        throw `unknown Kimi permission mode '${mode}' (expected ask, ask-when-needed or never-ask)`;
+      }
+      setHostPolicy("set_kimi_permissions", { kimi_permissions: mode });
+      return null;
+    }
+    case "get_kimi_permissions": {
+      const held = mockHostPolicySets.some((x) => x.cmd === "set_kimi_permissions");
+      return { value: mockHostPolicy.kimi_permissions, source: held ? "host" : "default", env: null };
     }
     case "get_codex_permissions": {
       const origin = mockOrigin("codex", "set_codex_permissions");

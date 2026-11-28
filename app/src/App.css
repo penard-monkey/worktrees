@@ -4097,47 +4097,27 @@ body.dragging .ws-h { cursor: grabbing; }
    a container query here would make it the containing block of the document
    pane's fixed popovers. Cards are `--bg-panel` on the main area's
    `--bg-abyss`; a box inside a card goes back to `--bg-abyss`. */
-.wsf { --ws-hue: var(--accent); flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
-.wsf[hidden], .wsf-split[hidden] { display: none; }
+.wsf { --ws-hue: var(--accent); }
+section.wsf { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.wsf[hidden], .wsf-center[hidden], .wsf-slot[hidden], .ws-dock[hidden], .ws-dock > .dock-body[hidden] { display: none; }
 .wsf-top { flex: none; }
 .wsf-name {
   flex: 0 1 auto; min-width: 5ch; display: inline-flex; align-items: center; gap: var(--s2); padding: 2px var(--s2); border-radius: var(--r-md);
   background: color-mix(in srgb, var(--ws-hue) 22%, var(--bg-panel)); color: var(--txt-hi); font-size: var(--fs-label); font-weight: var(--fw-bold);
 }
+.wsf-top .controls { margin-left: auto; }
 .wsf-name > svg { flex: none; }
 .wsf-name-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wsf-counts { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--txt); font-size: var(--fs-meta); }
 /* The chat's column (a later slice) is the middle; the documents are on the
    dock's side of it. With none they are the whole room. */
-.wsf-body { flex: 1 1 auto; min-height: 0; display: flex; }
-.wsf-mid { flex: 1 1 0; min-width: 420px; min-height: 0; display: flex; flex-direction: column; }
-.wsf-docs { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
-.wsf-body[data-mid] > .wsf-docs { min-width: 340px; }
-.wsf-split-bar { flex: none; width: 1px; background: var(--line); cursor: col-resize; position: relative; touch-action: none; }
-.wsf-split-bar::after { content: ""; position: absolute; inset: 0 -4px; z-index: 2; }
-.wsf-split-bar:hover, .wsf-split-bar:focus-visible { background: var(--accent); outline: none; }
-.wsf-body[data-mid][data-dock="left"] > .wsf-docs { order: -2; }
-.wsf-body[data-mid][data-dock="left"] > .wsf-split-bar { order: -1; }
-/* Room for one: the other is hidden, and stays as it is. */
-.wsf-body[data-one] > .wsf-mid, .wsf-body[data-one] > .wsf-docs { min-width: 0; }
-.wsf-body[data-one="chat"] > .wsf-docs, .wsf-body[data-one="docs"] > .wsf-mid { display: none; }
-.wsf-tabs { flex: none; display: flex; gap: var(--s1); padding: 0 var(--s3); border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; }
-.wsf-tab { flex: none; white-space: nowrap; padding: 7px var(--s2); border: 0; background: transparent; color: var(--txt); font-size: var(--fs-label); }
-.wsf-tab:hover { color: var(--txt-hi); }
-.wsf-tab.on { color: var(--txt-hi); font-weight: var(--fw-med); box-shadow: inset 0 -2px 0 var(--ws-hue); }
-.wsf-tab-n { margin-left: 5px; color: var(--txt-dim); font-size: var(--fs-meta); }
+.wsf-mid, .wsf-center, .wsf-slot { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .wsf-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
-/* The Plan and Ideas tabs: their list, and the document. */
-.wsf-split { flex: 1 1 auto; min-height: 0; display: flex; }
-.wsf-slot { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
-.wsf-side { flex: none; box-sizing: border-box; width: 340px; overflow-y: auto; display: flex; flex-direction: column; gap: var(--s2); padding: var(--s3); border-right: 1px solid var(--line); background: var(--bg-panel); }
+.wsf-side { flex: 0 1 auto; max-height: 45%; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: var(--s2); padding: var(--s3); border-bottom: 1px solid var(--line); background: var(--bg-panel); }
 .wsf-side > * { flex: none; }
-.wsf-side.ideas { width: 250px; }
-.wsf-split:not([data-beside]) { flex-direction: column; }
-.wsf-split:not([data-beside]) > .wsf-side { width: auto; max-height: 45%; border-right: 0; border-bottom: 1px solid var(--line); }
-.wsf-side-line { flex: none; text-align: left; padding: 5px var(--s3); border: 0; border-bottom: 1px solid var(--line); background: var(--bg-panel); color: var(--txt); font-size: var(--fs-meta); }
-.wsf-side-line:hover { color: var(--txt-hi); }
-.wsf-side-line svg { vertical-align: -2px; }
+.ws-dock-content > .wsf-side { flex: 1 1 auto; max-height: none; border-bottom: 0; }
+.wsf-rail-dot { position: absolute; right: 3px; top: 3px; width: 6px; height: 6px; border-radius: 50%; background: var(--warn); }
+.wsf-rail-dot.new { background: var(--done); }
 .wsf-side-h { display: flex; align-items: baseline; gap: var(--s2); color: var(--txt); font-size: var(--fs-meta); }
 .wsf-side-h > span { flex: 1 1 0; min-width: 0; }
 .wsf-ideas { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
@@ -4152,15 +4132,17 @@ body.dragging .ws-h { cursor: grabbing; }
 .wsf-empty { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s3); padding: var(--s4); }
 .wsf-scroll > .wsf-empty { padding: var(--s6); }
 /* The Overview. */
+.wsf-ov-reference { padding: var(--s4); }
+.wsf-ov-reference > .wsf-col-side { flex: none; }
 .wsf-ov { display: flex; flex-direction: column; gap: var(--s3); padding: var(--s4); max-width: 1500px; margin: 0 auto; }
 .wsf-cols { display: flex; align-items: flex-start; gap: var(--s4); }
 .wsf-col { display: flex; flex-direction: column; gap: var(--s3); min-width: 0; }
 .wsf-col-main { flex: 1 1 0; }
 .wsf-col-side { flex: 0 0 370px; }
-.wsf-docs[data-room="narrow"] .wsf-cols { flex-direction: column; align-items: stretch; }
-.wsf-docs[data-room="narrow"] .wsf-col-side { flex: none; }
-.wsf-docs[data-room="narrow"] .wsf-col-main { flex: none; }
-.wsf-docs[data-room="narrow"] .wsf-col-main:has(> .wsf-card-tall) { order: 1; }
+.wsf-scroll[data-room="narrow"] .wsf-cols { flex-direction: column; align-items: stretch; }
+.wsf-scroll[data-room="narrow"] .wsf-col-side { flex: none; }
+.wsf-scroll[data-room="narrow"] .wsf-col-main { flex: none; }
+.wsf-scroll[data-room="narrow"] .wsf-col-main:has(> .wsf-card-tall) { order: 1; }
 .wsf-card { border: 1px solid var(--line); border-radius: 8px; background: var(--bg-panel); overflow: hidden; min-width: 0; }
 .wsf-card-h { display: flex; align-items: center; gap: var(--s2); min-height: 34px; box-sizing: border-box; padding: 4px var(--s3); border-bottom: 1px solid var(--line); }
 .wsf-card-side { flex: 0 1 auto; min-width: 0; margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--txt); font-size: var(--fs-meta); }
@@ -4176,8 +4158,8 @@ body.dragging .ws-h { cursor: grabbing; }
 .wsf-side .ws-ov-row { padding-left: 0; padding-right: 0; }
 /* A column too narrow for one line: the name first, what it is doing and its
    buttons under it. */
-.wsf-side .ws-ov-row:has(> .ws-ov-state) > .ws-ov-item, .wsf-docs[data-room="wide"] .wsf-col-side .ws-ov-work .ws-ov-item { flex-basis: 100%; }
-.wsf-side .ws-ov-state, .wsf-docs[data-room="wide"] .wsf-col-side .ws-ov-work .ws-ov-state { flex: 1 1 auto; }
+.wsf-side .ws-ov-row:has(> .ws-ov-state) > .ws-ov-item, .wsf-scroll[data-room="wide"] .wsf-col-side .ws-ov-work .ws-ov-item { flex-basis: 100%; }
+.wsf-side .ws-ov-state, .wsf-scroll[data-room="wide"] .wsf-col-side .ws-ov-work .ws-ov-state { flex: 1 1 auto; }
 .wsf-more { display: block; width: 100%; padding: 6px var(--s3); border: 0; border-top: 1px solid var(--line); background: transparent; color: var(--txt-hi); font-size: var(--fs-meta); text-align: left; }
 .wsf-more:hover { background: var(--bg-elev); }
 .ws-ov-none { color: var(--txt); font-size: var(--fs-label); margin: 0; }
@@ -4191,7 +4173,6 @@ body.dragging .ws-h { cursor: grabbing; }
 .agent-stalled { margin: 0; padding: var(--s2) var(--s3); border-bottom: 1px solid var(--line); color: var(--txt-hi); font-size: var(--fs-label); background: var(--bg-panel); }
 /* A mark on a document's tab: text that is not saved, or (`.new`, in
    WorkspaceMemory.css) a memory that changed since you looked. */
-.wsf-dot { display: inline-block; width: 6px; height: 6px; margin-left: 5px; border-radius: 50%; background: var(--warn); vertical-align: 1px; }
 
 /* ── a place's workspace (workspace-view-design.md §6; WorkspaceDock.tsx) ── */
 /* It gives way right after the project, down to its icon: the place keeps its name. */

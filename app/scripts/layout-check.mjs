@@ -142,7 +142,7 @@ if (S.SETTINGS_REV < 4) fail(`SETTINGS_REV is ${S.SETTINGS_REV} — the dock_sid
   }
   if (!reads.some(([k]) => k === "railRight")) fail("App.tsx no longer orders the dock rail with ord.railRight");
   // The dock's own side inside `.space`: a flex `order`, keyed on dock_side.
-  if (!/<aside [^>]*className=\{?"dock"[^>]*style=\{\{ order: dockLeft \? -1 : 0/.test(app)) {
+  if (!/<aside [^>]*className=\{wsDock \? "dock [^"]+" : "dock"\}[^>]*style=\{\{ order: dockLeft \? -1 : 0/.test(app)) {
     fail("App.tsx: `.dock`'s order is not `dockLeft ? -1 : 0` — the dock no longer follows dock_side");
   } else ok("the dock's position inside .space follows dock_side");
   if (!/const dockLeft = settings\.dock_side === "left";/.test(app) || !/const merged = railsMerged\(settings\);/.test(app)) {
@@ -398,15 +398,11 @@ if (S.SETTINGS_REV < 4) fail(`SETTINGS_REV is ${S.SETTINGS_REV} — the dock_sid
     const a = app.indexOf('<div className="dock-lower"');
     return a < 0 ? "" : app.slice(a, app.indexOf("</div>", a));
   })();
-  // A workspace's dock (wsdock.ts) is a third render, in an aside of its own
-  // that shows only where no place does: never beside the other two.
-  const wsAside = (() => {
-    const a = app.indexOf('<aside className="dock" data-testid="ws-dock"');
-    return a < 0 ? "" : app.slice(a, app.indexOf("</aside>", a));
-  })();
-  const wsTerms = [...wsAside.matchAll(/<TerminalTabs /g)].length;
-  if (wsAside && (wsTerms !== 1 || !/\{dockShown && wsDock && \(\s*$/.test(app.slice(0, app.indexOf(wsAside)))))
-    fail("the workspace's dock must render exactly one TerminalTabs, gated on `dockShown && wsDock`");
+  // The single dock column also hosts one workspace terminal strip.
+  const wsTerminal = app.match(/<WorkspaceDockTerminal key=\{wsDock\} shown=\{dockShown && wsTerminal\}>[\s\S]*?<\/WorkspaceDockTerminal>/)?.[0] ?? "";
+  const wsTerms = [...wsTerminal.matchAll(/<TerminalTabs /g)].length;
+  if (wsTerms !== 1 || !app.includes('(wsDock || (dockShown && selected && sel))'))
+    fail("the dock must host one workspace TerminalTabs that attaches on its first visible visit");
   const terms = [...app.matchAll(/<TerminalTabs /g)].length - wsTerms;
   if (!body || !lower) fail("App.tsx: the dock body or the `.dock-lower` slot is gone — renamed?");
   else {

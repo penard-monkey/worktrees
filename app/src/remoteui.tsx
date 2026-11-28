@@ -23,16 +23,20 @@ export function useNow(ms = 250): number {
   return Date.now();
 }
 
-/** Host policy lets agents act unprompted (Codex permissions other than
- *  `ask`): what §1.1's label adds `instruct` alone for. `false` until read. */
+/** Host policy lets agents act unprompted (Codex or Kimi permissions other
+ *  than `ask`): what §1.1's label adds `instruct` alone for. `false` until
+ *  read; a host older than Kimi's row answers it `unknown command`, which
+ *  leaves Codex's answer alone. */
 export function useUnprompted(): boolean {
-  const [mode, setMode] = useState<string | null>(null);
+  const [codex, setCodex] = useState<string | null>(null);
+  const [kimi, setKimi] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
-    invoke<string>("get_codex_permissions").then((m) => live && setMode(m), () => {});
+    invoke<string>("get_codex_permissions").then((m) => live && setCodex(m), () => {});
+    invoke<{ value: string }>("get_kimi_permissions").then((m) => live && setKimi(m.value), () => {});
     return () => { live = false; };
   }, []);
-  return mode !== null && mode !== "ask";
+  return (codex !== null && codex !== "ask") || (kimi !== null && kimi !== "ask");
 }
 
 export type ProjectRef = { root: string; name: string };

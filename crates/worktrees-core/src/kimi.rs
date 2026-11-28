@@ -235,7 +235,8 @@ fn ty(v: &serde_json::Value) -> &str {
 }
 
 /// The newest turn among `lines` (oldest first), or `None` when they hold no
-/// event at all. A tail with events but no turn boundary is a turn that began
+/// event at all. Reads kimi 2.2.0's records and 2.8.1's, which dropped the
+/// `agent.turn.*` pair (fixtures under `kimi-wire/<version>/`). A tail with events but no turn boundary is a turn that began
 /// before the tail did — an ended turn always has its end within reach, since
 /// only a handful of bookkeeping records follow `agent.turn.ended`.
 pub fn wire_turn(lines: &[String]) -> Option<KimiTurn> {
@@ -253,6 +254,21 @@ pub fn wire_turn(lines: &[String]) -> Option<KimiTurn> {
                     open = true;
                 }
             }
+            // 2.2.0 writes `agent.turn.ended` (`outcome`) and then
+            // `turn.ended` (`reason`); 2.8.1 writes only the second, so it is
+            // the one read, and the first is met only in a tail cut between
+            // the two. `continuation: "turn"` (2.8.1) chains the next turn —
+            // a background task's notification — a millisecond later: not
+            // done, busy.
+            "turn.ended" => {
+                let at = v.get("time").and_then(|t| t.as_i64()).map(|ms| ms / 1000);
+                return Some(match v.get("reason").and_then(|o| o.as_str()) {
+                    _ if open => KimiTurn::Waiting,
+                    Some("completed") if v.get("continuation").and_then(|c| c.as_str()) == Some("turn") => KimiTurn::Busy,
+                    Some("completed") => KimiTurn::Done { at },
+                    _ => KimiTurn::Aborted,
+                });
+            }
             "agent.turn.ended" => {
                 return Some(match v.get("outcome").and_then(|o| o.as_str()) {
                     Some("done") if !open => KimiTurn::Done { at: v.get("time").and_then(|t| t.as_i64()).map(|ms| ms / 1000) },
@@ -260,7 +276,9 @@ pub fn wire_turn(lines: &[String]) -> Option<KimiTurn> {
                     _ => KimiTurn::Aborted,
                 });
             }
-            "agent.turn.started" => return Some(if open { KimiTurn::Waiting } else { KimiTurn::Busy }),
+            // A turn's first record: `agent.turn.started` on 2.2.0, where
+            // `turn.prompt` follows it; `turn.prompt` alone on 2.8.1.
+            "agent.turn.started" | "turn.prompt" => return Some(if open { KimiTurn::Waiting } else { KimiTurn::Busy }),
             _ => {}
         }
     }
@@ -282,6 +300,159 @@ pub fn wire_model(lines: &[String]) -> Option<String> {
             _ => None,
         }
     })
+}
+
+// ── permissions ─────────────────────────────────────────────────────────────
+
+/// How much a Worktrees-launched kimi may do without asking: kimi's own three
+/// permission modes (measured on 2.8.1, `docs/proposals/harness-permission-modes.md`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Permissions {
+    /// kimi's `manual`, its default with no flag: every shell command that is
+    /// not read-only asks. Edits inside the place do not (kimi approves
+    /// Write/Edit within a git work tree in every mode).
+    Ask,
+    /// `--yolo`, kimi's "Ask When Needed": only its dangerous list (`rm -rf`
+    /// outside `/tmp`, power-off and disk-format commands), `.git` control
+    /// paths, sensitive files, questions and plans ask. The default.
+    AskWhenNeeded,
+    /// `--auto`, kimi's "Never Ask": only a plan in plan mode waits.
+    NeverAsk,
+}
+
+impl Permissions {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "ask" => Some(Self::Ask),
+            "ask-when-needed" => Some(Self::AskWhenNeeded),
+            "never-ask" => Some(Self::NeverAsk),
+            _ => None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::AskWhenNeeded => "ask-when-needed",
+            Self::NeverAsk => "never-ask",
+        }
+    }
+    /// kimi's own name for the mode, as its status row draws it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ask => "Always Ask",
+            Self::AskWhenNeeded => "Ask When Needed",
+            Self::NeverAsk => "Never Ask",
+        }
+    }
+    /// The launch flag. Always Ask has none: kimi has no flag or variable for
+    /// it, which is why a resume cannot be brought back to it (`resume_note`).
+    pub fn flag(self) -> Option<&'static str> {
+        match self {
+            Self::Ask => None,
+            Self::AskWhenNeeded => Some("--yolo"),
+            Self::NeverAsk => Some("--auto"),
+        }
+    }
+    /// The mode kimi records in a session's wire log (`permission.set_mode`).
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Ask => "manual",
+            Self::AskWhenNeeded => "yolo",
+            Self::NeverAsk => "auto",
+        }
+    }
+    fn from_wire(s: &str) -> Option<Self> {
+        [Self::Ask, Self::AskWhenNeeded, Self::NeverAsk].into_iter().find(|p| p.wire() == s)
+    }
+}
+
+/// What a fresh install gets: the owner's choice of 2026-11-27, "like Claude's
+/// auto mode" (and Balanced, which is exactly the shipped defaults).
+pub const DEFAULT_PERMISSIONS: Permissions = Permissions::AskWhenNeeded;
+
+/// The variable `permissions()` reads below host policy.
+pub const PERMISSIONS_ENV: &str = "WORKTREES_KIMI_PERMISSIONS";
+
+/// The engine's host policy (worktrees-api `hostpolicy`), as for Codex's
+/// `codex::set_permissions_override`: set at the engine's boot and by the
+/// Settings click, never by a client loading.
+static PERMISSIONS_OVERRIDE: Mutex<Option<Permissions>> = Mutex::new(None);
+
+pub fn set_permissions_override(p: Option<Permissions>) {
+    *PERMISSIONS_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()) = p;
+}
+
+/// host policy > `$WORKTREES_KIMI_PERMISSIONS` > `kimi_permissions` user
+/// config > ask-when-needed. An unknown value falls through.
+pub fn permissions() -> Permissions {
+    permissions_origin().0
+}
+
+pub fn permissions_origin() -> (Permissions, crate::config::Origin) {
+    let host = *PERMISSIONS_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner());
+    let env = crate::config::env_var(PERMISSIONS_ENV);
+    let cfg = crate::config::user_cfg("kimi_permissions");
+    permissions_origin_from(host, env, cfg.as_deref())
+}
+
+pub fn permissions_origin_from(
+    host: Option<Permissions>,
+    env: Option<crate::config::EnvVar>,
+    cfg: Option<&str>,
+) -> (Permissions, crate::config::Origin) {
+    use crate::config::Source;
+    let (p, source) = if let Some(p) = host {
+        (p, Source::Host)
+    } else if let Some(p) = env.as_ref().and_then(|e| Permissions::parse(&e.value)) {
+        (p, Source::Env)
+    } else if let Some(p) = cfg.and_then(Permissions::parse) {
+        (p, Source::Config)
+    } else {
+        (DEFAULT_PERMISSIONS, Source::Default)
+    };
+    (p, crate::config::Origin { source, env })
+}
+
+/// Everything the permission mode adds to a kimi launch (`Kimi::place_flags`):
+/// fresh and resume alike, since kimi takes the flag on `-S <id>` too.
+pub fn permission_flags(mode: Permissions) -> Vec<String> {
+    mode.flag().map(|f| vec![f.to_string()]).unwrap_or_default()
+}
+
+/// The newest permission mode a session's wire log records. kimi writes
+/// `permission.set_mode` at the start and at every switch, and REPLAYS it on
+/// resume: `kimi -S <id>` with no flag comes back in that mode (measured,
+/// 2.8.1). The whole file is scanned, once, because the mode is set early and
+/// a long session's tail no longer holds it.
+pub fn session_mode(wire: &Path) -> Option<Permissions> {
+    use std::io::BufRead;
+    let f = std::fs::File::open(wire).ok()?;
+    let mut last = None;
+    for l in std::io::BufReader::new(f).lines().map_while(Result::ok) {
+        if !l.contains("permission.set_mode") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&l) else { continue };
+        if ty(&v) == "permission.set_mode" && v.get("agentId").and_then(|a| a.as_str()).is_none_or(|a| a == "main") {
+            last = v.get("mode").and_then(|m| m.as_str()).and_then(Permissions::from_wire).or(last);
+        }
+    }
+    last
+}
+
+/// What a launch should say when a resume CANNOT honour `mode`: only Always
+/// Ask has no flag, so a conversation last left in another mode comes back in
+/// it. `None` when the resume will be in `mode` (any flagged mode, or a session
+/// already in Always Ask).
+pub fn resume_note(mode: Permissions, recorded: Option<Permissions>) -> Option<String> {
+    match (mode, recorded) {
+        (Permissions::Ask, Some(r)) if r != Permissions::Ask => Some(format!(
+            "kimi resumes this place's conversation in {}, not Always Ask: kimi keeps a conversation's mode and has no flag \
+             for Always Ask. A new conversation starts in Always Ask; or type /permission in the lane.",
+            r.label()
+        )),
+        _ => None,
+    }
 }
 
 /// Whitespace collapsed, so a wrapped composer and a logged prompt compare.
@@ -345,9 +516,66 @@ pub fn session_tail(path: &Path) -> (Option<String>, Option<KimiTurn>) {
     }
     let prev = cache.get(path).map(|(_, i)| i.clone()).unwrap_or_default();
     let lines = activity::tail_lines_checked(path, activity::ROLLOUT_TAIL_BYTES).unwrap_or_default();
-    let info = TailInfo { model: wire_model(&lines).or(prev.model), turn: wire_turn(&lines).or(prev.turn) };
+    let model = wire_model(&lines).or(prev.model).or_else(|| head_model(path));
+    let info = TailInfo { model, turn: wire_turn(&lines).or(prev.turn) };
     cache.insert(path.to_path_buf(), (len, info.clone()));
     (info.model, info.turn)
+}
+
+/// How far into a wire log the head read goes before it gives up: the
+/// session's records before its first turn, `profile.bind` among them, whose
+/// system prompt alone was ~200 KB on 2.8.1.
+const HEAD_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+static KIMI_HEAD: Mutex<Option<HashMap<PathBuf, Option<String>>>> = Mutex::new(None);
+
+/// The model a session STARTED on, from the records before its first turn
+/// (`profile.bind`, or a switch made before the first message). The tail
+/// cannot be trusted for it: 2.8.1 writes no `llm.request`, so in any log
+/// past `ROLLOUT_TAIL_BYTES` the alias's only record is out of reach, and
+/// every surface showed no model. Read once per log and kept, because the
+/// head of an append-only file never changes; a head with no turn yet (kimi
+/// still writing it) is not kept, so the next poll looks again.
+fn head_model(path: &Path) -> Option<String> {
+    let mut guard = KIMI_HEAD.lock().unwrap_or_else(|e| e.into_inner());
+    let cache = guard.get_or_insert_with(HashMap::new);
+    if let Some(m) = cache.get(path) {
+        return m.clone();
+    }
+    let (model, settled) = read_head_model(path);
+    if settled || model.is_some() {
+        cache.insert(path.to_path_buf(), model.clone());
+    }
+    model
+}
+
+/// (the head's model, whether the head is complete): streamed a line at a
+/// time, stopping at the first turn or `HEAD_MAX_BYTES`, keeping only the
+/// lines that name a `modelAlias`.
+fn read_head_model(path: &Path) -> (Option<String>, bool) {
+    use std::io::{BufRead, Read};
+    let Ok(f) = std::fs::File::open(path) else { return (None, false) };
+    let mut r = std::io::BufReader::new(f).take(HEAD_MAX_BYTES);
+    let mut named = Vec::new();
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match r.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => return (wire_model(&named), r.limit() == 0),
+            Ok(_) => {}
+        }
+        if buf.last() != Some(&b'\n') {
+            // A line kimi is still writing.
+            return (wire_model(&named), r.limit() == 0);
+        }
+        let line = String::from_utf8_lossy(&buf);
+        if line.contains("\"turn.prompt\"") || line.contains("\"agent.turn.started\"") {
+            return (wire_model(&named), true);
+        }
+        if line.contains("\"modelAlias\"") {
+            named.push(line.trim_end().to_string());
+        }
+    }
 }
 
 fn tail(path: &Path) -> Vec<String> {
@@ -602,8 +830,12 @@ pub struct LaneFile {
 }
 
 pub fn lane_file(path: &str) -> Option<LaneFile> {
-    let s = current_session(path)?;
-    let wire = s.wire();
+    lane_file_at(current_session(path)?.wire())
+}
+
+/// `lane_file` for a known wire log, so a test reads a fixture's bytes the
+/// way the poll reads a lane's.
+pub fn lane_file_at(wire: PathBuf) -> Option<LaneFile> {
     let len = std::fs::metadata(&wire).ok()?.len();
     let (model, turn) = session_tail(&wire);
     Some(LaneFile { path: wire, len, model, turn })
@@ -1043,6 +1275,90 @@ mod tests {
         assert_eq!(wire_turn(&[]), None);
     }
 
+    /// kimi 2.8.1 writes no `agent.turn.started` / `agent.turn.ended`: a turn
+    /// opens with `turn.prompt` and closes with `turn.ended` (`reason`), and a
+    /// background task's notification is a turn of its own, chained with
+    /// `continuation: "turn"`. Read on 2.2.0's records alone, a finished 2.8.1
+    /// lane stayed busy on every surface (the owner's `design-simplify-kimi`,
+    /// 2026-11-27). The fixture is that lane's log, cut to events and times.
+    #[test]
+    fn a_2_8_1_turn_reads_from_its_own_records() {
+        let w = lines(&fixture("kimi-wire/2.8.1/background-tasks.jsonl"));
+        assert!(!w.iter().any(|l| l.contains("\"agent.turn.")), "the fixture is 2.8.1's shape");
+        // The whole log: the last turn finished, dated by its `turn.ended`.
+        assert_eq!(wire_turn(&w), Some(KimiTurn::Done { at: Some(1795813984) }));
+        // Its approval, open, is waiting; answered "for this session", busy.
+        let req = w.iter().position(|l| l.contains("\"interaction.request\"")).unwrap();
+        assert_eq!(wire_turn(&w[..=req]), Some(KimiTurn::Waiting));
+        let answered = w.iter().position(|l| l.contains("\"interaction.resolved\"")).unwrap();
+        assert_eq!(wire_turn(&w[..=answered]), Some(KimiTurn::Busy));
+        // A turn that a notification continues is not done: the next one is
+        // already on its way (the two records are a millisecond apart).
+        let chained = w.iter().position(|l| l.contains("\"continuation\":\"turn\"")).unwrap();
+        assert_eq!(wire_turn(&w[..=chained]), Some(KimiTurn::Busy));
+        // The notification's turn started: busy until its own end.
+        assert_eq!(wire_turn(&w[..=chained + 3]), Some(KimiTurn::Busy));
+        // Any other reason ended the turn without finishing it.
+        let esc = r#"{"type":"turn.prompt","turnId":0,"time":1000}
+{"type":"turn.ended","turnId":0,"reason":"cancelled","continuation":"none","time":2000}"#;
+        assert_eq!(wire_turn(&lines(esc)), Some(KimiTurn::Aborted));
+    }
+
+    /// A long 2.8.1 session's log, shaped like the owner's lane's: the alias's
+    /// only record is `profile.bind`, the log's head, its system prompt ~200 KB,
+    /// with more than a tail's worth of records after it (2.8.1 writes no
+    /// `llm.request`). The label came back null until the head was read.
+    fn long_2_8_1_log(dir: &Path, after: &[&str]) -> PathBuf {
+        let fx = fixture("kimi-wire/2.8.1/background-tasks.jsonl");
+        let mut out = String::new();
+        for l in fx.lines() {
+            if l.contains("\"profile.bind\"") {
+                out.push_str(&l.replace("<scrubbed>", &"x".repeat(200_000)));
+            } else {
+                out.push_str(l);
+            }
+            out.push('\n');
+            if l.contains("\"turn.prompt\"") && l.contains("\"turnId\":0") {
+                // The first turn's tool output: enough to push the head out.
+                let filler = r#"{"type":"context.append_loop_event","agentId":"main","event":{"type":"tool.result","output":"PAD"},"time":1795812248400}"#
+                    .replace("PAD", &"y".repeat(1000));
+                for _ in 0..(activity::ROLLOUT_TAIL_BYTES as usize / 1000 + 50) {
+                    out.push_str(&filler);
+                    out.push('\n');
+                }
+            }
+        }
+        for l in after {
+            out.push_str(l);
+            out.push('\n');
+        }
+        let p = dir.join("wire.jsonl");
+        std::fs::write(&p, out).unwrap();
+        p
+    }
+
+    #[test]
+    fn a_long_2_8_1_session_names_its_model_from_the_head() {
+        let t = std::env::temp_dir().join(format!("wt-kimi-head-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        std::fs::create_dir_all(&t).unwrap();
+        let wire = long_2_8_1_log(&t, &[]);
+        let tail = tail(&wire);
+        assert!(!tail.iter().any(|l| l.contains("\"profile.bind\"")), "the alias is outside the tail");
+        let (model, turn) = session_tail(&wire);
+        assert_eq!(model.as_deref(), Some("kimi-code/k3.1-pro"));
+        assert_eq!(turn, Some(KimiTurn::Done { at: Some(1795813984) }));
+        // A `/model` switch later in the session wins over the head's start.
+        let switched = t.join("switched");
+        std::fs::create_dir_all(&switched).unwrap();
+        let wire = long_2_8_1_log(
+            &switched,
+            &[r#"{"type":"config.update","agentId":"main","modelAlias":"kimi-code/k3-turbo","time":1795813990000}"#],
+        );
+        assert_eq!(session_tail(&wire).0.as_deref(), Some("kimi-code/k3-turbo"));
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
     #[test]
     fn a_question_is_waiting_too() {
         let w = lines(&fixture("kimi-wire/2.2.0/question.jsonl"));
@@ -1082,6 +1398,75 @@ mod tests {
         assert_eq!(read_screen(""), KimiScreen::Other);
         assert_eq!(screen_from("sh", &fixture("kimi-screen/2.2.0/idle.txt")), KimiScreen::Gone);
         assert_eq!(screen_from("kimi", &fixture("kimi-screen/2.2.0/idle.txt")), KimiScreen::Composer);
+    }
+
+    /// kimi 2.8.1 draws its permission mode's name at the head of the status
+    /// row under the composer (`Ask When Needed` for `--yolo`, `Never Ask` for
+    /// `--auto`) and none in Always Ask. Neither moves the composer's box or the approval's rules, so the
+    /// reader (and the opener's empty-composer wait) read them as before.
+    #[test]
+    fn kimi_2_8_1_screens_read_in_either_permission_mode() {
+        let f = |n: &str| fixture(&format!("kimi-screen/2.8.1/{n}.txt"));
+        assert_eq!(read_screen(&f("yolo-idle")), KimiScreen::Composer);
+        assert_eq!(read_composer(&f("yolo-idle")), Some(Composer { input: String::new(), queued: vec![] }));
+        assert_eq!(read_composer(&f("yolo-resumed")), Some(Composer { input: String::new(), queued: vec![] }));
+        assert_eq!(read_composer(&f("auto-idle")), Some(Composer { input: String::new(), queued: vec![] }));
+        assert_eq!(read_screen(&f("yolo-dangerous")), KimiScreen::Modal);
+        assert_eq!(read_screen(&f("manual-approval")), KimiScreen::Modal);
+        assert_eq!(read_composer(&f("yolo-dangerous")), None);
+    }
+
+    #[test]
+    fn a_permission_mode_is_one_flag_and_ask_when_needed_by_default() {
+        use crate::config::{EnvVar, Source};
+        assert_eq!(permission_flags(Permissions::Ask), Vec::<String>::new());
+        assert_eq!(permission_flags(Permissions::AskWhenNeeded), vec!["--yolo"]);
+        assert_eq!(permission_flags(Permissions::NeverAsk), vec!["--auto"]);
+        for p in [Permissions::Ask, Permissions::AskWhenNeeded, Permissions::NeverAsk] {
+            assert_eq!(Permissions::parse(p.as_str()), Some(p));
+            assert_eq!(Permissions::from_wire(p.wire()), Some(p));
+        }
+        // kimi's own words are not ours: a typo or kimi's name falls through.
+        for bad in ["yolo", "auto", "manual", "never_ask", ""] {
+            assert_eq!(Permissions::parse(bad), None, "{bad}");
+        }
+        let env = |v: &str| Some(EnvVar { name: PERMISSIONS_ENV, value: v.into() });
+        assert_eq!(permissions_origin_from(None, None, None), (Permissions::AskWhenNeeded, crate::config::Origin { source: Source::Default, env: None }));
+        assert_eq!(permissions_origin_from(None, None, Some("ask")).0, Permissions::Ask);
+        assert_eq!(permissions_origin_from(None, env("never-ask"), Some("ask")).0, Permissions::NeverAsk);
+        let (p, o) = permissions_origin_from(Some(Permissions::Ask), env("never-ask"), None);
+        assert_eq!((p, o.source), (Permissions::Ask, Source::Host), "host policy outranks the variable");
+        assert_eq!(permissions_origin_from(None, env("yolo"), Some("ask")).0, Permissions::Ask, "an unknown value falls through");
+    }
+
+    /// The mode a resume comes back in is the session's newest
+    /// `permission.set_mode` (the shape kimi 2.8.1 writes), and only Always
+    /// Ask cannot be restored by a flag.
+    #[test]
+    fn a_resume_keeps_the_sessions_recorded_mode() {
+        let dir = std::env::temp_dir().join(format!("wt-kimi-mode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wire = dir.join("wire.jsonl");
+        std::fs::write(
+            &wire,
+            concat!(
+                "{\"type\":\"permission.set_mode\",\"agentId\":\"main\",\"mode\":\"yolo\",\"time\":1}\n",
+                "{\"type\":\"turn.prompt\",\"agentId\":\"main\",\"input\":[{\"type\":\"text\",\"text\":\"permission.set_mode manual\"}]}\n",
+                "{\"type\":\"permission.set_mode\",\"agentId\":\"sub-1\",\"mode\":\"manual\",\"time\":2}\n",
+                "not json permission.set_mode\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(session_mode(&wire), Some(Permissions::AskWhenNeeded), "a prompt quoting it and a sub-agent's switch do not count");
+        std::fs::write(&wire, "{\"type\":\"permission.set_mode\",\"agentId\":\"main\",\"mode\":\"yolo\"}\n{\"type\":\"permission.set_mode\",\"agentId\":\"main\",\"mode\":\"auto\"}\n").unwrap();
+        assert_eq!(session_mode(&wire), Some(Permissions::NeverAsk), "the newest wins");
+        assert_eq!(session_mode(&dir.join("absent.jsonl")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(resume_note(Permissions::Ask, Some(Permissions::AskWhenNeeded)).unwrap().contains("Ask When Needed"));
+        assert_eq!(resume_note(Permissions::Ask, Some(Permissions::Ask)), None);
+        assert_eq!(resume_note(Permissions::Ask, None), None);
+        assert_eq!(resume_note(Permissions::AskWhenNeeded, Some(Permissions::NeverAsk)), None, "--yolo wins over the recorded mode");
     }
 
     #[test]

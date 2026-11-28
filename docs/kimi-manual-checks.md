@@ -22,9 +22,23 @@ screens and the session layout are pinned by fixtures to one version:
 | wire log: a message queued behind a turn | 2.2.0 | `…/kimi-wire/2.2.0/queued.jsonl` |
 | wire log: turns for the chat (text, tools, approvals, a question, an Esc) | 2.2.0 | `…/kimi-wire/2.2.0/transcript.jsonl` |
 | screens: idle, typed, busy-typed, busy-queued, trust, approval, question | 2.2.0 | `…/kimi-screen/2.2.0/` |
+| screens by permission mode: Ask When Needed idle, its dangerous-command approval, a resume, Always Ask's approval, Never Ask idle | 2.8.1 | `…/kimi-screen/2.8.1/` (its README) |
+| wire log: background-task notifications chained as turns, an approval "for this session", a finished last turn | 2.8.1 | `…/kimi-wire/2.8.1/background-tasks.jsonl` |
 
 The wire fixtures keep only the record types the reader uses, scrubbed of
 kimi's system prompt and every reply; the prompts in them are the probe's own.
+The 2.8.1 one is a real lane's log cut to event types, ids, reasons and
+times, every prompt replaced by `<scrubbed>`.
+
+**2.8.1 changed the wire log's turn records** (found 2026-11-27, a finished
+lane green on every surface): no `agent.turn.started` / `agent.turn.ended`
+and no `llm.request`. A turn opens with `turn.prompt` and closes with
+`turn.ended` (`reason: completed`, `continuation: "turn"` when a background
+task's notification starts the next turn a millisecond later, `"none"` when
+nothing follows). `kimi::wire_turn` reads both shapes. The model alias is now
+only in `profile.bind` (the log's 4th line, ~200 KB with the system prompt)
+and, presumably, `config.update` on a switch (not measured on 2.8.1), so the
+reader takes the session's start from the head (`kimi::head_model`).
 
 Last run: 2026-10-19, kimi 2.2.0, `kimi-code/kimi-for-coding-highspeed`,
 through the branch's release CLI on a private tmux socket (`TMUX_TMPDIR` with
@@ -101,9 +115,10 @@ first `agent.turn.started`, at the first message; a kimi that wrote
 send nothing, and check `place_status` says idle.
 
 - [x] `wait until: idle` called right after `new` (trusted, so no modal) holds while kimi starts and while the opener is pending, then returns `idle` with a `last_done` once the brief's turn ends.
-- [ ] An approval (a Bash call) is **waiting** in `place_status` — from kimi's log (`interaction.request`), no screen needed; a question (`AskUserQuestion`) likewise. (The log records were captured live; the reading is unit-tested on them.)
-- [x] After the turn: **idle**, `last_done` from `agent.turn.ended`'s own time, and the agent row's `model` is the alias.
-- [ ] Esc mid-turn: `agent.turn.ended` with `outcome: aborted` → idle with no `last_done` (an Esc is not finished work). (Captured live; unit-tested.)
+- [ ] An approval (a Bash call) is **waiting** in `place_status` — from kimi's log (`interaction.request`), no screen needed; a question (`AskUserQuestion`) likewise. (The log records were captured live on 2.2.0 and, for an approval, on 2.8.1; the reading is unit-tested on both.)
+- [x] After the turn: **idle**, `last_done` from the turn's own end record (`agent.turn.ended` on 2.2.0, `turn.ended` on 2.8.1). **2.8.1, 2026-11-27**: a live lane that finished at 13:13 read `idle`, `last_done` 13:13, through the branch's release CLI's `place_status` and `wait until: idle` (it returned at once); the installed 0.55.0 said `busy` and `wait` timed out. A second turn the same lane ran from 13:28 (six turns chained by background-task notices) read `busy` throughout and `idle` with `last_done` 13:49:17 within one 15 s poll of its `turn.ended`; 0.55.0 still said `busy`.
+- [x] The agent row's `model` is the alias. Passed on 2.2.0. On 2.8.1 the alias's only record is `profile.bind`, the log's head (`llm.request` is gone), so it is read from the head once per log (`kimi::head_model`); a `/model` switch in the tail still wins. **2.8.1, 2026-11-27**: the live lane's 2 MB log, `model: null` before, `kimi-code/k3.1-pro` after.
+- [ ] Esc mid-turn: `agent.turn.ended` with `outcome: aborted` → idle with no `last_done` (an Esc is not finished work). (Captured live on 2.2.0; unit-tested.) On 2.8.1 an Esc's `turn.ended` `reason` is NOT measured; any reason but `completed` reads as aborted.
 
 ## 4. send
 
@@ -159,6 +174,20 @@ wt open lane1 --ai kimi -r --no-attach --no-spare
 - [x] With no session for the place, `-r` launches fresh (never `-c`, which picks the newest session for the DIRECTORY, a removed place's included).
 - [x] `-S` with an id kimi does not have: `Session "…" not found`, exit 1, nothing created (why the id is resolved, never guessed).
 
+## 5b. Permission mode (2.8.1, 2026-11-27)
+
+Settings → Agent policy → Kimi permissions (host policy `kimi_permissions`,
+then `$WORKTREES_KIMI_PERMISSIONS`, then `kimi_permissions` in config.toml,
+then Ask When Needed). Findings and the "risky" table:
+`docs/proposals/harness-permission-modes.md`.
+
+- [x] Ask When Needed launches `kimi --yolo …`, Never Ask `kimi --auto …`, Always Ask adds nothing; a resume is `kimi --yolo -S '<id>'`. kimi's status row starts with `Ask When Needed` / `Never Ask` and names nothing in Always Ask.
+- [x] Ask When Needed still asks for `rm -rf` inside the place ("Dangerous: recursive delete"), not for a commit, network, an edit or a write outside the place. Always Ask asks for `touch`. The file tools refuse `.env` in every mode.
+- [x] The opener's empty-composer wait and the approval-as-modal read work on every mode's screen (`kimi_2_8_1_screens_read_in_either_permission_mode`). Not yet driven end to end through `worktrees new --brief`.
+- [x] A resume keeps the conversation's mode: `kimi -S <id>` with no flag comes back in the mode it was last in, and kimi has no flag or variable for Always Ask. So under Always Ask a launch that may resume warns, and `doctor --kimi` warns, when the place's conversation is in another mode.
+- [x] `/permission` and `/yolo` change the session only: `config.toml` and `tui.toml` unchanged (md5). Shift+Tab is plan mode.
+- [ ] Never Ask, by hand, in a scratch repo with nothing of yours in it: a question is refused to the agent ("decide and continue"), and only a plan in plan mode waits.
+
 ## 6. Model label
 
 - [x] `place_status`'s kimi row carries the alias (`kimi-code/…`).
@@ -194,6 +223,7 @@ wt open lane1 --ai kimi --no-attach --no-spare   # after a close
 ## 9. doctor
 
 - [ ] `sessions_missed` is 0 for every place (`doctor --kimi --json`): kimi's workspace-dir naming still matches `kimi::slug`.
+- [x] `worktrees doctor --kimi` says the permission mode and what decided it (`perms Ask When Needed (--yolo), from the default`), and `--json` has it under `permissions`.
 - [x] `worktrees doctor --kimi` lists the aliases from kimi's config with kimi's default marked, the trust posture, the MCP state and the last opener line — and nothing else from that config file.
 
 ## 9b. Plan usage (`kimi_usage`)

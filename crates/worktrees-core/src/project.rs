@@ -343,6 +343,7 @@ impl Project {
         let now = now_epoch();
         let reg = self.registrations();
         let panes = tmux::PaneList::fetch_unnamed().unwrap_or_default();
+        let ai_word = adopt_ai_word();
         let mut rows = Vec::new();
         for d in &dirs {
             let slug = basename(d);
@@ -368,7 +369,7 @@ impl Project {
                 let cepoch = self.commit_epoch(d);
                 let age = if cepoch > 0 { self.clock.ago(cepoch, now) } else { "-".to_string() };
                 let bcol = if branch.replace('/', "-") != slug { render::CYAN } else { "" };
-                let tmux_cell = if self.owns_session(&slug, &self.session_name(&slug), &panes) {
+                let tmux_cell = if self.place_session(&slug, d, Some(&panes), &ai_word).1 {
                     format!("{}●{}", render::GREEN, render::NC)
                 } else {
                     "○".to_string()
@@ -468,30 +469,43 @@ impl Project {
         format!("{}\n", serde_json::to_string(&self.ls()).unwrap_or_default())
     }
 
-    fn place_json(&self, dir: &str, is_main: bool, reg: &HashSet<String>, panes: Option<&tmux::PaneList>, ai_word: &str, base_ref: &str, claude_root: &Path) -> Place {
-        let slug = if is_main { "(main)".to_string() } else { basename(dir) };
-        let canonical = self.session_name(&slug);
-        let panes = panes.map(|pl| pl.for_place(&canonical, dir, self.place_exclude(&slug)));
+    /// The place's tmux session and whether it is up: what `ls --json`'s
+    /// `tmux_session` and the table's TMUX column both say. Up means a
+    /// session EXISTS for the place (it is open), not that an agent runs in
+    /// it (`agent_sessions.*.up` answers that).
+    ///
+    /// Canonical name first, else any session with a pane cwd'd in this dir
+    /// — the SAME session `open` reuses (`live_session_in`, the one rule).
+    /// Without the adoption an adopted (foreign-named) session read as
+    /// "down", the app never mounted its terminal, and Enter looked dead.
+    ///
+    /// Answered from the prefetched pane list — zero per-place tmux
+    /// shell-outs. The canonical check used `session_exists`, which is its
+    /// own `list-sessions`, so an N-place snapshot paid N of them every
+    /// poll. `has_session` is exact-match over the same snapshot and every
+    /// live session has at least one pane, so `list-panes -a` names them all.
+    ///
+    /// Else a provider's `~agent~<id>` sidecar, the only session a kimi or
+    /// Codex lane may have: the table once asked for the canonical name
+    /// alone and drew such a lane `○` while `--json` called it up.
+    pub fn place_session(&self, slug: &str, dir: &str, panes: Option<&tmux::PaneList>, ai_word: &str) -> (String, bool) {
+        let canonical = self.session_name(slug);
+        let panes = panes.map(|pl| pl.for_place(&canonical, dir, self.place_exclude(slug)));
         let panes = panes.as_deref();
+        if let Some(live) = panes.and_then(|pl| self.live_session_in(slug, dir, pl, ai_word)) {
+            return (live, true);
+        }
         let sidecar = crate::provider::PROVIDERS.iter().map(|p| p.sidecar_name(&canonical))
             .find(|name| panes.is_some_and(|pl| pl.has_session(name)));
-        // Canonical name first, else any session with a pane cwd'd in this dir
-        // — the SAME session `open` reuses (`live_session_in`, the one rule).
-        // Without the adoption an adopted (foreign-named) session read as
-        // "down", the app never mounted its terminal, and Enter looked dead.
-        //
-        // Answered from the prefetched pane list — zero per-place tmux
-        // shell-outs. The canonical check used `session_exists`, which is its
-        // own `list-sessions`, so an N-place snapshot paid N of them every
-        // poll. `has_session` is exact-match over the same snapshot and every
-        // live session has at least one pane, so `list-panes -a` names them all.
-        let (session, tmux_up) = if let Some(live) = panes.and_then(|pl| self.live_session_in(&slug, dir, pl, ai_word)) {
-            (live, true)
-        } else if let Some(sidecar) = sidecar {
-            (sidecar, true)
-        } else {
-            (canonical, false)
-        };
+        match sidecar {
+            Some(sidecar) => (sidecar, true),
+            None => (canonical, false),
+        }
+    }
+
+    fn place_json(&self, dir: &str, is_main: bool, reg: &HashSet<String>, panes: Option<&tmux::PaneList>, ai_word: &str, base_ref: &str, claude_root: &Path) -> Place {
+        let slug = if is_main { "(main)".to_string() } else { basename(dir) };
+        let (session, tmux_up) = self.place_session(&slug, dir, panes, ai_word);
         let cdir = claude_dir_in(claude_root, dir);
         let cpresent = claude_has_session(&cdir);
         let bepoch = self.clock.stat_birth(dir);

@@ -30,7 +30,7 @@ export type DiskAt = { scope: DiskScope; path?: string };
  *  locations that LOOK the same compare equal. */
 export type Loc = {
   place: { repo: string; slug: string } | null;
-  ws?: { id: string; tab: WsTab; doc?: string; chat?: string; hist?: { at?: string } };
+  ws?: { id: string; tab: WsTab; terminal?: true; doc?: string; chat?: string; hist?: { at?: string } };
   agent?: string;
   dock?: { tab: DockTab; file?: { path: string; line?: number; col?: number }; doc?: string; shell?: number };
   /** Disk, drawn over what the rest of the location shows. That rest stays a
@@ -64,7 +64,7 @@ export const normalize = (l: Loc): Loc => {
   return l.disk ? { ...out, disk: diskAt(l.disk) } : out;
 };
 const under = (l: Loc): Loc => {
-  if (!l.place) return l.ws ? { place: null, ws: { id: l.ws.id, tab: l.ws.tab, ...((l.ws.tab === "ideas" || l.ws.tab === "memory") && l.ws.doc ? { doc: l.ws.doc } : {}), ...(l.ws.chat ? { chat: l.ws.chat } : {}), ...(l.ws.tab === "memory" && l.ws.hist ? { hist: l.ws.hist.at ? { at: l.ws.hist.at } : {} } : {}) } } : { place: null };
+  if (!l.place) return l.ws ? { place: null, ws: { id: l.ws.id, tab: l.ws.tab, ...(l.ws.terminal ? { terminal: true as const } : {}), ...((l.ws.tab === "ideas" || l.ws.tab === "memory") && l.ws.doc ? { doc: l.ws.doc } : {}), ...(l.ws.chat ? { chat: l.ws.chat } : {}), ...(l.ws.tab === "memory" && l.ws.hist ? { hist: l.ws.hist.at ? { at: l.ws.hist.at } : {} } : {}) } } : { place: null };
   const out: Loc = { place: { repo: l.place.repo, slug: l.place.slug } };
   if (l.agent) out.agent = l.agent;
   if (l.dock) {
@@ -187,7 +187,7 @@ export const label = (l: Loc, nameOf?: (repo: string, slug: string) => string, w
     if (!l.ws) return "Home";
     const chat = l.ws.chat ? chatName?.(l.ws.id, l.ws.chat) ?? "a chat" : null;
     const hist = l.ws.hist ? (l.ws.hist.at ? "A change in History" : "History") : null;
-    return [wsName?.(l.ws.id) ?? "A workspace", chat, WS_TAB_LABEL[l.ws.tab], hist].filter(Boolean).join(" · ");
+    return [wsName?.(l.ws.id) ?? "A workspace", chat, l.ws.terminal ? "Terminal" : WS_TAB_LABEL[l.ws.tab], hist].filter(Boolean).join(" · ");
   }
   const parts = [nameOf?.(l.place.repo, l.place.slug) ?? l.place.slug];
   const d = l.dock;

@@ -81,7 +81,7 @@ const UPDATE = lines.slice(from, to + 1).join("\n");
 const uSrc = `
 type DockPatch = any; type PlacePanels = any; type Settings = any;
 export function build(env: any) {
-  const { useCallback, setSettings, selRef, wsDockRef, WORKSPACE_SCOPE, hydrated, preHydration, panelsFor, placeKey, applySettings, saveSettings } = env;
+  const { useCallback, setSettings, selRef, wsDockRef, WORKSPACE_SCOPE, hydrated, preHydration, panelsFor, placeKey, workspaceTerminalSelected, applySettings, saveSettings } = env;
 ${UPDATE}
   return updatePanels;
 }`;
@@ -100,6 +100,7 @@ function world(state, slug, isHydrated = true, ws = null) {
     hydrated: { current: isHydrated },
     preHydration: { current: {} },
     panelsFor: S.panelsFor, placeKey: S.placeKey,
+    workspaceTerminalSelected: (stored) => stored?.workspace_terminal ?? (stored?.dock_tab === "terminal"),
     applySettings: () => {},
     saveSettings: (s) => { w.saved = s; },
   };
@@ -231,16 +232,18 @@ const wp = world(s, "a", false);
 wp.update({ dock_open: true });
 eq("pre-hydration, the stash never holds a view", "agent_view" in wp.preHydration.current, false);
 
-// ── 4b. a workspace's dock (wsdock.ts) is its own record and nobody's seed ──
+// ── 4b. a workspace remembers its dock and contributes only to the width seed ──
 const WS = "~|01WS";
 const ww = world(s, null, true, "01WS");
 ww.update({ dock_open: true });
-eq("a workspace's ⌘J writes the workspace's record", ww.state.place_panels[WS], { dock_open: true, dock_tab: "terminal", dock_width: s.dock_width });
+eq("a workspace's ⌘J writes the workspace's record", ww.state.place_panels[WS], { dock_open: true, dock_tab: "terminal", workspace_terminal: false });
 eq("…and no global moves", flat(ww.state), flat(s));
 ok("…and no place's record is touched", Object.keys(s.place_panels).every((k) => ww.state.place_panels[k] === s.place_panels[k]));
-ww.update({ dock_tab: "files", dock_width: 333 });
-eq("a workspace never takes a dock tab, and keeps its own width", ww.state.place_panels[WS], { dock_open: true, dock_tab: "terminal", dock_width: 333 });
-eq("…still no global", flat(ww.state), flat(s));
+ww.update({ dock_tab: "terminal", dock_width: 333 });
+eq("a workspace stores its Terminal selection and width", ww.state.place_panels[WS], { dock_open: true, dock_tab: "terminal", workspace_terminal: true, dock_width: 333 });
+eq("…only the width becomes the shared seed", flat(ww.state), { ...flat(s), dock_width: 333 });
+ww.update({ dock_open: true }, { id: "01WS", terminal: false });
+eq("a workspace can select a reference panel and retain its compatibility key", ww.state.place_panels[WS], { dock_open: true, dock_tab: "terminal", workspace_terminal: false, dock_width: 333 });
 ww.update((cur) => ({ dock_open: !cur.dock_open }));
 eq("the function form toggles the workspace's own dock", ww.state.place_panels[WS].dock_open, false);
 const back = world(ww.state, "a");
@@ -271,7 +274,7 @@ const isComment = (l) => /^\s*(\/\/|\*|\/\*)/.test(l);
 const stray = lines
   .map((l, i) => ({ l, i }))
   .filter(({ l, i }) => l.includes("agent_view") && !isComment(l) && !(i >= from && i <= to)
-    && !l.includes('Omit<PlacePanels, "agent_view">'));
+    && !/^type DockPatch = /.test(l));
 eq("App.tsx names agent_view in code only inside updatePanels", stray.map(({ l, i }) => `${i + 1}: ${l.trim()}`), []);
 
 if (failed) {

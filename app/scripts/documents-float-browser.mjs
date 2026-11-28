@@ -33,16 +33,16 @@ async function main(page, betas = ["beta_ideas", "beta_workspace_chats"]) {
   if (betas.includes("beta_ideas")) for (const i of [JELLY, GPU]) await call(page, "workspace_link_idea", { id, idea: i });
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   await page.locator("[data-testid=ws-name]", { hasText: "Everything" }).first().click();
-  await page.waitForSelector("[data-testid=ws-tab]");
+  await page.waitForSelector("[data-workspace-panel]");
   return id;
 }
 async function idea(page, id = JELLY) {
-  await page.click("[data-testid=ws-tab][data-tab=ideas]");
+  await page.click("[data-workspace-panel=ideas]");
   await page.locator(`.wsf-ideas [data-idea='${id}']`).first().click();
   await isDoc(page, id);
 }
 async function memory(page, path = "MEMORY.md") {
-  await page.click("[data-testid=ws-tab][data-tab=memory]");
+  await page.click("[data-workspace-panel=memory]");
   await isDoc(page, "MEMORY.md");
   if (path !== "MEMORY.md") { await page.locator(`[data-testid=memory-file][data-path='${path}']`).first().click(); await isDoc(page, path); }
 }
@@ -172,7 +172,7 @@ async function memories(page, tag, name) {
   await until(w, () => /Saved/.test(document.querySelector("[data-testid=ideas-save]")?.textContent ?? ""));
   ok(/Dock/.test(await w.locator("[data-testid=main-doc-float]").innerText()), `${tag} it has Dock`);
   await w.click("[data-testid=main-doc-float]");
-  ok(await isDoc(page, "topics/nas-layout.md") && await until(page, () => document.querySelector("[data-testid=ws-tab].on")?.dataset.tab === "memory") && !(await page.$("[data-testid=ws-floated]")), `${tag} Dock opens it in its workspace again`);
+  ok(await isDoc(page, "topics/nas-layout.md") && await until(page, () => document.querySelector("[data-testid=ws-frame]:not([hidden])")?.dataset.panel === "memory") && !(await page.$("[data-testid=ws-floated]")), `${tag} Dock opens it in its workspace again`);
   await w.waitForEvent("close", { timeout: 4000 }).catch(() => {});
   ok(w.isClosed(), `${tag} …and the window that was opened for it closes, so a relaunch does not bring it back empty`);
 }

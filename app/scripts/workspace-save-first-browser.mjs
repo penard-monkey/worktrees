@@ -44,7 +44,8 @@ async function boot(page) {
 async function edit(page, chat, how) {
   await row(page, chat).click();
   await page.waitForSelector("[data-testid=ws-chat-col]");
-  await page.click("[data-testid=ws-tab][data-tab=memory]");
+  const memory = page.locator("[data-workspace-panel=memory]");
+  if (await memory.getAttribute("aria-pressed") !== "true") await memory.click();
   await isDoc(page, "MEMORY.md");
   await page.click("[data-testid=main-doc] [data-testid=ideas-mode-edit]");
   await page.waitForSelector("[data-testid=main-doc] .cm-content");
@@ -76,11 +77,11 @@ async function not(page, tag, what, cmd, press) {
   ok(/MINE/.test(await page.locator("[data-testid=main-doc] .cm-content").textContent()) && !!(await page.$("[data-testid=ideas-error], [data-testid=ideas-notice]")), `${tag} …and the text is there, with why`);
 }
 const PRESS = {
-  Close: ["Release order", "workspace_chat_fold", (p) => p.click("[data-testid=ws-chat-close]")],
+  Close: ["Release order", "workspace_chat_fold", async (p) => { await p.getByTestId("ws-chat-menu").click(); await p.getByTestId("ws-chat-close").click(); }],
   "Fold now": ["First look", "workspace_chat_fold", (p) => p.click("[data-testid=ws-chat-fold-now]")],
   Resume: ["First look", "workspace_chat_resume", (p) => p.click("[data-testid=ws-chat-resume]")],
   "New chat": ["Release order", "workspace_chat_start", (p) => p.click("[data-testid=ws-frame-new-chat]")],
-  "Close without folding": ["Release order", "workspace_chat_close", async (p) => { await p.click("[data-testid=ws-chat-close-menu]"); await p.click("[data-testid=ws-chat-close-item]"); if (await p.$("[data-testid=ws-chat-close-item]")) await p.click("[data-testid=ws-chat-close-item]"); }],
+  "Close without folding": ["Release order", "workspace_chat_close", async (p) => { await p.click("[data-testid=ws-chat-menu]"); await p.click("[data-testid=ws-chat-close-item]"); if (await p.$("[data-testid=ws-chat-close-item]")) await p.click("[data-testid=ws-chat-close-item]"); }],
 };
 async function lifecycle(page, tag) {
   for (const [what, [chat, cmd, press]] of Object.entries(PRESS)) {

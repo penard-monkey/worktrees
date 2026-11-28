@@ -1,6 +1,6 @@
 /* A workspace's memory (WorkspaceMemory.tsx). Hue is an edge or a tint; a diff
    row's tint is mixed over the surface it is on, never over transparent. */
-.wsf-side.memory { width: 250px; padding: var(--s2) 0; }
+.wsf-side.memory { padding: var(--s2) 0; }
 .wsm-files { display: flex; flex-direction: column; gap: var(--s1); }
 .wsm-files > .wsc-filter { margin: 0 var(--s2) var(--s1); flex: none; background: var(--bg-abyss); }
 .wsm-files > .ws-ov-none, .wsm-skipped { padding: 0 var(--s3); }
@@ -41,7 +41,7 @@
 .wsm-row.undo { border-left-color: var(--warn); }
 /* Its own width first, not a share of nothing: WKWebView sizes what is in a
    <button> by its content (AGENTS.md), and a basis of 0 has none. */
-.wsm-row-n { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wsm-row-n { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
 .wsm-row-l { color: var(--txt); }
 .wsm-row.undone .wsm-row-n { color: var(--txt); text-decoration: line-through; }
 .wsm-row-u, .wsm-row-d { flex: none; color: var(--txt); font-size: var(--fs-meta); }
@@ -99,4 +99,3 @@
 .wsm-newf { display: flex; flex-direction: column; gap: var(--s1); padding: var(--s1) var(--s2); }
 .wsm-newf .wsm-skipped { padding: 0; }
 .md-link.gone { color: var(--txt-dim); border-bottom-style: dotted; }
-.wsf-dot.new { background: var(--done); }

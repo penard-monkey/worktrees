@@ -46,7 +46,7 @@ EOF
   [ "$status" -eq 0 ]
   tmux_session_exists 'repo-feat-x~agent~kimi'
   local c; c="$(kimi_cmd feat-x)"
-  has "kimi -m 'kimi-code/k3'; exec" "$c"
+  has "kimi --yolo -m 'kimi-code/k3'; exec" "$c"
   ! has "'Read .planning/brief.md and begin.'" "$c"
   # The opener rides a helper the pane starts, aimed at its own pane.
   has "kimi-opener --pane \"\$TMUX_PANE\" --dir '$REPO/.worktrees/feat-x' --since " "$c"
@@ -61,7 +61,7 @@ EOF
   local c; c="$(kimi_cmd feat-x)"
   ! has "kimi-opener" "$c"
   ! has " -m " "$c"
-  has "kimi; exec" "$c"
+  has "kimi --yolo; exec" "$c"
 }
 
 @test "the helper answers its probe, and refuses a pane id that is not one" {
@@ -100,8 +100,42 @@ EOF
   run_wt open feat-x --ai kimi -r --no-attach --no-spare
   [ "$status" -eq 0 ]
   local c; c="$(kimi_cmd feat-x)"
-  has "kimi -S '$id'; exec" "$c"
+  has "kimi --yolo -S '$id'; exec" "$c"
   ! has " -m " "$c"
+}
+
+@test "the permission mode is one flag on every kimi launch: Ask When Needed by default, Always Ask none" {
+  WORKTREES_KIMI_PERMISSIONS=never-ask run_wt new feat-a --ai kimi --no-attach --no-spare
+  [ "$status" -eq 0 ]
+  has "kimi --auto; exec" "$(kimi_cmd feat-a)"
+  WORKTREES_KIMI_PERMISSIONS=ask run_wt new feat-b --ai kimi --no-attach --no-spare
+  [ "$status" -eq 0 ]
+  has "kimi; exec" "$(kimi_cmd feat-b)"
+  ! has "--yolo" "$(kimi_cmd feat-b)" || false
+  # kimi's own word is not ours: it falls through to the default.
+  WORKTREES_KIMI_PERMISSIONS=yolo run_wt new feat-c --ai kimi --no-attach --no-spare
+  [ "$status" -eq 0 ]
+  has "kimi --yolo; exec" "$(kimi_cmd feat-c)"
+}
+
+@test "under Always Ask, a resume of a conversation kimi left in another mode says so" {
+  run_wt new feat-x --ai kimi --no-attach --no-spare
+  [ "$status" -eq 0 ]
+  run_wt close feat-x -y
+  local id=session_0123abcd-0000-4000-8000-00000000cafe
+  local d="$HOME/.kimi-code/sessions/wd_feat-x_000000000000/$id"
+  mkdir -p "$d/agents/main"
+  local now; now=$(( $(date +%s) * 1000 + 999000 ))
+  printf '{"id":"%s","cwd":"%s","createdAt":%s,"updatedAt":%s}' "$id" "$REPO/.worktrees/feat-x" "$now" "$now" > "$d/state.json"
+  printf '{"type":"permission.set_mode","agentId":"main","mode":"yolo","time":1}\n' > "$d/agents/main/wire.jsonl"
+  WORKTREES_KIMI_PERMISSIONS=ask run_wt open feat-x --ai kimi -r --no-attach --no-spare
+  [ "$status" -eq 0 ]
+  has "kimi -S '$id'; exec" "$(kimi_cmd feat-x)"
+  has "resumes this place's conversation in Ask When Needed, not Always Ask" "$output"
+  # The doctor says the mode and where it came from, and the same warning.
+  WORKTREES_KIMI_PERMISSIONS=ask run_wt -C "$REPO/.worktrees/feat-x" doctor --kimi
+  has "perms Always Ask, from WORKTREES_KIMI_PERMISSIONS" "$output"
+  has "not Always Ask" "$output"
 }
 
 @test "trust kimi starts this repo's lanes trusted for that launch only, and revokes" {

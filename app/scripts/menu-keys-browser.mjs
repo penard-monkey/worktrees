@@ -56,7 +56,6 @@ async function chat(page, tag) {
   await page.locator("[data-testid=ws-chat-row]", { hasText: "Release order" }).first().click();
   await page.waitForSelector("[data-testid=ws-chat-col]");
   await menu(page, tag, "a chat's menu", "[data-testid=ws-chat-menu]");
-  await menu(page, tag, "its close menu", "[data-testid=ws-chat-close-menu]");
   // An act of it, by key.
   await page.locator("[data-testid=ws-chat-menu]").focus();
   await press(page, "Enter");
@@ -64,12 +63,14 @@ async function chat(page, tag) {
   ok(await until(page, () => document.activeElement?.dataset?.testid === "ws-chat-rename-input"), `${tag} Enter on Rename… runs it, and its own field has the focus`);
   await press(page, "Escape");
   // What it reads is no menu: a panel, named, and Escape and Tab leave it the same way.
+  await page.getByTestId("ws-chat-menu").focus();
+  await press(page, "Enter");
   const r = page.locator("[data-testid=ws-chat-readsb]");
   await r.focus();
   await press(page, "Enter");
   ok(await until(page, () => { const m = document.querySelector(".ctxmenu"); return m?.getAttribute("role") === "dialog" && !!m.getAttribute("aria-label") && m.contains(document.activeElement); }), `${tag} what it reads is a panel with a name, focused`);
   await press(page, "Escape");
-  ok(await menus(page) === 0 && await r.evaluate((e) => e === document.activeElement), `${tag} …and Escape returns the focus`);
+  ok(await menus(page) === 0 && await page.getByTestId("ws-chat-menu").evaluate((e) => e === document.activeElement), `${tag} …and Escape returns the focus`);
 }
 
 async function nav(page, tag) {
@@ -122,7 +123,7 @@ async function place(page, tag) {
 async function doc(page, tag) {
   await boot(page);
   await page.locator("[data-testid=ws-name]").first().click();
-  await page.click("[data-testid=ws-tab][data-tab=memory]");
+  await page.click("[data-workspace-panel=memory]");
   await until(page, () => document.querySelector("[data-testid=main-doc]")?.dataset.doc === "MEMORY.md");
   await page.locator("[data-testid=ws-chat-row]").first().click();
   await page.waitForSelector("[data-testid=doc-menu-open]");
@@ -132,27 +133,20 @@ async function doc(page, tag) {
 
 async function tabs(page, tag) {
   await boot(page);
-  await page.locator("[data-testid=ws-name]", { hasText: "Everything" }).first().click();
-  await page.waitForSelector("[data-testid=ws-tab]");
-  const st = () => page.evaluate(() => [...document.querySelectorAll("[data-testid=ws-tab]")].map((t) => ({ tab: t.dataset.tab, stop: t.tabIndex === 0, on: t.getAttribute("aria-selected") === "true", focus: t === document.activeElement, panel: t.getAttribute("aria-controls") })));
-  const s = await st();
-  ok(s.filter((t) => t.stop).length === 1 && s.find((t) => t.stop).on, `${tag} one Tab stop: the tab that is on`);
-  ok(await page.evaluate(() => { const on = document.querySelector("[data-testid=ws-tab][aria-selected=true]"), p = document.getElementById(on.getAttribute("aria-controls")); return !!p && p.getAttribute("role") === "tabpanel" && p.getAttribute("aria-labelledby") === on.id && p.checkVisibility(); }), `${tag} its panel is named, and names it`);
-  await page.locator("[data-testid=ws-tab][aria-selected=true]").focus();
-  await press(page, "ArrowRight");
-  let n = await st();
-  ok(n[1].focus && n[0].on, `${tag} → is the next tab's, and does not open it`);
-  await press(page, "End");
-  ok((await st()).at(-1).focus, `${tag} End the last`);
-  await press(page, "ArrowRight");
-  ok((await st())[0].focus, `${tag} → wraps`);
-  await press(page, "ArrowLeft", "Home");
-  ok((await st())[0].focus, `${tag} Home the first`);
-  await press(page, "ArrowRight", "Enter");
-  ok(await until(page, () => document.querySelector("[data-testid=ws-tab].on")?.dataset.tab === "memory"), `${tag} Enter opens it`);
-  n = await st();
-  ok(n[1].on && n[1].stop && n[1].focus && n.filter((t) => t.stop).length === 1, `${tag} …and it has the stop and the focus`);
-  ok(await page.evaluate(() => { const on = document.querySelector("[data-testid=ws-tab][aria-selected=true]"), p = document.getElementById(on.getAttribute("aria-controls")); return !!p && p.checkVisibility() && p.getAttribute("aria-labelledby") === on.id; }), `${tag} …and a panel of its own`);
+  await page.getByTestId("ws-name").filter({ hasText: "Everything" }).first().click();
+  const overview = page.locator("[data-workspace-panel=overview]");
+  const memory = page.locator("[data-workspace-panel=memory]");
+  const dock = page.getByTestId("ws-dock");
+  await overview.focus();
+  await press(page, "ArrowDown");
+  ok(await memory.evaluate((el) => el === document.activeElement) && !await dock.isVisible(), `${tag} ↓ focuses Memory without opening the dock`);
+  await press(page, "End", "ArrowDown");
+  ok(await overview.evaluate((el) => el === document.activeElement), `${tag} ↓ wraps after the last choice`);
+  await press(page, "ArrowDown", "Enter");
+  ok(await memory.getAttribute("aria-pressed") === "true" && await dock.isVisible(), `${tag} Enter opens and names Memory`);
+  ok(await memory.getAttribute("aria-controls") === await dock.getAttribute("id"), `${tag} the button names the panel it controls`);
+  await press(page, "Enter");
+  ok(!await dock.isVisible(), `${tag} Enter on the open choice closes the dock`);
 }
 
 const only = process.env.ONLY?.split(",");

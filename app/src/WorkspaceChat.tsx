@@ -290,7 +290,8 @@ export function WorkspaceChatColumn(props: {
   const row = props.rows.find((r) => r.chat.id === conv) ?? null;
   const c: WsChat | null = row?.chat ?? null;
   const [view, setView] = useState<"chat" | "terminal">("chat");
-  const [menu, setMenu] = useState<{ kind: "chats" | "reads" | "close"; x: number; y: number } | null>(null);
+  const titleButton = useRef<HTMLButtonElement>(null);
+  const [menu, setMenu] = useState<{ kind: "chats" | "reads"; x: number; y: number } | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   /** The engine's own sentence, when it would not fold. */
   const [said, setSaid] = useState<string | null>(null);
@@ -338,11 +339,9 @@ export function WorkspaceChatColumn(props: {
       </div>
     );
   }
-  const at = (kind: "chats" | "reads" | "close") => (e: React.MouseEvent) => {
+  const at = (e: React.MouseEvent) => {
     const r = e.currentTarget.getBoundingClientRect();
-    // What it reads, as it is now.
-    if (kind === "reads") void live.refresh(ws.id);
-    setMenu((m) => (m?.kind === kind ? null : { kind, x: kind === "close" ? r.right - 180 : r.left, y: r.bottom + 4 }));
+    setMenu((m) => m ? null : { kind: "chats", x: r.left, y: r.bottom + 4 });
   };
   const now = foldOf(c, live.sessions);
   const ended = endedLine(c, transcriptGone(reason));
@@ -362,31 +361,29 @@ export function WorkspaceChatColumn(props: {
           <RowNameField key={conv} initial={renaming} label="Chat name" testid="ws-chat-rename-input" className="wsc-rename"
             onSave={rename} onCancel={() => setRenaming(null)} />
         ) : (
-          <button className="wsc-name" data-testid="ws-chat-menu" data-track="workspace.chat.menu" title={`${c.title} · ${stateWords(row)}`} aria-haspopup="menu" aria-expanded={menu?.kind === "chats"} onClick={at("chats")}>
+          <button ref={titleButton} className="wsc-name" data-testid="ws-chat-menu" data-track="workspace.chat.menu" title={`${c.title} · ${stateWords(row)}`} aria-haspopup="menu" aria-expanded={menu?.kind === "chats"} onClick={at}>
             {/* An inner span is the row: WebKit shrink-wraps a <button> that is
                 itself the flex container (AGENTS.md). */}
             <span className="wsc-name-in"><ChatDot state={row.state} /><span className="wsc-name-t">{c.title}</span><Icons.ChevronDown size={11} /></span>
           </button>
         )}
         {model && <span className="agent-model wsc-model" data-testid="ws-chat-model" title={modelOf(c, live.sessions, row.live) ? "the model this chat last replied with" : "the model this chat was started on"}>{who} {model}</span>}
-        <button className="wsc-readsb" data-testid="ws-chat-readsb" data-track="workspace.chat.reads" title="Which projects this chat reads" aria-expanded={menu?.kind === "reads"} onClick={at("reads")}>{readsWords(info.projects)} ▾</button>
-        {c.access === "stale" && <button className="wsc-stale-b" data-testid="ws-chat-stale-chip" title="What it may read has changed since it started" onClick={at("reads")}>its rules changed</button>}
-        {props.mcp && <button className="wsc-stale-b wsc-nomcp" data-testid="ws-chat-no-mcp" title={props.mcp.words} aria-label={`${props.mcp.words} Set up.`} onClick={props.mcp.setUp}>no tools · Set up</button>}
         <span className="wsc-acts">
           {row.live && (
             <span className="agent-view" role="group" aria-label="View">
-              <button className={"agent-view-b" + (term ? "" : " on")} aria-pressed={!term} data-testid="ws-chat-view-chat" onClick={() => setView("chat")}>Chat</button>
-              <button className={"agent-view-b" + (term ? " on" : "")} aria-pressed={term} data-testid="ws-chat-view-terminal" onClick={() => setView("terminal")}>Terminal</button>
+              <button className={"agent-view-b" + (term ? "" : " on")} aria-pressed={!term} data-track="workspace.chat.view.chat" data-testid="ws-chat-view-chat" onClick={() => setView("chat")}>Chat</button>
+              <button className={"agent-view-b" + (term ? " on" : "")} aria-pressed={term} data-track="workspace.chat.view.terminal" data-testid="ws-chat-view-terminal" onClick={() => setView("terminal")}>Terminal</button>
             </span>
           )}
-          {row.live ? (
-            <span className="wsc-close">
-              <button className="ctrl sm" data-testid="ws-chat-close" data-track="workspace.chat.fold" disabled={busy || !!closeItem?.why} title={closeItem?.why ?? closeItem?.title} onClick={() => void fold()}>Close</button>
-              <button className="ctrl sm" data-testid="ws-chat-close-menu" aria-label="More" aria-haspopup="menu" aria-expanded={menu?.kind === "close"} onClick={at("close")}>▾</button>
-            </span>
-          ) : <button className="ctrl sm" data-testid="ws-chat-close-menu" aria-label="More" aria-haspopup="menu" aria-expanded={menu?.kind === "close"} onClick={at("close")}>▾</button>}
         </span>
       </header>
+      {(props.mcp || c.access === "stale" || (term && running && now)) && (
+        <div className="wsc-status" role="status">
+          {props.mcp && <span data-testid="ws-chat-no-mcp" title={props.mcp.words}>No worktrees tools</span>}
+          {c.access === "stale" && <span data-testid="ws-chat-stale-chip">Read access changed</span>}
+          {term && running && now && <span>{now.state === "waiting" ? "The fold is waiting on your answer." : now.state === "checking" ? "Checking the fold…" : "Folding into memory…"}</span>}
+        </div>
+      )}
       {said && (
         <div className="wsc-said" role="alert" data-testid="ws-chat-said">
           <span>{said.replace(/^./, (x) => x.toUpperCase()).replace(/([^.!?])$/, "$1.")}</span>
@@ -436,10 +433,30 @@ export function WorkspaceChatColumn(props: {
         )}
       </div>
       {menu?.kind === "chats" && (
-        <CtxMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
+        <CtxMenu x={menu.x} y={menu.y} onClose={() => { setMenu(null); arm.disarm(); }}>
           <div className="wsc-menu" data-testid="ws-chat-list">
             <button className="pop-item" data-testid="ws-chat-rename" data-track="workspace.chat.rename" onClick={() => { setMenu(null); setRenaming(c.title); }}>Rename…</button>
             <button className="pop-item" data-testid="ws-chat-away" data-track="workspace.chat.away" onClick={() => { setMenu(null); props.away(); }}>Put the chat away</button>
+            <button className="pop-item" data-testid="ws-chat-readsb" data-track="workspace.chat.reads"
+              onClick={() => { void live.refresh(ws.id); setMenu({ ...menu, kind: "reads" }); }}>
+              What this chat reads · {readsWords(info.projects)}
+            </button>
+            {props.mcp && <button className="pop-item" data-track="workspace.chat.setup-tools"
+              title={props.mcp.words} onClick={() => { setMenu(null); props.mcp?.setUp(); }}>Set up worktrees tools</button>}
+            {row.live && <button className="pop-item" data-testid="ws-chat-close" data-track="workspace.chat.fold"
+              disabled={busy || !!closeItem?.why} title={closeItem?.why ?? closeItem?.title}
+              onClick={() => { setMenu(null); void fold(); }}>Close</button>}
+            {row.live && (
+              <button className={"pop-item" + (arm.armed === "close" ? " danger armed" : "")} data-testid="ws-chat-close-item" data-track="workspace.chat.close" title={acts.item("close-none")?.title}
+                onClick={() => { if (row.state !== "busy" || arm.armed === "close") setMenu(null); acts.closeAsk(); }}>
+                {arm.armed === "close" ? "It is working. Close?" : "Close without folding"}
+              </button>
+            )}
+            {row.live && props.terminalCmd.trim() && <button className="pop-item" data-testid="ws-chat-terminal-app" data-track="workspace.chat.terminal-app" onClick={() => { setMenu(null); props.openTerminalApp(c.session); }}>Open in terminal app</button>}
+            <button className={"pop-item danger" + (arm.armed === "delete" ? " armed" : "")} data-testid="ws-chat-delete" data-track="workspace.chat.delete"
+              title={acts.item("delete")?.title} onClick={() => acts.remove(() => setMenu(null))}>
+              {arm.armed === "delete" ? "Delete this chat?" : "Delete"}
+            </button>
             <div className="pop-hint">the workspace's chats</div>
             {props.rows.map((r) => (
               <button key={r.chat.id} className="pop-item" data-testid="ws-chat-list-row" data-track="workspace.chat.pick" data-chat={r.chat.id} title={`${r.chat.title} · ${stateWords(r)}`}
@@ -450,22 +467,7 @@ export function WorkspaceChatColumn(props: {
           </div>
         </CtxMenu>
       )}
-      {menu?.kind === "reads" && <CtxMenu x={menu.x} y={menu.y} panel="What this chat reads" onClose={() => setMenu(null)}><Reads chat={c} projects={info.projects} documents={info.documents ?? []} limits={info.limits} /></CtxMenu>}
-      {menu?.kind === "close" && (
-        <CtxMenu x={menu.x} y={menu.y} onClose={() => { setMenu(null); arm.disarm(); }}>
-          {row.live && (
-            <button className={"pop-item" + (arm.armed === "close" ? " danger armed" : "")} data-testid="ws-chat-close-item" data-track="workspace.chat.close" title={acts.item("close-none")?.title}
-              onClick={() => { if (row.state !== "busy" || arm.armed === "close") setMenu(null); acts.closeAsk(); }}>
-              {arm.armed === "close" ? "It is working. Close?" : "Close without folding"}
-            </button>
-          )}
-          {row.live && props.terminalCmd.trim() && <button className="pop-item" data-testid="ws-chat-terminal-app" data-track="workspace.chat.terminal-app" onClick={() => { setMenu(null); props.openTerminalApp(c.session); }}>Open in terminal app</button>}
-          <button className={"pop-item danger" + (arm.armed === "delete" ? " armed" : "")} data-testid="ws-chat-delete" data-track="workspace.chat.delete"
-            title={acts.item("delete")?.title} onClick={() => acts.remove(() => setMenu(null))}>
-            {arm.armed === "delete" ? "Delete this chat?" : "Delete"}
-          </button>
-        </CtxMenu>
-      )}
+      {menu?.kind === "reads" && <CtxMenu x={menu.x} y={menu.y} panel="What this chat reads" onClose={() => { setMenu(null); titleButton.current?.focus(); }}><Reads chat={c} projects={info.projects} documents={info.documents ?? []} limits={info.limits} /></CtxMenu>}
     </div>
   );
 }

@@ -77,6 +77,8 @@ export type PlacePanels = {
    *  spreads only the keys that are there). */
   dock_tab?: "files" | "terminal" | "docs" | "plan" | "prs" | "workspace";
   dock_width?: number;
+  /** Workspace dock selection. Older workspace records only had Terminal. */
+  workspace_terminal?: boolean;
   /** Markdown reading size for THIS place. Seeds from the flat last-used value
    *  (unlike `dock_open`, which deliberately does not seed — see `panelsFor`):
    *  a size you just chose is the best guess for the next place's docs, and
@@ -144,7 +146,7 @@ export function panelsFor(s: Settings, key: string | null): Settings {
   // Settings object carrying it would make one the first time it was spread
   // back into `settings`.
   if (p) {
-    const { agent_view: _view, ...dock } = p;
+    const { agent_view: _view, workspace_terminal: _terminal, ...dock } = p;
     return { ...s, ...dock, files_md_zoom: p.files_md_zoom ?? s.files_md_zoom, files_diff: p.files_diff ?? s.files_diff };
   }
   // A place you have never opened the dock in starts CLOSED — the global
@@ -201,6 +203,11 @@ export function withAgentView(s: Settings, key: string, view: AgentView, provide
 // `Settings` carries a copy of each for OLDER builds only (end of the type).
 export const CODEX_PERMISSIONS = ["ask", "auto-review", "full"] as const;
 export type CodexPermissions = (typeof CODEX_PERMISSIONS)[number];
+// Settings → Agent policy → Kimi permissions: kimi's three modes, the strings
+// `worktrees_core::kimi::Permissions::parse` accepts. HOST policy too, born
+// there: unlike Codex's it has no copy in `Settings` (no older build reads it).
+export const KIMI_PERMISSIONS = ["ask", "ask-when-needed", "never-ask"] as const;
+export type KimiPermissions = (typeof KIMI_PERMISSIONS)[number];
 export const PI_PROJECT_TRUST = ["never", "ask"] as const;
 export type PiProjectTrust = (typeof PI_PROJECT_TRUST)[number];
 
