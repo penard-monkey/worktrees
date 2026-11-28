@@ -302,6 +302,159 @@ pub fn wire_model(lines: &[String]) -> Option<String> {
     })
 }
 
+// ── permissions ─────────────────────────────────────────────────────────────
+
+/// How much a Worktrees-launched kimi may do without asking: kimi's own three
+/// permission modes (measured on 2.8.1, `docs/proposals/harness-permission-modes.md`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Permissions {
+    /// kimi's `manual`, its default with no flag: every shell command that is
+    /// not read-only asks. Edits inside the place do not (kimi approves
+    /// Write/Edit within a git work tree in every mode).
+    Ask,
+    /// `--yolo`, kimi's "Ask When Needed": only its dangerous list (`rm -rf`
+    /// outside `/tmp`, power-off and disk-format commands), `.git` control
+    /// paths, sensitive files, questions and plans ask. The default.
+    AskWhenNeeded,
+    /// `--auto`, kimi's "Never Ask": only a plan in plan mode waits.
+    NeverAsk,
+}
+
+impl Permissions {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "ask" => Some(Self::Ask),
+            "ask-when-needed" => Some(Self::AskWhenNeeded),
+            "never-ask" => Some(Self::NeverAsk),
+            _ => None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::AskWhenNeeded => "ask-when-needed",
+            Self::NeverAsk => "never-ask",
+        }
+    }
+    /// kimi's own name for the mode, as its status row draws it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ask => "Always Ask",
+            Self::AskWhenNeeded => "Ask When Needed",
+            Self::NeverAsk => "Never Ask",
+        }
+    }
+    /// The launch flag. Always Ask has none: kimi has no flag or variable for
+    /// it, which is why a resume cannot be brought back to it (`resume_note`).
+    pub fn flag(self) -> Option<&'static str> {
+        match self {
+            Self::Ask => None,
+            Self::AskWhenNeeded => Some("--yolo"),
+            Self::NeverAsk => Some("--auto"),
+        }
+    }
+    /// The mode kimi records in a session's wire log (`permission.set_mode`).
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Ask => "manual",
+            Self::AskWhenNeeded => "yolo",
+            Self::NeverAsk => "auto",
+        }
+    }
+    fn from_wire(s: &str) -> Option<Self> {
+        [Self::Ask, Self::AskWhenNeeded, Self::NeverAsk].into_iter().find(|p| p.wire() == s)
+    }
+}
+
+/// What a fresh install gets: the owner's choice of 2026-11-27, "like Claude's
+/// auto mode" (and Balanced, which is exactly the shipped defaults).
+pub const DEFAULT_PERMISSIONS: Permissions = Permissions::AskWhenNeeded;
+
+/// The variable `permissions()` reads below host policy.
+pub const PERMISSIONS_ENV: &str = "WORKTREES_KIMI_PERMISSIONS";
+
+/// The engine's host policy (worktrees-api `hostpolicy`), as for Codex's
+/// `codex::set_permissions_override`: set at the engine's boot and by the
+/// Settings click, never by a client loading.
+static PERMISSIONS_OVERRIDE: Mutex<Option<Permissions>> = Mutex::new(None);
+
+pub fn set_permissions_override(p: Option<Permissions>) {
+    *PERMISSIONS_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()) = p;
+}
+
+/// host policy > `$WORKTREES_KIMI_PERMISSIONS` > `kimi_permissions` user
+/// config > ask-when-needed. An unknown value falls through.
+pub fn permissions() -> Permissions {
+    permissions_origin().0
+}
+
+pub fn permissions_origin() -> (Permissions, crate::config::Origin) {
+    let host = *PERMISSIONS_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner());
+    let env = crate::config::env_var(PERMISSIONS_ENV);
+    let cfg = crate::config::user_cfg("kimi_permissions");
+    permissions_origin_from(host, env, cfg.as_deref())
+}
+
+pub fn permissions_origin_from(
+    host: Option<Permissions>,
+    env: Option<crate::config::EnvVar>,
+    cfg: Option<&str>,
+) -> (Permissions, crate::config::Origin) {
+    use crate::config::Source;
+    let (p, source) = if let Some(p) = host {
+        (p, Source::Host)
+    } else if let Some(p) = env.as_ref().and_then(|e| Permissions::parse(&e.value)) {
+        (p, Source::Env)
+    } else if let Some(p) = cfg.and_then(Permissions::parse) {
+        (p, Source::Config)
+    } else {
+        (DEFAULT_PERMISSIONS, Source::Default)
+    };
+    (p, crate::config::Origin { source, env })
+}
+
+/// Everything the permission mode adds to a kimi launch (`Kimi::place_flags`):
+/// fresh and resume alike, since kimi takes the flag on `-S <id>` too.
+pub fn permission_flags(mode: Permissions) -> Vec<String> {
+    mode.flag().map(|f| vec![f.to_string()]).unwrap_or_default()
+}
+
+/// The newest permission mode a session's wire log records. kimi writes
+/// `permission.set_mode` at the start and at every switch, and REPLAYS it on
+/// resume: `kimi -S <id>` with no flag comes back in that mode (measured,
+/// 2.8.1). The whole file is scanned, once, because the mode is set early and
+/// a long session's tail no longer holds it.
+pub fn session_mode(wire: &Path) -> Option<Permissions> {
+    use std::io::BufRead;
+    let f = std::fs::File::open(wire).ok()?;
+    let mut last = None;
+    for l in std::io::BufReader::new(f).lines().map_while(Result::ok) {
+        if !l.contains("permission.set_mode") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&l) else { continue };
+        if ty(&v) == "permission.set_mode" && v.get("agentId").and_then(|a| a.as_str()).is_none_or(|a| a == "main") {
+            last = v.get("mode").and_then(|m| m.as_str()).and_then(Permissions::from_wire).or(last);
+        }
+    }
+    last
+}
+
+/// What a launch should say when a resume CANNOT honour `mode`: only Always
+/// Ask has no flag, so a conversation last left in another mode comes back in
+/// it. `None` when the resume will be in `mode` (any flagged mode, or a session
+/// already in Always Ask).
+pub fn resume_note(mode: Permissions, recorded: Option<Permissions>) -> Option<String> {
+    match (mode, recorded) {
+        (Permissions::Ask, Some(r)) if r != Permissions::Ask => Some(format!(
+            "kimi resumes this place's conversation in {}, not Always Ask: kimi keeps a conversation's mode and has no flag \
+             for Always Ask. A new conversation starts in Always Ask; or type /permission in the lane.",
+            r.label()
+        )),
+        _ => None,
+    }
+}
+
 /// Whitespace collapsed, so a wrapped composer and a logged prompt compare.
 pub fn normalize(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -1245,6 +1398,75 @@ mod tests {
         assert_eq!(read_screen(""), KimiScreen::Other);
         assert_eq!(screen_from("sh", &fixture("kimi-screen/2.2.0/idle.txt")), KimiScreen::Gone);
         assert_eq!(screen_from("kimi", &fixture("kimi-screen/2.2.0/idle.txt")), KimiScreen::Composer);
+    }
+
+    /// kimi 2.8.1 draws its permission mode's name at the head of the status
+    /// row under the composer (`Ask When Needed` for `--yolo`, `Never Ask` for
+    /// `--auto`) and none in Always Ask. Neither moves the composer's box or the approval's rules, so the
+    /// reader (and the opener's empty-composer wait) read them as before.
+    #[test]
+    fn kimi_2_8_1_screens_read_in_either_permission_mode() {
+        let f = |n: &str| fixture(&format!("kimi-screen/2.8.1/{n}.txt"));
+        assert_eq!(read_screen(&f("yolo-idle")), KimiScreen::Composer);
+        assert_eq!(read_composer(&f("yolo-idle")), Some(Composer { input: String::new(), queued: vec![] }));
+        assert_eq!(read_composer(&f("yolo-resumed")), Some(Composer { input: String::new(), queued: vec![] }));
+        assert_eq!(read_composer(&f("auto-idle")), Some(Composer { input: String::new(), queued: vec![] }));
+        assert_eq!(read_screen(&f("yolo-dangerous")), KimiScreen::Modal);
+        assert_eq!(read_screen(&f("manual-approval")), KimiScreen::Modal);
+        assert_eq!(read_composer(&f("yolo-dangerous")), None);
+    }
+
+    #[test]
+    fn a_permission_mode_is_one_flag_and_ask_when_needed_by_default() {
+        use crate::config::{EnvVar, Source};
+        assert_eq!(permission_flags(Permissions::Ask), Vec::<String>::new());
+        assert_eq!(permission_flags(Permissions::AskWhenNeeded), vec!["--yolo"]);
+        assert_eq!(permission_flags(Permissions::NeverAsk), vec!["--auto"]);
+        for p in [Permissions::Ask, Permissions::AskWhenNeeded, Permissions::NeverAsk] {
+            assert_eq!(Permissions::parse(p.as_str()), Some(p));
+            assert_eq!(Permissions::from_wire(p.wire()), Some(p));
+        }
+        // kimi's own words are not ours: a typo or kimi's name falls through.
+        for bad in ["yolo", "auto", "manual", "never_ask", ""] {
+            assert_eq!(Permissions::parse(bad), None, "{bad}");
+        }
+        let env = |v: &str| Some(EnvVar { name: PERMISSIONS_ENV, value: v.into() });
+        assert_eq!(permissions_origin_from(None, None, None), (Permissions::AskWhenNeeded, crate::config::Origin { source: Source::Default, env: None }));
+        assert_eq!(permissions_origin_from(None, None, Some("ask")).0, Permissions::Ask);
+        assert_eq!(permissions_origin_from(None, env("never-ask"), Some("ask")).0, Permissions::NeverAsk);
+        let (p, o) = permissions_origin_from(Some(Permissions::Ask), env("never-ask"), None);
+        assert_eq!((p, o.source), (Permissions::Ask, Source::Host), "host policy outranks the variable");
+        assert_eq!(permissions_origin_from(None, env("yolo"), Some("ask")).0, Permissions::Ask, "an unknown value falls through");
+    }
+
+    /// The mode a resume comes back in is the session's newest
+    /// `permission.set_mode` (the shape kimi 2.8.1 writes), and only Always
+    /// Ask cannot be restored by a flag.
+    #[test]
+    fn a_resume_keeps_the_sessions_recorded_mode() {
+        let dir = std::env::temp_dir().join(format!("wt-kimi-mode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wire = dir.join("wire.jsonl");
+        std::fs::write(
+            &wire,
+            concat!(
+                "{\"type\":\"permission.set_mode\",\"agentId\":\"main\",\"mode\":\"yolo\",\"time\":1}\n",
+                "{\"type\":\"turn.prompt\",\"agentId\":\"main\",\"input\":[{\"type\":\"text\",\"text\":\"permission.set_mode manual\"}]}\n",
+                "{\"type\":\"permission.set_mode\",\"agentId\":\"sub-1\",\"mode\":\"manual\",\"time\":2}\n",
+                "not json permission.set_mode\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(session_mode(&wire), Some(Permissions::AskWhenNeeded), "a prompt quoting it and a sub-agent's switch do not count");
+        std::fs::write(&wire, "{\"type\":\"permission.set_mode\",\"agentId\":\"main\",\"mode\":\"yolo\"}\n{\"type\":\"permission.set_mode\",\"agentId\":\"main\",\"mode\":\"auto\"}\n").unwrap();
+        assert_eq!(session_mode(&wire), Some(Permissions::NeverAsk), "the newest wins");
+        assert_eq!(session_mode(&dir.join("absent.jsonl")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(resume_note(Permissions::Ask, Some(Permissions::AskWhenNeeded)).unwrap().contains("Ask When Needed"));
+        assert_eq!(resume_note(Permissions::Ask, Some(Permissions::Ask)), None);
+        assert_eq!(resume_note(Permissions::Ask, None), None);
+        assert_eq!(resume_note(Permissions::AskWhenNeeded, Some(Permissions::NeverAsk)), None, "--yolo wins over the recorded mode");
     }
 
     #[test]

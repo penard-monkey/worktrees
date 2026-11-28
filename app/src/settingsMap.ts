@@ -85,6 +85,7 @@ export const scopeChip = (scope: Scope, host: string | null) => (scope === "wind
  *  shows a section on its own. */
 export const HOST_KEYS = [
   "codex_access", // get_codex_permissions ≠ auto-review
+  "kimi_access", // get_kimi_permissions .value ≠ ask-when-needed
   "main_guard", // agent_guidance_status .settings.guard on
   "guidance_enabled", // agent_guidance_status .settings.enabled off
   "guidance_skill", // agent_guidance_status .skill_edit present
@@ -114,6 +115,7 @@ export type HostKey = (typeof HOST_KEYS)[number];
  *  claims is a value that could be changed and never shown. */
 export const HOST_GETTERS: Record<HostKey, string> = {
   codex_access: "get_codex_permissions",
+  kimi_access: "get_kimi_permissions",
   main_guard: "agent_guidance_status",
   guidance_enabled: "agent_guidance_status",
   guidance_skill: "agent_guidance_status",
@@ -281,6 +283,7 @@ export const SECTIONS: readonly SectionDef[] = [
   // ── Agent policy
   { id: "policy-preset", page: "policy", tier: "beginner", label: "Preset", keywords: ["presets", "safety", "autonomy", "risk level"], host: ["policy_preset"], write: "apply_policy_preset" },
   { id: "codex-permissions", page: "policy", tier: "beginner", label: "Codex permissions", keywords: ["permissions", "codex access", "approvals", "sandbox", "auto review", "full access"], host: ["codex_access"], write: "set_codex_permissions" },
+  { id: "kimi-permissions", page: "policy", tier: "beginner", label: "Kimi permissions", keywords: ["kimi permissions", "kimi approvals", "yolo", "ask when needed", "never ask", "always ask"], host: ["kimi_access"], write: "set_kimi_permissions" },
   { id: "main-guard", page: "policy", tier: "beginner", label: "Claude in (main)", keywords: ["guard", "protect main", "main branch", "git worktree add", "branching"], host: ["main_guard"], write: "set_agent_guidance" },
   { id: "plan-limits", page: "policy", tier: "beginner", label: "Plan limits", keywords: ["quota", "usage limit", "spent plan", "rate limit", "gate"], host: ["quota_gate"], write: "set_quota_settings" },
   { id: "plan-threshold", page: "policy", tier: "advanced", label: "Weekly threshold", keywords: ["weekly limit", "quota threshold", "percent", "warn"], host: ["quota_pct"], write: "set_quota_settings" },

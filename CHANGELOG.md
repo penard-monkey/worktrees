@@ -14,6 +14,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ### Changed
 
 - **Places and the place header are quieter by default.** Hover or focus to see more details. Selected lanes keep their details, and warnings stay visible. Open a project warning chip for the full notice. Right-click a lane or press Shift+F10 on its row for actions like Pin and Switch agent. Choose **Show all** in Places or in Layout settings to keep the full controls visible.
+- **Kimi lanes ask only when it matters.** Kimi lanes now start in Kimi's Ask When Needed mode: routine edits and commands run, and Kimi still asks for `rm -rf`, power-off and disk commands, `.git` internals, secret files, questions and plans. Choose it in **Settings → Agent policy → Kimi permissions**: Always Ask (Kimi's own default, which asked before every command), Ask When Needed, or Never Ask, which asks you to confirm. It applies to the next Kimi launch, resume included. A resumed conversation that Kimi left in another mode keeps it under Always Ask, because Kimi has no flag for Always Ask; the launch and `worktrees doctor --kimi` say so. The presets set it too: Cautious is Always Ask, Balanced Ask When Needed, Autonomous Never Ask. Only this computer's Settings changes it: never a repo, an agent or a paired device. `doctor --kimi` and `place_status` say which mode a lane is in. Kimi has no sandbox in any mode.
+
 - **Workspace chats use the same reference dock as lanes.** The right rail opens Overview, Memory, Plan, Ideas, Chats or Terminal. Use ⌘J, the active rail button or the dock’s close button to give the chat more room. The chat title menu holds read access, tool setup and Close. The chat still shows when it is folding or has no worktrees tools.
 
 ### Fixed

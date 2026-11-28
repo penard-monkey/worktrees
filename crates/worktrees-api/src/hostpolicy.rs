@@ -45,6 +45,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use serde::Serialize;
 use serde_json::Value;
 use worktrees_core::codex::{self, Permissions};
+use worktrees_core::kimi;
 use worktrees_core::trust::{self, PiTrust};
 
 use crate::log::log as applog;
@@ -52,6 +53,9 @@ use crate::log::log as applog;
 pub const FILE: &str = "host-policy.json";
 pub const CODEX_PERMISSIONS: &str = "codex_permissions";
 pub const PI_PROJECT_TRUST: &str = "pi_project_trust";
+/// Settings → Policy → Agent permissions → Kimi (`kimi::Permissions`). Born
+/// here, like `keep_awake`: no `ui-state.json` copy and no migration.
+pub const KIMI_PERMISSIONS: &str = "kimi_permissions";
 pub const FETCH_INTERVAL_MIN: &str = "fetch_interval_min";
 pub const TERM_PERSIST_SCROLLBACK: &str = "term_persist_scrollback";
 pub const TERM_PER_TAB_HISTORY: &str = "term_per_tab_history";
@@ -285,13 +289,16 @@ fn apply_in(config_dir: &Path, s: &Statics) {
     codex::set_permissions_override(codex);
     let pi = known(&m, PI_PROJECT_TRUST, |v| v.as_str().and_then(PiTrust::parse));
     trust::set_pi_trust_override(pi);
+    let kimi_mode = known(&m, KIMI_PERMISSIONS, |v| v.as_str().and_then(kimi::Permissions::parse));
+    kimi::set_permissions_override(kimi_mode);
     let engine = EngineOpts::from_policy(&m);
     s.store(&engine);
     applog(
         "info",
         &format!(
-            "host-policy: codex_permissions={} pi_project_trust={} fetch_interval_min={} term_persist_scrollback={} term_per_tab_history={}",
+            "host-policy: codex_permissions={} kimi_permissions={} pi_project_trust={} fetch_interval_min={} term_persist_scrollback={} term_per_tab_history={}",
             codex.map_or("(env/config)", Permissions::as_str),
+            kimi_mode.map_or("(env/config)", kimi::Permissions::as_str),
             pi.map_or("(env/config)", PiTrust::as_str),
             engine.fetch_interval_min,
             engine.term_persist_scrollback,
@@ -423,6 +430,8 @@ mod tests {
     fn reset() {
         codex::set_permissions_override(None);
         trust::set_pi_trust_override(None);
+        kimi::set_permissions_override(None);
+        std::env::remove_var("WORKTREES_KIMI_PERMISSIONS");
         std::env::remove_var("WORKTREES_CODEX_PERMISSIONS");
         std::env::remove_var("WORKTREES_PI_PROJECT_TRUST");
     }
@@ -562,6 +571,35 @@ mod tests {
         assert_eq!(std::fs::read_to_string(path(&d.0)).unwrap(), before, "a refused value must not be written");
         assert_eq!(codex::permissions(), Permissions::Ask);
         assert_eq!(trust::pi_trust(), PiTrust::Never);
+    }
+
+    /// Kimi's mode is host policy the way Codex's is: the click reaches disk
+    /// and the running engine, a restart reads it back over env, and a value
+    /// this build does not know is refused without a write.
+    #[test]
+    fn kimi_permissions_persist_apply_and_refuse_unknown_values() {
+        let _g = Globals::take();
+        let d = Dir::new("kimi");
+        let c = ctx(&d.0);
+        assert_eq!(kimi::permissions(), kimi::Permissions::AskWhenNeeded, "the shipped default");
+        crate::project::set_kimi_permissions(&c, "never-ask".into()).unwrap();
+        assert_eq!(on_disk(&d.0)["kimi_permissions"], "never-ask");
+        assert_eq!(kimi::permissions(), kimi::Permissions::NeverAsk, "the next launch uses it at once");
+
+        kimi::set_permissions_override(None);
+        std::env::set_var("WORKTREES_KIMI_PERMISSIONS", "ask");
+        assert_eq!(kimi::permissions(), kimi::Permissions::Ask, "precondition: env decides without the override");
+        boot(&d.0);
+        assert_eq!(kimi::permissions(), kimi::Permissions::NeverAsk, "the host value beats env after a restart");
+
+        let before = std::fs::read_to_string(path(&d.0)).unwrap();
+        for bad in ["yolo", "auto", "", "Ask", "never_ask"] {
+            assert!(crate::project::set_kimi_permissions(&c, bad.into()).is_err(), "{bad:?} must be refused");
+        }
+        assert_eq!(std::fs::read_to_string(path(&d.0)).unwrap(), before, "a refused value must not be written");
+        assert_eq!(kimi::permissions(), kimi::Permissions::NeverAsk);
+        let got = crate::project::get_kimi_permissions().unwrap();
+        assert_eq!((got["value"].as_str(), got["source"].as_str()), (Some("never-ask"), Some("host")));
     }
 
     /// A file someone broke by hand stays human-repairable: the write is
