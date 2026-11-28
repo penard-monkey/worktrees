@@ -56,6 +56,7 @@
 pub mod agents;
 pub mod argv;
 pub mod config;
+pub mod digest;
 pub mod disk;
 pub mod docserver;
 pub mod editors;

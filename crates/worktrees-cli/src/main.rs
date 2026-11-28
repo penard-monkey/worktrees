@@ -60,6 +60,8 @@ worktrees — one git worktree per branch, one active agent per worktree.
   worktrees init --diff                 print the [[file]] entries the config is MISSING
   worktrees skills [list|show|add|rm]   manage AI-profile skills (user-global, no repo needed)
   worktrees projects [ls|add|rm|rename|private]  the registered projects (user-global, no repo needed)
+  worktrees digest [--json] [--since <epoch>] [--limit <n>]  where you left off: the places that want you,
+                                        every project, ranked (reads only; no repo needed)
   worktrees clone <url> [--into <dir>] [--name <folder>]  clone a repo and register it (no repo needed)
   worktrees sync push|pull [name]       courier-sync this project to/from an SSD hub (rsync)
   worktrees sync status                 hub + project sync state (--json; no repo needed)
@@ -87,6 +89,57 @@ fn main() {
     std::process::exit(run());
 }
 
+/// `worktrees digest`: serve's `digest` row, answered in this process
+/// (`worktrees_api::digest::answer`). Plain output is one line per row; the
+/// pull-request reason needs serve's cache, which this process does not have.
+fn cmd_digest(args: &[String]) -> i32 {
+    let (mut json, mut since, mut limit) = (false, None, None);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let (flag, inline) = match a.split_once('=') {
+            Some((f, v)) => (f, Some(v.to_string())),
+            None => (a.as_str(), None),
+        };
+        let mut value = |name: &str| -> Result<i64, String> {
+            let v = inline.clone().or_else(|| it.next().cloned()).ok_or_else(|| format!("{name} needs a number"))?;
+            v.parse::<i64>().ok().filter(|n| *n >= 0).ok_or_else(|| format!("{name} needs a number, not {v:?}"))
+        };
+        let got = match flag {
+            "--json" if inline.is_none() => {
+                json = true;
+                Ok(())
+            }
+            "--since" => value("--since").map(|n| since = Some(n)),
+            "--limit" => value("--limit").map(|n| limit = Some(n.min(i64::from(u32::MAX)) as u32)),
+            _ => Err(format!("unknown argument {a:?} (digest takes --json, --since <epoch>, --limit <n>)")),
+        };
+        if let Err(e) = got {
+            eprintln!("{}", error_line(&e));
+            return 2;
+        }
+    }
+    match worktrees_api::digest::answer(worktrees_core::sysclock::now_epoch(), since, limit, None) {
+        Ok(a) if json => {
+            println!("{}", serde_json::to_string(&a).unwrap_or_default());
+            0
+        }
+        Ok(a) => {
+            for r in &a.rows {
+                println!("{}:{}  {}", r.project, r.slug, r.line);
+            }
+            let left = a.left_out;
+            if left.private + left.unreadable > 0 {
+                eprintln!("left out: {} private, {} unreadable", left.private, left.unreadable);
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("{}", error_line(&e));
+            1
+        }
+    }
+}
+
 fn run() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -106,6 +159,8 @@ fn run() -> i32 {
             let mut ui = CliUi;
             return worktrees_core::skillstore::cmd_skills(&mut ui, args.get(1..).unwrap_or(&[]));
         }
+        // Every registered project, like `projects`: no repository needed.
+        Some("digest") => return cmd_digest(args.get(1..).unwrap_or(&[])),
         // The project registry is user-global too (`~/.config/worktrees`).
         Some("projects") => {
             let mut ui = CliUi;

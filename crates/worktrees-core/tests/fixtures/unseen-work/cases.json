@@ -1,0 +1,18 @@
+{
+  "about": "One table for \"finished and not seen yet\", read by BOTH sides: digest.rs's Card::unseen_work over seen_epoch (its test), and afterglow.ts's isUnread over seenEpoch (app/scripts/afterglow-check.mjs, the real TS). worked/seen/opened are the declared store's last_worked_epoch, last_seen_epoch and last_opened_epoch; null is absent. Change the rule on one side and that side's check goes red here.",
+  "cases": [
+    { "worked": null, "seen": null, "opened": null, "unseen": false, "why": "never worked" },
+    { "worked": 0, "seen": null, "opened": null, "unseen": false, "why": "a zero stamp is no work" },
+    { "worked": null, "seen": 100, "opened": null, "unseen": false, "why": "a look with no work" },
+    { "worked": 100, "seen": null, "opened": null, "unseen": true, "why": "work, never looked" },
+    { "worked": 100, "seen": 50, "opened": null, "unseen": true, "why": "work after the last look" },
+    { "worked": 100, "seen": 100, "opened": null, "unseen": false, "why": "seen exactly at the finish is seen" },
+    { "worked": 100, "seen": 150, "opened": null, "unseen": false, "why": "seen after the finish" },
+    { "worked": 100, "seen": null, "opened": 150, "unseen": false, "why": "an open stands in for a look" },
+    { "worked": 100, "seen": null, "opened": 50, "unseen": true, "why": "an open before the finish" },
+    { "worked": 100, "seen": 50, "opened": 150, "unseen": false, "why": "the later of the two wins: open" },
+    { "worked": 100, "seen": 150, "opened": 50, "unseen": false, "why": "the later of the two wins: seen" },
+    { "worked": 100, "seen": 50, "opened": 60, "unseen": true, "why": "both before the finish" },
+    { "worked": 100, "seen": 0, "opened": 0, "unseen": true, "why": "zero stamps are no look" }
+  ]
+}

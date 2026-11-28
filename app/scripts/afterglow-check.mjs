@@ -138,6 +138,18 @@ eq([doneOpacity(1, 3), doneOpacity(2, 3), doneOpacity(3, 3)], [1, 0.65, 0.3],
   if (isUnread(NOW - 60, NOW - 60)) fail("isUnread: seen EXACTLY at the finish must read as seen — the ack would otherwise re-fire forever");
   if (isUnread(NOW - 60, NOW - 30)) fail("isUnread: seen after the finish must read as seen");
 
+  // The digest's mirror (`Card::unseen_work` over `seen_epoch`, digest.rs)
+  // reads the same table in its own test, so the two cannot drift apart.
+  const table = JSON.parse(read("../../crates/worktrees-core/tests/fixtures/unseen-work/cases.json")).cases;
+  if (table.length < 10) fail(`unseen-work/cases.json has ${table.length} cases — the shared table has been emptied`);
+  for (const c of table) {
+    const got = isUnread(c.worked ?? 0, seenEpoch(c.seen ?? undefined, c.opened ?? undefined));
+    if (got !== c.unseen) fail(`unseen-work table: ${JSON.stringify(c)} reads ${got} in afterglow.ts`);
+  }
+  const digestRs = read("../../crates/worktrees-core/src/digest.rs");
+  if (!digestRs.includes('include_str!("../tests/fixtures/unseen-work/cases.json")'))
+    fail("digest.rs no longer reads tests/fixtures/unseen-work/cases.json — the Rust side of the unread mirror is unchecked");
+
   // doneTierSeen: unread pins tier 1 past every bound, including the horizon.
   for (const age of [1, 899, 901, 6234, 6236, 43199, H, H + 1, 30 * 86400]) {
     const t = doneTierSeen(NOW - age, 0, NOW, B);

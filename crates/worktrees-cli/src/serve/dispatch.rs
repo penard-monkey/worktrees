@@ -1,4 +1,4 @@
-//! The 325 commands, each with its exposure, capability and objects, in ONE
+//! The 328 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -39,7 +39,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::sync::Arc;
-use worktrees_api::{agents, config, disk, files, hostenv, ideas, ideasessions, keepawake, macprivacy, memory, meta, ops, plans, prefs, presets, profiles, project, status, term, viewer, workspace, workspacechats, workspacefolds, workspaces, Ctx};
+use worktrees_api::{agents, config, digest, disk, files, hostenv, ideas, ideasessions, keepawake, macprivacy, memory, meta, ops, plans, prefs, presets, profiles, project, status, term, viewer, workspace, workspacechats, workspacefolds, workspaces, Ctx};
 use worktrees_core::authz::{self, Caller, Capability, Caps, DeviceId, Grant, Projects, Registry};
 use worktrees_core::fetchpolicy::Fetcher;
 
@@ -898,6 +898,9 @@ commands! { cx, a;
         a.get("repo")?, a.get("slug")?, a.get("into_repo")?, a.get("into_slug")?, a.get("provider")?,
     ),
     cross_project_status: Engine [read, filtered(by_project)] => ops::cross_project_status(),
+    // The "where you left off" list: every project's places, ranked. The body
+    // refuses any caller but the console (`digest::ERR_DIGEST_CONSOLE`).
+    digest: Engine [read, all] => digest::digest(&cx.ctx, a.get("since")?, a.get("limit")?, a.get("offset")?),
     set_cross_project: HostConsole => ops::set_cross_project(a.get("level")?),
     planning_status: Engine [read, filtered(by_project)] => ops::planning_status(),
     set_planning_default: Engine [admin, all] => ops::set_planning_default(a.get("default")?),
@@ -1586,7 +1589,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 325 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 328 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1619,14 +1622,14 @@ mod tests {
     /// hold (`get_keep_awake`, `set_keep_awake`), disk usage's three (`disk_usage`,
     /// `disk_place_tree`, `disk_delete`), a workspace's memory's nine
     /// console rows (`workspace_memory*`), lane children's adoption
-    /// (`set_place_under`), and Kimi's permission mode (`get_kimi_permissions`,
-    /// `set_kimi_permissions`); the check scripts
+    /// (`set_place_under`), Kimi's permission mode (`get_kimi_permissions`,
+    /// `set_kimi_permissions`), and the "where you left off" `digest`; the check scripts
     /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 327, "the table has 327 commands");
+        assert_eq!(TABLE.len(), 328, "the table has 328 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -2049,7 +2052,7 @@ mod tests {
     /// `push_allow_security`); Settings → Agent policy → Limits'
     /// `limits_settings` (`read`) and `set_limits` (`admin`); and the policy
     /// presets' `policy_preset_status` (`read`) and `apply_policy_preset`
-    /// (console); the named workspaces' six (console) and `workspaces_list` (`read`, a device's since iOS phase 1, projected); and the idea board's seven and phase 3's seven (console); phase 4's ten and phase 5's three (console); phase S's sixteen idea-session rows (console); the workspace chats' sixteen and a workspace's memory's nine (console); `read_place_image` and `agent_call_image` are `read`; the host's sleep hold's `get_keep_awake` (`read`) and `set_keep_awake` (`admin`); disk usage's `disk_usage` and `disk_place_tree` (`read`) and `disk_delete` (`write`); and group chat's
+    /// (console); the named workspaces' six (console) and `workspaces_list` (`read`, a device's since iOS phase 1, projected); and the idea board's seven and phase 3's seven (console); phase 4's ten and phase 5's three (console); phase S's sixteen idea-session rows (console); the workspace chats' sixteen and a workspace's memory's nine (console); `read_place_image`, `agent_call_image` and `digest` are `read` (all three refuse a device in the body); the host's sleep hold's `get_keep_awake` (`read`) and `set_keep_awake` (`admin`); disk usage's `disk_usage` and `disk_place_tree` (`read`) and `disk_delete` (`write`); and group chat's
     /// shares: fourteen console rows (`share_*` for the owner, `share_used`, `share_check`, `guest_places_hide`,
     /// `shares_all`, `guests_list`, `guest_remove`, `owner_set_name`) and the
     /// four `guest` rows (`GUEST_ROWS`), the capability's first, the thread's
@@ -2071,7 +2074,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 76), ("write", 25), ("admin", 42), ("console", 140), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 77), ("write", 25), ("admin", 42), ("console", 140), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7), ("guest", 10),
         ]
         .into();
