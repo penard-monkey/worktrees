@@ -497,6 +497,14 @@ export type Settings = {
   // and its memory). Off by default; read ONLY through `beta.ts`
   // (`workspaceChatsBeta`). Its own key, never Ideas'.
   beta_workspace_chats: boolean;
+  // Settings → General → Beta features → Where you left off. Off by default;
+  // read only through `leftOffBeta`, which gates its listeners and writes.
+  beta_left_off: boolean;
+  // Where you left off's return rule (returning.ts). Optional so a build with
+  // the beta off never introduces these keys into the whole-blob settings save.
+  // Absent last activity means a first run, which is deliberately not a return.
+  left_off_last_active?: number;
+  left_off_shown_day?: string;
   // Group chat's *Use these*: ask once before sending comments with no note
   // (the note is the instruction; without one Codex answered "the plan is
   // unchanged" in the 2026-11-14 rehearsal). False after "Don't ask again".
@@ -660,6 +668,7 @@ export const DEFAULTS: Settings = {
   beta_ideas: false,
   beta_group_chat: false,
   beta_workspace_chats: false,
+  beta_left_off: false,
   use_these_ask_note: true,
   hidden_tiers: [],
   sort_mode: "recent",
@@ -1025,6 +1034,13 @@ export async function loadSettings(): Promise<Settings> {
     if (s.beta_ideas !== true) s.beta_ideas = false;
     if (s.beta_group_chat !== true) s.beta_group_chat = false;
     if (s.beta_workspace_chats !== true) s.beta_workspace_chats = false;
+    if (s.beta_left_off !== true) s.beta_left_off = false;
+    if (s.left_off_last_active !== undefined
+      && (typeof s.left_off_last_active !== "number" || !Number.isFinite(s.left_off_last_active) || s.left_off_last_active < 0))
+      delete s.left_off_last_active;
+    if (s.left_off_shown_day !== undefined
+      && (typeof s.left_off_shown_day !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(s.left_off_shown_day)))
+      delete s.left_off_shown_day;
     if (s.use_these_ask_note !== false) s.use_these_ask_note = true;
     if (!isHarness(s.default_provider)) s.default_provider = HARNESSES[0];
     // A tab that no longer exists must land on Files, globally AND per place.
@@ -1078,4 +1094,13 @@ export function saveSettings(s: Settings) {
       /* harness / offline — ignore */
     });
   }, 250);
+}
+
+/** A save that cannot wait out the debounce because the page is going away. */
+export function saveSettingsNow(s: Settings) {
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = null;
+  invoke("set_settings", { settings: s }).catch(() => {
+    /* harness / offline — ignore */
+  });
 }

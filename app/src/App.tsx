@@ -56,7 +56,7 @@ import { fromDevice, instructionLine, instructionTitle, launchedTitle, deviceLab
 import type { Elsewhere, Lineage, Link } from "./lineage";
 import { handoffLine, indentOf, laneLines, laneTree, siblingSlot, subtreeOf as laneSubtree, type LaneItem } from "./lanetree";
 import { canStep as canStepNav, empty as emptyHistory, goTo as goToNav, label as labelNav, locKey, prune as pruneNav, reachable as reachableNav, record as recordNav, whereKey, WS_TAB_LABEL, type History as NavHistory, type Loc, type WsTab } from "./navHistory";
-import { agentViewFor, applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, lowerFits, lowerFracFor, lowerRange, panelsFor, placeKey, railsMerged, railsWidth, saveSettings, stepMdZoom, stepZoom, upperTab, viewportWidth, withAgentView, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
+import { agentViewFor, applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, lowerFits, lowerFracFor, lowerRange, panelsFor, placeKey, railsMerged, railsWidth, saveSettings, saveSettingsNow, stepMdZoom, stepZoom, upperTab, viewportWidth, withAgentView, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
 import {
   alphaIndex, dropIntent, landingNote, moveBefore, naturalTop, pointerIndex,
   predictTier, recentIndex, spliceOrder, TIER_LABEL, type DeclPatch, type Tier,
@@ -68,7 +68,8 @@ import {
   type NavView, type WsColor, type WsDef, type WsHit, type WsList,
   EVERYTHING_ELSE_ID, everythingElse,
 } from "./workspaces";
-import { groupChatBeta, ideasBeta, workspaceChatsBeta } from "./beta";
+import { groupChatBeta, ideasBeta, leftOffBeta, workspaceChatsBeta } from "./beta";
+import { reduceReturning, type ReturnEvent, type ReturningState } from "./returning";
 import { wireMenu } from "./menu";
 import { zoomDir } from "./zoomkeys";
 import { publishGroupChat } from "./betaLive";
@@ -2836,12 +2837,13 @@ function fmtEta(secs: number): string {
  * the test suite cannot answer — read app.log (Settings → Logs) to confirm on a
  * real build before trusting the gate.
  */
-function useWindowAwake() {
+function useWindowAwake(onVisibility: (visible: boolean) => void = () => {}) {
   const [pageVisible, setPageVisible] = useState(() => document.visibilityState !== "hidden");
   useEffect(() => {
     const onVis = () => {
       const v = document.visibilityState !== "hidden";
       setPageVisible(v);
+      onVisibility(v);
       invoke("log_event", { level: "info", msg: `window ${v ? "visible" : "hidden"}` }).catch(() => {});
     };
     document.addEventListener("visibilitychange", onVis);
@@ -4576,6 +4578,10 @@ function App() {
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
   // A persisted Off must suppress even the first usage request at startup.
   const [settingsReady, setSettingsReady] = useState(false);
+  // The panel slice consumes this; a qualifying return carries its digest's since.
+  const [leftOffReturn, setLeftOffReturn] = useState<{ since: number } | null>(null);
+  const returningRef = useRef<ReturningState>({ lastActive: null, shownDay: null, lastPersisted: null });
+  const returnEventRef = useRef<(event: ReturnEvent) => void>(() => {});
   const [activeProvider, setActiveProvider] = useState<Harness>(HARNESSES[0]);
   // Where Settings was asked to open. One state, never a boolean beside it:
   // `settingsOpen` is derived, so "the sheet is up" and "which section it went
@@ -4886,6 +4892,7 @@ function App() {
   const lastSurface = useRef<Surface>("main");
   useEffect(() => {
     const mark = (e: Event) => {
+      returnEventRef.current("input");
       const t = e.target;
       if (!(t instanceof Element)) return;
       if (t.closest(".reading")) lastSurface.current = "read";
@@ -4967,10 +4974,53 @@ function App() {
   }, []);
   // bumps on places:changed → the dock's file viewer re-reads from disk when clean.
   const [placesToken, setPlacesToken] = useState(0);
+  const leftOffOn = leftOffBeta(settings);
+  returnEventRef.current = (event) => {
+    if (!settingsReady || !leftOffOn) return;
+    const now = Date.now();
+    const date = new Date(now);
+    const today = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+    const since = returningRef.current.lastActive;
+    const step = reduceReturning(returningRef.current, event, now, today);
+    returningRef.current = step.state;
+    if (step.isReturn && since !== null) {
+      setLeftOffReturn((current) => current?.since === since ? current : { since });
+    }
+    if (step.persist) {
+      const next: Settings = {
+        ...settingsRef.current,
+        left_off_last_active: step.state.lastActive ?? undefined,
+        left_off_shown_day: step.state.shownDay ?? undefined,
+      };
+      settingsRef.current = next;
+      setSettings(next);
+      // In particular, do not defer this behind a React state updater: the
+      // beforeunload handler must issue the write before the page goes away.
+      if (event === "unload") saveSettingsNow(next);
+      else saveSettings(next);
+    }
+  };
+  useEffect(() => {
+    if (!settingsReady || !leftOffOn) return;
+    const onFocus = () => returnEventRef.current("focus");
+    const onUnload = () => returnEventRef.current("unload");
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("beforeunload", onUnload);
+    // A relaunched app may already be visible and focused, with no later event
+    // to deliver the return. A hidden launch waits for its real visible event.
+    if (document.visibilityState !== "hidden") returnEventRef.current("visible");
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("beforeunload", onUnload);
+    };
+  }, [settingsReady, leftOffOn]);
+  useEffect(() => {
+    if (!leftOffOn && leftOffReturn !== null) setLeftOffReturn(null);
+  }, [leftOffOn, leftOffReturn]);
   // Gates every periodic cost in the app — see useWindowAwake. Only the
   // visibility half is wanted here: cursor blink is the one thing that follows
   // FOCUS, and it is wired inside TerminalPane where the terminals live.
-  const { pageVisible } = useWindowAwake();
+  const { pageVisible } = useWindowAwake((visible) => returnEventRef.current(visible ? "visible" : "hidden"));
 
   // every surfaced error also lands in the app log (Settings → Logs)
   const fail = useCallback((e: unknown) => {
@@ -5765,6 +5815,11 @@ function App() {
     (async () => {
       const s = await loadSettings();
       const merged = { ...s, ...preHydration.current };
+      returningRef.current = {
+        lastActive: merged.left_off_last_active ?? null,
+        shownDay: merged.left_off_shown_day ?? null,
+        lastPersisted: merged.left_off_last_active ?? null,
+      };
       hydrated.current = true;
       applySettings(merged);
       setSettings(merged);

@@ -162,7 +162,7 @@ export const PLACE_MEMORY_KEYS = [
   "lane_folded",
 ] as const;
 /** Markers the controls write, never a control of their own. */
-export const MARKER_KEYS = ["settings_rev", "last_seen_version", "update_dismissed", "chat_default_v1", "init_dismissed", "offers_dismissed"] as const;
+export const MARKER_KEYS = ["settings_rev", "last_seen_version", "update_dismissed", "chat_default_v1", "init_dismissed", "offers_dismissed", "left_off_last_active", "left_off_shown_day"] as const;
 /** An older build's copy of host policy (settings.ts, end of the type). */
 export const MIRROR_KEYS = ["codex_permissions", "pi_project_trust", "fetch_interval_min", "term_persist_scrollback", "term_per_tab_history"] as const;
 /** The sheet's own view: the mode switch in its header. */
@@ -220,7 +220,7 @@ export const SECTIONS: readonly SectionDef[] = [
   // (group chat start design S2, the owner's pick): a person invited into a
   // beta is not an advanced user by being invited. It was Advanced and
   // Expert only from 2026-11-08.
-  { id: "beta", page: "general", tier: "beginner", label: "Beta features", keywords: ["beta", "experimental", "preview", "early access", "feature flag", "ideas", "group chat", "workspace chats", "memory"], keys: ["beta_ideas", "beta_group_chat", "beta_workspace_chats"], localOnly: true },
+  { id: "beta", page: "general", tier: "beginner", label: "Beta features", keywords: ["beta", "experimental", "preview", "early access", "feature flag", "ideas", "group chat", "workspace chats", "memory", "where you left off"], keys: ["beta_ideas", "beta_group_chat", "beta_workspace_chats", "beta_left_off"], localOnly: true },
   // ── Appearance
   { id: "zoom", page: "appearance", tier: "beginner", label: "Overall size", keywords: ["zoom", "scale", "bigger", "smaller", "text size", "magnify"], keys: ["app_zoom"] },
   { id: "ui-font", page: "appearance", tier: "advanced", label: "UI font size", keywords: ["font", "font size", "text size", "interface font", "rem"], keys: ["ui_rem"] },
