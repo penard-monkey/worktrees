@@ -228,6 +228,7 @@ export type Settings = {
   theme_dark: ThemeId;
   density: "comfortable" | "compact";
   nav_width: number; // 220–460, further capped by the viewport (see fitLayout)
+  quiet_chrome: boolean; // Tuck away secondary Places and place header details.
   nav_guides: boolean; // draw the tree plumb lines in the nav (data-guides on <html>)
   // Settings → Layout → "Show Everything Else in Workspaces" (the owner,
   // 2026-11-25: "All projects holds all projects; the workspaces show only
@@ -602,6 +603,7 @@ export const DEFAULTS: Settings = {
   theme_dark: "tokyo-night",
   density: "comfortable",
   nav_width: 300,
+  quiet_chrome: true,
   nav_guides: true,
   nav_ee_in_workspaces: true,
   done_horizon_secs: 12 * 3600,
